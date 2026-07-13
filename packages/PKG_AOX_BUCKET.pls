@@ -72,6 +72,24 @@ CREATE OR REPLACE package pkg_aox_bucket AS
         po_url           out varchar2,
         po_object_key    out varchar2
     );
+
+    -- KB global ATC (sin org): platform/atc-kb/{document_id}/{filename}
+    procedure pr_upload_atc_kb_document(
+        pi_blob         in blob,
+        pi_filename     in varchar2,
+        pi_mime_type    in varchar2,
+        pi_document_id  in number,
+        po_url          out varchar2,
+        po_object_key   out varchar2
+    );
+
+    procedure pr_delete_atc_kb_document(
+        pi_object_key in varchar2
+    );
+
+    function fn_download_atc_kb_document(
+        pi_storage_url in varchar2
+    ) return blob;
 end;
 /
 
@@ -88,6 +106,7 @@ CREATE OR REPLACE package body pkg_aox_bucket as
     c_platform_users_dir constant varchar2(30) := 'platform_users/';
     c_appointments_dir  constant varchar2(30) := 'appointments/';
     c_payments_dir      constant varchar2(30) := 'payments/';
+    c_atc_kb_dir        constant varchar2(30) := 'platform/atc-kb/';
 
     function fn_build_platform_user_asset_url(
         pi_id_platform_user in platform_user.id_platform_user%type,
@@ -741,6 +760,115 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         po_url := v_url;
         po_object_key := v_object_key;
     end pr_upload_payment_receipt;
+
+    procedure pr_upload_atc_kb_document(
+        pi_blob         in blob,
+        pi_filename     in varchar2,
+        pi_mime_type    in varchar2,
+        pi_document_id  in number,
+        po_url          out varchar2,
+        po_object_key   out varchar2
+    ) is
+        v_safe_name   varchar2(255);
+        v_object_key  varchar2(500);
+        v_url         varchar2(1000);
+        v_response    clob;
+        v_status_code number;
+        v_mime        varchar2(150);
+    begin
+        if nvl(pi_document_id, 0) <= 0 then
+            raise_application_error(-20002, 'id_document invalido.');
+        end if;
+
+        if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
+            raise_application_error(-20002, 'El documento ATC esta vacio.');
+        end if;
+
+        v_mime := lower(nvl(trim(pi_mime_type), 'application/octet-stream'));
+        v_safe_name := fn_safe_file_name(nvl(pi_filename, 'documento'));
+
+        v_object_key := c_atc_kb_dir || pi_document_id || '/' || v_safe_name;
+        v_url := rtrim(g_base_url, '/') || '/' || v_object_key;
+
+        apex_web_service.g_request_headers.delete;
+        apex_web_service.g_request_headers(1).name := 'Content-Type';
+        apex_web_service.g_request_headers(1).value := v_mime;
+
+        v_response := apex_web_service.make_rest_request(
+            p_url                  => v_url,
+            p_http_method          => 'PUT',
+            p_credential_static_id => g_credential,
+            p_body_blob            => pi_blob
+        );
+
+        v_status_code := apex_web_service.g_status_code;
+
+        if v_status_code not between 200 and 299 then
+            raise_application_error(-20001, 'Error al subir documento ATC a OCI. Codigo HTTP: ' || v_status_code);
+        end if;
+
+        po_url := v_url;
+        po_object_key := v_object_key;
+    end pr_upload_atc_kb_document;
+
+    procedure pr_delete_atc_kb_document(
+        pi_object_key in varchar2
+    ) is
+        v_url         varchar2(1000);
+        v_response    clob;
+        v_status_code number;
+    begin
+        if pi_object_key is null or trim(pi_object_key) is null then
+            return;
+        end if;
+
+        if lower(pi_object_key) like 'http%' then
+            v_url := pi_object_key;
+        else
+            v_url := rtrim(g_base_url, '/') || '/' || ltrim(pi_object_key, '/');
+        end if;
+
+        apex_web_service.g_request_headers.delete;
+
+        v_response := apex_web_service.make_rest_request(
+            p_url                  => v_url,
+            p_http_method          => 'DELETE',
+            p_credential_static_id => g_credential
+        );
+
+        v_status_code := apex_web_service.g_status_code;
+
+        if v_status_code not in (200, 204, 404) then
+            raise_application_error(-20998, 'Codigo HTTP al eliminar documento ATC en OCI: ' || v_status_code);
+        end if;
+    end pr_delete_atc_kb_document;
+
+    function fn_download_atc_kb_document(
+        pi_storage_url in varchar2
+    ) return blob is
+        v_blob        blob;
+        v_status_code number;
+    begin
+        if pi_storage_url is null or trim(pi_storage_url) is null then
+            return null;
+        end if;
+
+        apex_web_service.g_request_headers.delete;
+
+        v_blob := apex_web_service.make_rest_request_b(
+            p_url                  => pi_storage_url,
+            p_http_method          => 'GET',
+            p_credential_static_id => g_credential
+        );
+
+        v_status_code := apex_web_service.g_status_code;
+
+        if v_status_code not between 200 and 299 then
+            raise_application_error(-20001, 'Error al descargar documento ATC de OCI. Codigo HTTP: ' || v_status_code);
+        end if;
+
+        return v_blob;
+    end fn_download_atc_kb_document;
 
 end;
 /
