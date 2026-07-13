@@ -1,0 +1,4 @@
+PROMPT CREATE OR REPLACE TYPE t_slot_rec
+CREATE OR REPLACE TYPE t_slot_rec AS OBJECT (slot_time VARCHAR2(5));
+/
+

@@ -1,0 +1,4 @@
+PROMPT CREATE OR REPLACE TYPE t_slot_tab
+CREATE OR REPLACE TYPE t_slot_tab IS TABLE OF t_slot_rec;
+/
+
