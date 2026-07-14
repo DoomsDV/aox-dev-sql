@@ -121,6 +121,19 @@ PROMPT [34/35] aox_fcm_log
 PROMPT [35/35] org_entity_embedding
 @@tables\ORG_ENTITY_EMBEDDING.sql
 
+PROMPT --- Campanas push admin (Hasel_admn) ---
+PROMPT [35b] push_var_catalog
+@@tables\PUSH_VAR_CATALOG.sql
+
+PROMPT [35c] push_campaign
+@@tables\PUSH_CAMPAIGN.sql
+
+PROMPT [35d] push_campaign_var
+@@tables\PUSH_CAMPAIGN_VAR.sql
+
+PROMPT [35e] push_campaign_delivery
+@@tables\PUSH_CAMPAIGN_DELIVERY.sql
+
 PROMPT --- Suscripcion y planes (Fase 1) ---
 PROMPT [36/41] ref_plan
 @@tables\REF_PLAN.sql
@@ -270,6 +283,7 @@ PROMPT --- FASE 3: Paquetes - nucleo ---
 @@packages\PKG_AOX_BUCKET.pls
 @@packages\PKG_AOX_META_API.pls
 @@packages\PKG_AOX_FCM_API.pls
+@@packages\PKG_AOX_PUSH_CAMPAIGN.pls
 
 --------------------------------------------------------------------------------
 -- FASE 4: PAQUETES (APIs)
