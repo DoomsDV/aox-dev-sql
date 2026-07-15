@@ -5,6 +5,8 @@ CREATE TABLE service (
   name                VARCHAR2(100)               NOT NULL,
   duration_minutes    NUMBER                      NOT NULL,
   price               NUMBER                      NULL,
+  hide_public_price   NUMBER(1,0)                 DEFAULT 0 NOT NULL,
+  hidden_public_price_label VARCHAR2(80)          NULL,
   is_active           NUMBER(1,0)                 DEFAULT 1 NOT NULL,
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 )
@@ -43,6 +45,13 @@ PROMPT ALTER TABLE service ADD CONSTRAINT chk_ser_price CHECK
 ALTER TABLE service
   ADD CONSTRAINT chk_ser_price CHECK (
     price >= 0 OR price IS NULL
+  )
+/
+
+PROMPT ALTER TABLE service ADD CONSTRAINT chk_ser_hide_public_price CHECK
+ALTER TABLE service
+  ADD CONSTRAINT chk_ser_hide_public_price CHECK (
+    hide_public_price IN (0, 1)
   )
 /
 

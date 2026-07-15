@@ -106,6 +106,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
                 name,
                 duration_minutes,
                 price,
+                hide_public_price,
+                hidden_public_price_label,
                 is_active,
                 created_at,
                 requires_deposit,
@@ -122,6 +124,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             v_service_obj.put('name'            , rec.name);
             v_service_obj.put('duration_minutes', rec.duration_minutes);
             v_service_obj.put('price'           , rec.price);
+            v_service_obj.put('hide_public_price', NVL(rec.hide_public_price, 0));
+            v_service_obj.put('hidden_public_price_label', rec.hidden_public_price_label);
             v_service_obj.put('is_active'       , rec.is_active);
             v_service_obj.put('requires_deposit', rec.requires_deposit);
             v_service_obj.put('deposit_type'    , rec.deposit_type);
@@ -167,6 +171,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_name              service.name%TYPE;
         v_duration          service.duration_minutes%TYPE;
         v_price             service.price%TYPE;
+        v_hide_public_price service.hide_public_price%TYPE := 0;
+        v_hidden_public_price_label service.hidden_public_price_label%TYPE;
         v_is_active         service.is_active%TYPE;
         v_requires_deposit  service.requires_deposit%TYPE := 0;
         v_deposit_type      service.deposit_type%TYPE;
@@ -182,6 +188,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             v_duration := v_json_req.get_number('duration_minutes');
             -- Intentamos leer price y active (si no vienen, serán nulos)
             IF v_json_req.has('price') THEN v_price := v_json_req.get_number('price'); END IF;
+            IF v_json_req.has('hide_public_price') THEN
+                v_hide_public_price := v_json_req.get_number('hide_public_price');
+            ELSE
+                v_hide_public_price := 0;
+            END IF;
+            IF v_json_req.has('hidden_public_price_label') THEN
+                BEGIN
+                    v_hidden_public_price_label := NULLIF(TRIM(v_json_req.get_string('hidden_public_price_label')), '');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_hidden_public_price_label := NULL;
+                END;
+            END IF;
             IF v_json_req.has('is_active') THEN v_is_active := v_json_req.get_number('is_active'); ELSE v_is_active := 1; END IF;
             IF v_json_req.has('requires_deposit') THEN v_requires_deposit := v_json_req.get_number('requires_deposit'); END IF;
             IF v_json_req.has('deposit_type') THEN v_deposit_type := UPPER(TRIM(v_json_req.get_string('deposit_type'))); END IF;
@@ -222,6 +241,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         END IF;
 
         -- 3.1 Validaciones de Seña (si aplica)
+        IF v_hide_public_price IS NOT NULL AND v_hide_public_price NOT IN (0, 1) THEN
+            v_error := json_object_t(); v_error.put('field', 'hide_public_price'); v_error.put('message', 'hide_public_price debe ser 0 o 1.'); v_validation_errors.append(v_error);
+        END IF;
+
+        IF NVL(v_hide_public_price, 0) = 0 THEN
+            v_hidden_public_price_label := NULL;
+        ELSIF v_hidden_public_price_label IS NOT NULL AND LENGTH(v_hidden_public_price_label) > 80 THEN
+            v_error := json_object_t(); v_error.put('field', 'hidden_public_price_label'); v_error.put('message', 'El texto personalizado no puede superar 80 caracteres.'); v_validation_errors.append(v_error);
+        END IF;
+
         IF v_requires_deposit IS NOT NULL AND v_requires_deposit NOT IN (0, 1) THEN
             v_error := json_object_t(); v_error.put('field', 'requires_deposit'); v_error.put('message', 'requires_deposit debe ser 0 o 1.'); v_validation_errors.append(v_error);
         END IF;
@@ -255,6 +284,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
           name,
           duration_minutes,
           price,
+          hide_public_price,
+          hidden_public_price_label,
           is_active,
           requires_deposit,
           deposit_type,
@@ -265,6 +296,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
           trim(v_name),
           v_duration,
           v_price,
+          NVL(v_hide_public_price, 0),
+          v_hidden_public_price_label,
           v_is_active,
           NVL(v_requires_deposit, 0),
           v_deposit_type,
@@ -309,6 +342,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_name             service.name%TYPE;
         v_duration         service.duration_minutes%TYPE;
         v_price            service.price%TYPE;
+        v_hide_public_price service.hide_public_price%TYPE;
+        v_hidden_public_price_label service.hidden_public_price_label%TYPE;
         v_is_active        service.is_active%TYPE;
         v_requires_deposit service.requires_deposit%TYPE;
         v_deposit_type     service.deposit_type%TYPE;
@@ -325,6 +360,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
               name,
               duration_minutes,
               price,
+              hide_public_price,
+              hidden_public_price_label,
               is_active,
               requires_deposit,
               deposit_type,
@@ -335,6 +372,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
               v_name,
               v_duration,
               v_price,
+              v_hide_public_price,
+              v_hidden_public_price_label,
               v_is_active,
               v_requires_deposit,
               v_deposit_type,
@@ -346,15 +385,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
 
             -- 3. Construir la respuesta JSON exitosa
             v_service_obj := json_object_t();
-            v_service_obj.put('id_service'      , v_id_service);
-            v_service_obj.put('name'            , v_name);
-            v_service_obj.put('duration_minutes', v_duration);
-            v_service_obj.put('price'           , v_price);
-            v_service_obj.put('is_active'       , v_is_active);
-            v_service_obj.put('requires_deposit', v_requires_deposit);
-            v_service_obj.put('deposit_type'    , v_deposit_type);
-            v_service_obj.put('deposit_value'   , v_deposit_value);
-            v_service_obj.put('created_at'      , TO_CHAR(v_created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
+            v_service_obj.put('id_service'       , v_id_service);
+            v_service_obj.put('name'             , v_name);
+            v_service_obj.put('duration_minutes' , v_duration);
+            v_service_obj.put('price'            , v_price);
+            v_service_obj.put('hide_public_price', NVL(v_hide_public_price, 0));
+            v_service_obj.put('hidden_public_price_label', v_hidden_public_price_label);
+            v_service_obj.put('is_active'        , v_is_active);
+            v_service_obj.put('requires_deposit' , v_requires_deposit);
+            v_service_obj.put('deposit_type'     , v_deposit_type);
+            v_service_obj.put('deposit_value'    , v_deposit_value);
+            v_service_obj.put('created_at'       , TO_CHAR(v_created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
 
             po_status_code := pkg_aox_util.c_success_ok_code; -- OK
             v_response_json.put('status', 'success');
@@ -393,6 +434,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_name              service.name%type;
         v_duration          service.duration_minutes%type;
         v_price             service.price%type;
+        v_hide_public_price service.hide_public_price%type;
+        v_hidden_public_price_label service.hidden_public_price_label%type;
+        v_has_hidden_label  pls_integer := 0;
         v_is_active         service.is_active%type;
         v_requires_deposit  service.requires_deposit%TYPE;
         v_deposit_type      service.deposit_type%TYPE;
@@ -407,6 +451,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             v_name     := v_json_req.get_string('name');
             v_duration := v_json_req.get_number('duration_minutes');
             IF v_json_req.has('price') THEN v_price := v_json_req.get_number('price'); END IF;
+            IF v_json_req.has('hide_public_price') THEN
+                v_hide_public_price := v_json_req.get_number('hide_public_price');
+            ELSE
+                v_hide_public_price := NULL;
+            END IF;
+            IF v_json_req.has('hidden_public_price_label') THEN
+                v_has_hidden_label := 1;
+                BEGIN
+                    v_hidden_public_price_label := NULLIF(TRIM(v_json_req.get_string('hidden_public_price_label')), '');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_hidden_public_price_label := NULL;
+                END;
+            END IF;
             IF v_json_req.has('is_active') THEN v_is_active := v_json_req.get_number('is_active'); END IF;
             IF v_json_req.has('requires_deposit') THEN v_requires_deposit := v_json_req.get_number('requires_deposit'); END IF;
             IF v_json_req.has('deposit_type') THEN v_deposit_type := UPPER(TRIM(v_json_req.get_string('deposit_type'))); END IF;
@@ -446,6 +504,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         END IF;
 
         -- Validaciones de Seña (si aplica)
+        IF v_hide_public_price IS NOT NULL AND v_hide_public_price NOT IN (0, 1) THEN
+            v_error := json_object_t(); v_error.put('field', 'hide_public_price'); v_error.put('message', 'hide_public_price debe ser 0 o 1.'); v_validation_errors.append(v_error);
+        END IF;
+
+        IF v_hide_public_price IS NOT NULL AND v_hide_public_price = 0 THEN
+            v_hidden_public_price_label := NULL;
+            v_has_hidden_label := 1;
+        ELSIF v_hidden_public_price_label IS NOT NULL AND LENGTH(v_hidden_public_price_label) > 80 THEN
+            v_error := json_object_t(); v_error.put('field', 'hidden_public_price_label'); v_error.put('message', 'El texto personalizado no puede superar 80 caracteres.'); v_validation_errors.append(v_error);
+        END IF;
+
         IF v_requires_deposit IS NOT NULL AND v_requires_deposit NOT IN (0, 1) THEN
             v_error := json_object_t(); v_error.put('field', 'requires_deposit'); v_error.put('message', 'requires_deposit debe ser 0 o 1.'); v_validation_errors.append(v_error);
         END IF;
@@ -475,13 +544,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
 
         -- 4. Ejecutar el UPDATE
         update service
-        set name             = trim(v_name),
-            duration_minutes = v_duration,
-            price            = v_price,
-            is_active        = nvl(v_is_active, is_active), -- si no envían is_active, conserva el actual
-            requires_deposit = NVL(v_requires_deposit, requires_deposit),
-            deposit_type     = v_deposit_type,
-            deposit_value    = v_deposit_value
+        set name              = trim(v_name),
+            duration_minutes  = v_duration,
+            price             = v_price,
+            hide_public_price = NVL(v_hide_public_price, hide_public_price),
+            hidden_public_price_label = CASE
+                WHEN v_has_hidden_label = 1 THEN v_hidden_public_price_label
+                ELSE hidden_public_price_label
+            END,
+            is_active         = nvl(v_is_active, is_active), -- si no envían is_active, conserva el actual
+            requires_deposit  = NVL(v_requires_deposit, requires_deposit),
+            deposit_type      = v_deposit_type,
+            deposit_value     = v_deposit_value
         where id_service = pi_service_id
           and org_id_organization = v_org_id; -- ¡Seguridad!
 
@@ -621,20 +695,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
 
         -- 2. Consultar SOLO los servicios activos de la organización
         FOR rec IN (
-            SELECT id_service, name, duration_minutes, price, requires_deposit, deposit_type, deposit_value
+            SELECT id_service, name, duration_minutes, price, hide_public_price,
+                   requires_deposit, deposit_type, deposit_value
             FROM service
             WHERE org_id_organization = v_org_id
               AND is_active = 1
             ORDER BY name ASC
         ) LOOP
             v_service_obj := json_object_t();
-            v_service_obj.put('id_service'      , rec.id_service);
-            v_service_obj.put('name'            , rec.name);
-            v_service_obj.put('duration_minutes', rec.duration_minutes);
-            v_service_obj.put('price'           , rec.price);
-            v_service_obj.put('requires_deposit', rec.requires_deposit);
-            v_service_obj.put('deposit_type'    , rec.deposit_type);
-            v_service_obj.put('deposit_value'   , rec.deposit_value);
+            v_service_obj.put('id_service'       , rec.id_service);
+            v_service_obj.put('name'             , rec.name);
+            v_service_obj.put('duration_minutes' , rec.duration_minutes);
+            v_service_obj.put('price'            , rec.price);
+            v_service_obj.put('hide_public_price', NVL(rec.hide_public_price, 0));
+            v_service_obj.put('requires_deposit' , rec.requires_deposit);
+            v_service_obj.put('deposit_type'     , rec.deposit_type);
+            v_service_obj.put('deposit_value'    , rec.deposit_value);
 
             v_services_arr.append(v_service_obj);
         END LOOP;

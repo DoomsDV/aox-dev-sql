@@ -10,6 +10,7 @@ CREATE TABLE workspace_setting (
   logo_mime_type          VARCHAR2(100)  NULL,
   time_format             VARCHAR2(10)   DEFAULT '24H' NULL,
   theme_pref              VARCHAR2(20)   DEFAULT 'light' NULL,
+  hidden_public_price_label VARCHAR2(80) DEFAULT 'A evaluar' NULL,
   updated_at              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP NULL,
   unanswered_alert_action VARCHAR2(20)   DEFAULT 'KEEP' NULL,
   rsi_id_slot_interval    NUMBER         NULL,

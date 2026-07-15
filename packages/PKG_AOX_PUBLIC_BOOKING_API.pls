@@ -472,21 +472,30 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 s.name,
                 s.duration_minutes,
                 s.price,
+                s.hide_public_price,
+                s.hidden_public_price_label,
                 s.requires_deposit,
                 s.deposit_type,
-                s.deposit_value
+                s.deposit_value,
+                NVL(
+                    NULLIF(TRIM(s.hidden_public_price_label), ''),
+                    NVL(NULLIF(TRIM(ws.hidden_public_price_label), ''), 'A evaluar')
+                ) AS resolved_hidden_price_label
             FROM service s
             JOIN professional_service ps ON s.id_service = ps.ser_id_service
+            LEFT JOIN workspace_setting ws ON ws.org_id_organization = s.org_id_organization
             WHERE ps.pro_id_professional = v_pro_id AND s.is_active = 1
         ) LOOP
             v_srv_obj := json_object_t();
-            v_srv_obj.put('id_service'      , rec.id_service);
-            v_srv_obj.put('name'            , rec.name);
-            v_srv_obj.put('duration_minutes', rec.duration_minutes);
-            v_srv_obj.put('price'           , rec.price);
-            v_srv_obj.put('requires_deposit', rec.requires_deposit);
-            v_srv_obj.put('deposit_type'    , rec.deposit_type);
-            v_srv_obj.put('deposit_value'   , rec.deposit_value);
+            v_srv_obj.put('id_service'       , rec.id_service);
+            v_srv_obj.put('name'             , rec.name);
+            v_srv_obj.put('duration_minutes' , rec.duration_minutes);
+            v_srv_obj.put('price'            , rec.price);
+            v_srv_obj.put('hide_public_price', NVL(rec.hide_public_price, 0));
+            v_srv_obj.put('hidden_price_label', rec.resolved_hidden_price_label);
+            v_srv_obj.put('requires_deposit' , rec.requires_deposit);
+            v_srv_obj.put('deposit_type'     , rec.deposit_type);
+            v_srv_obj.put('deposit_value'    , rec.deposit_value);
             IF NVL(rec.requires_deposit, 0) = 1 THEN
                 BEGIN
                     v_srv_obj.put(
@@ -664,23 +673,33 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                     s.name,
                     s.duration_minutes,
                     s.price,
+                    s.hide_public_price,
+                    s.hidden_public_price_label,
                     s.requires_deposit,
                     s.deposit_type,
-                    s.deposit_value
+                    s.deposit_value,
+                    NVL(
+                        NULLIF(TRIM(s.hidden_public_price_label), ''),
+                        NVL(NULLIF(TRIM(ws.hidden_public_price_label), ''), 'A evaluar')
+                    ) AS resolved_hidden_price_label
                 FROM service s
                 JOIN professional_service ps ON s.id_service = ps.ser_id_service
+                LEFT JOIN workspace_setting ws
+                    ON ws.org_id_organization = s.org_id_organization
                 WHERE ps.pro_id_professional = loc_rec.id_professional
                   AND s.is_active = 1
                 ORDER BY s.name
             ) LOOP
                 v_srv_obj := json_object_t();
-                v_srv_obj.put('id_service'      , srv_rec.id_service);
-                v_srv_obj.put('name'            , srv_rec.name);
-                v_srv_obj.put('duration_minutes', srv_rec.duration_minutes);
-                v_srv_obj.put('price'           , srv_rec.price);
-                v_srv_obj.put('requires_deposit', srv_rec.requires_deposit);
-                v_srv_obj.put('deposit_type'    , srv_rec.deposit_type);
-                v_srv_obj.put('deposit_value'   , srv_rec.deposit_value);
+                v_srv_obj.put('id_service'       , srv_rec.id_service);
+                v_srv_obj.put('name'             , srv_rec.name);
+                v_srv_obj.put('duration_minutes' , srv_rec.duration_minutes);
+                v_srv_obj.put('price'            , srv_rec.price);
+                v_srv_obj.put('hide_public_price', NVL(srv_rec.hide_public_price, 0));
+                v_srv_obj.put('hidden_price_label', srv_rec.resolved_hidden_price_label);
+                v_srv_obj.put('requires_deposit' , srv_rec.requires_deposit);
+                v_srv_obj.put('deposit_type'     , srv_rec.deposit_type);
+                v_srv_obj.put('deposit_value'    , srv_rec.deposit_value);
                 IF NVL(srv_rec.requires_deposit, 0) = 1 THEN
                     BEGIN
                         v_srv_obj.put(

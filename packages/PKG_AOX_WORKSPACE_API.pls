@@ -223,6 +223,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_logo_url                workspace_setting.logo_url%type;
         v_time_format             workspace_setting.time_format%type;
         v_theme_pref              workspace_setting.theme_pref%type;
+        v_hidden_public_price_label workspace_setting.hidden_public_price_label%type;
         v_unanswered_alert_action workspace_setting.unanswered_alert_action%TYPE;
         v_rsi_id_slot_interval    workspace_setting.rsi_id_slot_interval%type;
         v_rh_id_reminder_hours    workspace_setting.rh_id_reminder_hours%type;
@@ -252,6 +253,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             ws.logo_url,
             nvl(ws.time_format, '24H'),
             nvl(ws.theme_pref, 'light'),
+            nvl(nullif(trim(ws.hidden_public_price_label), ''), 'A evaluar'),
             nvl(ws.unanswered_alert_action, 'KEEP'),
             ws.rsi_id_slot_interval,
             ws.rh_id_reminder_hours,
@@ -268,6 +270,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             v_logo_url,
             v_time_format,
             v_theme_pref,
+            v_hidden_public_price_label,
             v_unanswered_alert_action,
             v_rsi_id_slot_interval,
             v_rh_id_reminder_hours,
@@ -305,6 +308,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_org_obj.put('logo_url'                , NVL(v_logo_url, ''));
         v_org_obj.put('time_format'             , v_time_format);
         v_org_obj.put('theme_pref'              , v_theme_pref);
+        v_org_obj.put('hidden_public_price_label', v_hidden_public_price_label);
         v_org_obj.put('unanswered_alert_action' , v_unanswered_alert_action);
         v_org_obj.put('rsi_id_slot_interval'    , v_rsi_id_slot_interval);
         v_org_obj.put('rh_id_reminder_hours'    , v_rh_id_reminder_hours);
@@ -354,6 +358,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_public_whatsapp               workspace_setting.public_whatsapp%type;
         v_time_format                   workspace_setting.time_format%type;
         v_theme_pref                    workspace_setting.theme_pref%type;
+        v_hidden_public_price_label     workspace_setting.hidden_public_price_label%type;
         v_unanswered_alert_action       workspace_setting.unanswered_alert_action%type;
         v_rsi_id_slot_interval          workspace_setting.rsi_id_slot_interval%type;
         v_rh_id_reminder_hours          workspace_setting.rh_id_reminder_hours%type;
@@ -376,6 +381,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_has_timezone                  pls_integer := 0;
         v_has_time_format               pls_integer := 0;
         v_has_theme_pref                pls_integer := 0;
+        v_has_hidden_public_price_label pls_integer := 0;
         v_has_rsi_id_slot_interval      pls_integer := 0;
         v_has_rh_id_reminder_hours      pls_integer := 0;
         v_has_cwh_id_cancel_wait        pls_integer := 0;
@@ -423,6 +429,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         if v_json_req.has('theme_pref') then
             v_has_theme_pref := 1;
         end if;
+        if v_json_req.has('hidden_public_price_label') then
+            v_has_hidden_public_price_label := 1;
+        end if;
         if v_json_req.has('unanswered_alert_action') then
             v_has_unanswered_alert_action := 1;
         end if;
@@ -445,6 +454,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_public_whatsapp         := fn_get_optional_string(v_json_req      , 'public_whatsapp');
         v_time_format             := fn_get_optional_string(v_json_req      , 'time_format');
         v_theme_pref              := fn_get_optional_string(v_json_req      , 'theme_pref');
+        v_hidden_public_price_label := fn_get_optional_string(v_json_req, 'hidden_public_price_label');
         v_unanswered_alert_action := fn_get_optional_string(v_json_req      , 'unanswered_alert_action');
         v_rsi_id_slot_interval    := fn_get_optional_number(v_json_req      , 'rsi_id_slot_interval');
         v_rh_id_reminder_hours    := fn_get_optional_number(v_json_req      , 'rh_id_reminder_hours');
@@ -486,6 +496,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             end if;
         end if;
 
+        if v_has_hidden_public_price_label = 1 then
+            if v_hidden_public_price_label is null then
+                v_hidden_public_price_label := 'A evaluar';
+            elsif length(v_hidden_public_price_label) > 80 then
+                raise_application_error(-20005, 'El texto para precios ocultos no puede superar 80 caracteres.');
+            end if;
+        end if;
+
         if v_has_unanswered_alert_action = 1 then
             if v_unanswered_alert_action is null then
                 raise_application_error(-20005, 'La acción para alertas no contestadas es obligatoria.');
@@ -516,7 +534,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         end if;
 
         if (v_has_name + v_has_profile_slug + v_has_description + v_has_public_whatsapp +
-           v_has_time_format + v_has_theme_pref + v_has_unanswered_alert_action +
+           v_has_time_format + v_has_theme_pref + v_has_hidden_public_price_label +
+           v_has_unanswered_alert_action +
            v_has_rsi_id_slot_interval + v_has_rh_id_reminder_hours + v_has_cwh_id_cancel_wait +
            v_has_notify_all_professionals) = 0
            and v_logo_base64 is null then
@@ -624,6 +643,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 public_whatsapp = case when v_has_public_whatsapp = 1 then v_public_whatsapp else ws.public_whatsapp end,
                 time_format     = case when v_has_time_format     = 1 then v_time_format else ws.time_format end,
                 theme_pref      = case when v_has_theme_pref      = 1 then v_theme_pref else ws.theme_pref end,
+                hidden_public_price_label = case
+                    when v_has_hidden_public_price_label = 1 then v_hidden_public_price_label
+                    else ws.hidden_public_price_label
+                end,
                 unanswered_alert_action = case when v_has_unanswered_alert_action = 1 then v_unanswered_alert_action else ws.unanswered_alert_action end,
                 rsi_id_slot_interval = case when v_has_rsi_id_slot_interval = 1 then v_rsi_id_slot_interval else ws.rsi_id_slot_interval end,
                 rh_id_reminder_hours = case when v_has_rh_id_reminder_hours = 1 then v_rh_id_reminder_hours else ws.rh_id_reminder_hours end,
@@ -637,6 +660,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 public_whatsapp,
                 time_format,
                 theme_pref,
+                hidden_public_price_label,
                 unanswered_alert_action,
                 rsi_id_slot_interval,
                 rh_id_reminder_hours,
@@ -649,6 +673,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 v_public_whatsapp,
                 NVL(v_time_format, '24H'),
                 NVL(v_theme_pref, 'light'),
+                NVL(v_hidden_public_price_label, 'A evaluar'),
                 NVL(v_unanswered_alert_action, 'KEEP'),
                 NVL(v_rsi_id_slot_interval, (
                     SELECT id_slot_interval FROM ref_booking_slot_interval WHERE minutes_value = 30 AND is_active = 1 FETCH FIRST 1 ROW ONLY
