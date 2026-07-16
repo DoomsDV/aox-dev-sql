@@ -31,8 +31,18 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
         po_response_body OUT CLOB
     );
 
-    -- POST /workspace/subscription/change-plan  (cambio inmediato sin pago; solo founders/exentos)
+    -- POST /workspace/subscription/change-plan
+    -- Downgrade: agenda pending_plan hasta current_period_end (sin credito de plan).
+    -- Cancelar agenda: plan_code = plan actual. Upgrade de pago: usar activate.
     PROCEDURE pr_change_plan(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    -- POST /workspace/subscription/addon/cancel  (inmediato + credito por dias no usados)
+    PROCEDURE pr_cancel_storage_addon(
         pi_auth_header   IN  VARCHAR2,
         pi_body          IN  CLOB,
         po_status_code   OUT NUMBER,
@@ -43,6 +53,13 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
     PROCEDURE pr_get_invoice_by_hash(
         pi_auth_header   IN  VARCHAR2,
         pi_hash          IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    -- GET /workspace/subscription/invoices  (historial de facturas de la org)
+    PROCEDURE pr_list_invoices(
+        pi_auth_header   IN  VARCHAR2,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
@@ -474,10 +491,280 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
     END pr_sync_cards;
 
+    --------------------------------------------------------------------------
+    -- Facturacion consolidada / prorrateo
+    --------------------------------------------------------------------------
+    PROCEDURE pr_get_period_bounds(
+        pi_org_id       IN  NUMBER,
+        po_period_start OUT TIMESTAMP WITH TIME ZONE,
+        po_period_end   OUT TIMESTAMP WITH TIME ZONE
+    ) IS
+    BEGIN
+        SELECT current_period_start, current_period_end
+          INTO po_period_start, po_period_end
+          FROM org_subscription
+         WHERE org_id_organization = pi_org_id;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            po_period_start := NULL;
+            po_period_end   := NULL;
+    END pr_get_period_bounds;
+
+    FUNCTION fn_calendar_days_between(
+        pi_from IN TIMESTAMP WITH TIME ZONE,
+        pi_to   IN TIMESTAMP WITH TIME ZONE
+    ) RETURN NUMBER IS
+    BEGIN
+        IF pi_from IS NULL OR pi_to IS NULL THEN
+            RETURN 0;
+        END IF;
+        RETURN GREATEST(0, TRUNC(CAST(pi_to AS DATE)) - TRUNC(CAST(pi_from AS DATE)));
+    END fn_calendar_days_between;
+
+    FUNCTION fn_prorate_amount(
+        pi_full_amount    IN NUMBER,
+        pi_days_remaining IN NUMBER,
+        pi_period_days    IN NUMBER,
+        pi_enforce_min    IN NUMBER DEFAULT 1
+    ) RETURN NUMBER IS
+        v_period NUMBER := GREATEST(1, NVL(pi_period_days, 1));
+        v_days   NUMBER := GREATEST(0, NVL(pi_days_remaining, 0));
+        v_amt    NUMBER;
+    BEGIN
+        IF v_days <= 0 OR NVL(pi_full_amount, 0) <= 0 THEN
+            RETURN 0;
+        END IF;
+        v_amt := CEIL(pi_full_amount * v_days / v_period);
+        -- Pagopar exige minimo 1000 Gs en cobros; creditos no aplican piso.
+        IF NVL(pi_enforce_min, 1) = 1 AND v_amt > 0 AND v_amt < 1000 THEN
+            v_amt := 1000;
+        END IF;
+        RETURN v_amt;
+    END fn_prorate_amount;
+
+    /** Credito por tiempo no usado de cualquier item mensual (plan o addon). */
+    FUNCTION fn_unused_credit_amount(
+        pi_org_id       IN NUMBER,
+        pi_full_monthly IN NUMBER
+    ) RETURN NUMBER IS
+        v_start TIMESTAMP WITH TIME ZONE;
+        v_end   TIMESTAMP WITH TIME ZONE;
+        v_days  NUMBER;
+        v_per   NUMBER;
+    BEGIN
+        IF NVL(pi_full_monthly, 0) <= 0 THEN
+            RETURN 0;
+        END IF;
+        pr_get_period_bounds(pi_org_id, v_start, v_end);
+        IF v_end IS NULL OR v_end <= systimestamp THEN
+            RETURN 0;
+        END IF;
+        v_days := fn_calendar_days_between(systimestamp, v_end);
+        v_per  := fn_calendar_days_between(NVL(v_start, ADD_MONTHS(v_end, -1)), v_end);
+        IF v_per < 1 THEN
+            v_per := 30;
+        END IF;
+        RETURN fn_prorate_amount(pi_full_monthly, v_days, v_per, 0);
+    END fn_unused_credit_amount;
+
+    PROCEDURE pr_grant_credit(
+        pi_org_id    IN NUMBER,
+        pi_amount    IN NUMBER,
+        pi_reason    IN VARCHAR2,
+        pi_ref_code  IN VARCHAR2 DEFAULT NULL,
+        pi_invoice_id IN NUMBER DEFAULT NULL
+    ) IS
+        v_bal NUMBER;
+        v_amt NUMBER := GREATEST(0, ROUND(NVL(pi_amount, 0)));
+    BEGIN
+        IF v_amt <= 0 THEN
+            RETURN;
+        END IF;
+        UPDATE /*+ no_parallel */ org_subscription
+           SET account_balance = NVL(account_balance, 0) + v_amt,
+               updated_at      = systimestamp
+         WHERE org_id_organization = pi_org_id
+        RETURNING account_balance INTO v_bal;
+
+        INSERT /*+ no_parallel */ INTO org_billing_credit_ledger (
+            org_id_organization, delta_amount, balance_after, reason, invoice_id, ref_code
+        ) VALUES (
+            pi_org_id, v_amt, v_bal, UPPER(TRIM(pi_reason)), pi_invoice_id, pi_ref_code
+        );
+    END pr_grant_credit;
+
+    PROCEDURE pr_apply_credit_to_amount(
+        pi_org_id         IN  NUMBER,
+        pi_gross          IN  NUMBER,
+        po_net            OUT NUMBER,
+        po_credit_applied OUT NUMBER
+    ) IS
+        v_bal NUMBER;
+        v_gross NUMBER := GREATEST(0, ROUND(NVL(pi_gross, 0)));
+    BEGIN
+        SELECT NVL(account_balance, 0)
+          INTO v_bal
+          FROM org_subscription
+         WHERE org_id_organization = pi_org_id;
+
+        po_credit_applied := LEAST(v_bal, v_gross);
+        po_net            := v_gross - po_credit_applied;
+    END pr_apply_credit_to_amount;
+
+    PROCEDURE pr_consume_credit(
+        pi_org_id         IN NUMBER,
+        pi_credit_applied IN NUMBER,
+        pi_invoice_id     IN NUMBER
+    ) IS
+        v_bal NUMBER;
+        v_amt NUMBER := GREATEST(0, ROUND(NVL(pi_credit_applied, 0)));
+        v_already NUMBER;
+    BEGIN
+        IF v_amt <= 0 THEN
+            RETURN;
+        END IF;
+
+        -- Idempotencia: no consumir dos veces la misma factura.
+        SELECT COUNT(*)
+          INTO v_already
+          FROM org_billing_credit_ledger
+         WHERE invoice_id = pi_invoice_id
+           AND reason = 'APPLY_INVOICE';
+        IF v_already > 0 THEN
+            RETURN;
+        END IF;
+
+        UPDATE /*+ no_parallel */ org_subscription
+           SET account_balance = GREATEST(0, NVL(account_balance, 0) - v_amt),
+               updated_at      = systimestamp
+         WHERE org_id_organization = pi_org_id
+        RETURNING account_balance INTO v_bal;
+
+        INSERT /*+ no_parallel */ INTO org_billing_credit_ledger (
+            org_id_organization, delta_amount, balance_after, reason, invoice_id, ref_code
+        ) VALUES (
+            pi_org_id, -v_amt, v_bal, 'APPLY_INVOICE', pi_invoice_id, NULL
+        );
+    END pr_consume_credit;
+
+    PROCEDURE pr_apply_due_pending_plan(pi_org_id IN NUMBER) IS
+        v_pending_id NUMBER;
+        v_pending_at TIMESTAMP WITH TIME ZONE;
+        v_period_end TIMESTAMP WITH TIME ZONE;
+    BEGIN
+        SELECT pending_pln_id_plan, pending_plan_change_at, current_period_end
+          INTO v_pending_id, v_pending_at, v_period_end
+          FROM org_subscription
+         WHERE org_id_organization = pi_org_id;
+
+        IF v_pending_id IS NULL THEN
+            RETURN;
+        END IF;
+
+        IF (v_pending_at IS NOT NULL AND v_pending_at <= systimestamp)
+           OR (v_period_end IS NOT NULL AND v_period_end <= systimestamp) THEN
+            UPDATE /*+ no_parallel */ org_subscription
+               SET pln_id_plan           = v_pending_id,
+                   pending_pln_id_plan   = NULL,
+                   pending_plan_change_at = NULL,
+                   updated_at            = systimestamp
+             WHERE org_id_organization = pi_org_id;
+            pr_refresh_storage_limit(pi_org_id);
+        END IF;
+    END pr_apply_due_pending_plan;
+
+    PROCEDURE pr_fulfill_paid_subscription(
+        pi_org_id  IN NUMBER,
+        pi_plan_id IN NUMBER
+    ) IS
+    BEGIN
+        UPDATE /*+ no_parallel */ org_subscription
+           SET pln_id_plan           = pi_plan_id,
+               status                = 'ACTIVE',
+               current_period_start  = systimestamp,
+               current_period_end    = ADD_MONTHS(GREATEST(NVL(current_period_end, systimestamp), systimestamp), 1),
+               grace_ends_at         = NULL,
+               charge_retry_count    = 0,
+               last_charge_at        = systimestamp,
+               pending_pln_id_plan   = NULL,
+               pending_plan_change_at = NULL,
+               updated_at            = systimestamp
+         WHERE org_id_organization = pi_org_id;
+        pr_refresh_storage_limit(pi_org_id);
+    END pr_fulfill_paid_subscription;
+
+    PROCEDURE pr_fulfill_paid_addon(
+        pi_org_id   IN NUMBER,
+        pi_addon_id IN NUMBER
+    ) IS
+    BEGIN
+        IF pi_addon_id IS NULL THEN
+            RETURN;
+        END IF;
+        MERGE /*+ no_parallel */ INTO org_storage_addon t
+        USING (SELECT pi_org_id AS org_id, pi_addon_id AS addon_id FROM dual) s
+           ON (t.org_id_organization = s.org_id AND t.sad_id_storage_addon = s.addon_id AND t.status = 'ACTIVE')
+        WHEN MATCHED THEN
+            UPDATE SET t.quantity = t.quantity + 1
+        WHEN NOT MATCHED THEN
+            INSERT (org_id_organization, sad_id_storage_addon, quantity, status)
+            VALUES (s.org_id, s.addon_id, 1, 'ACTIVE');
+        pr_refresh_storage_limit(pi_org_id);
+    END pr_fulfill_paid_addon;
+
+    FUNCTION fn_addons_monthly_total(pi_org_id IN NUMBER) RETURN NUMBER IS
+        v_total NUMBER;
+    BEGIN
+        SELECT NVL(SUM(r.price_amount * o.quantity), 0)
+          INTO v_total
+          FROM org_storage_addon o
+          JOIN ref_storage_addon r ON r.id_storage_addon = o.sad_id_storage_addon
+         WHERE o.org_id_organization = pi_org_id
+           AND o.status = 'ACTIVE'
+           AND r.is_active = 1;
+        RETURN v_total;
+    END fn_addons_monthly_total;
+
+    FUNCTION fn_addons_desc_suffix(pi_org_id IN NUMBER) RETURN VARCHAR2 IS
+        v_parts VARCHAR2(500);
+    BEGIN
+        SELECT LISTAGG(r.name || CASE WHEN o.quantity > 1 THEN ' x' || o.quantity ELSE '' END, ' + ')
+                 WITHIN GROUP (ORDER BY r.sort_order, r.id_storage_addon)
+          INTO v_parts
+          FROM org_storage_addon o
+          JOIN ref_storage_addon r ON r.id_storage_addon = o.sad_id_storage_addon
+         WHERE o.org_id_organization = pi_org_id
+           AND o.status = 'ACTIVE';
+        RETURN v_parts;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN NULL;
+    END fn_addons_desc_suffix;
+
+    PROCEDURE pr_activate_addon_free(
+        pi_org_id   IN NUMBER,
+        pi_addon_id IN NUMBER
+    ) IS
+    BEGIN
+        MERGE /*+ no_parallel */ INTO org_storage_addon t
+        USING (SELECT pi_org_id AS org_id, pi_addon_id AS addon_id FROM dual) s
+           ON (t.org_id_organization = s.org_id AND t.sad_id_storage_addon = s.addon_id AND t.status = 'ACTIVE')
+        WHEN MATCHED THEN
+            UPDATE SET t.quantity = t.quantity + 1
+        WHEN NOT MATCHED THEN
+            INSERT (org_id_organization, sad_id_storage_addon, quantity, status)
+            VALUES (s.org_id, s.addon_id, 1, 'ACTIVE');
+        pr_refresh_storage_limit(pi_org_id);
+        COMMIT;
+    END pr_activate_addon_free;
+
     /**
-     * Cobro recurrente de un target (plan o addon) con la tarjeta default:
-     * crea invoice PENDING -> iniciar-transaccion -> listar-tarjeta -> pagar.
-     * El estado PAID lo aplica el webhook. Hace COMMIT del invoice+hash antes de pagar.
+     * Cobro recurrente de un target con la tarjeta default:
+     *   PLAN            -> solo precio del plan (activacion / upgrade)
+     *   STORAGE_ADDON   -> prorrateo hasta current_period_end
+     *   CONSOLIDATED    -> plan + addons ACTIVE (ciclo de renovacion)
+     * Aplica account_balance (gross/credit_applied/amount neto).
+     * Si net=0: PAID inmediato sin Pagopar. Si net>0: webhook confirma PAID.
      */
     PROCEDURE pr_charge_target(
         pi_org_id      IN  NUMBER,
@@ -491,90 +778,190 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_private_key  VARCHAR2(500);
         v_sub_id       org_subscription.id_subscription%TYPE;
         v_plan_id      ref_plan.id_plan%TYPE;
-        v_amount       NUMBER;
-        v_currency     VARCHAR2(3);
+        v_addon_id     ref_storage_addon.id_storage_addon%TYPE;
+        v_full_amount  NUMBER;
+        v_gross        NUMBER := 0;
+        v_net          NUMBER := 0;
+        v_credit       NUMBER := 0;
+        v_pay_amount   NUMBER;
+        v_currency     VARCHAR2(3) := 'PYG';
         v_item_name    VARCHAR2(150);
         v_desc         VARCHAR2(255);
+        v_invoice_type VARCHAR2(20);
         v_period_start TIMESTAMP WITH TIME ZONE := systimestamp;
         v_period_end   TIMESTAMP WITH TIME ZONE := ADD_MONTHS(systimestamp, 1);
+        v_sub_start    TIMESTAMP WITH TIME ZONE;
+        v_sub_end      TIMESTAMP WITH TIME ZONE;
+        v_days_rem     NUMBER;
+        v_period_days  NUMBER;
+        v_addon_total  NUMBER;
+        v_addon_suffix VARCHAR2(500);
         v_expires_at   TIMESTAMP WITH TIME ZONE := systimestamp + NUMTODSINTERVAL(NVL(TO_NUMBER(fn_get_parameter('SUBSCRIPTION_PAYMENT_PENDING_MINUTES')), 1440), 'MINUTE');
         v_founder      NUMBER(1,0) := 0;
         v_card_id      org_payment_card.pagopar_card_id%TYPE;
         v_alias_token  VARCHAR2(256);
         v_pay_raw      CLOB;
         v_pay_resp     json_object_t;
+        v_target       VARCHAR2(20) := UPPER(TRIM(pi_target_type));
     BEGIN
-        pr_get_platform_keys(v_public_key, v_private_key);
+        SELECT id_subscription, NVL(is_founder, 0)
+          INTO v_sub_id, v_founder
+          FROM org_subscription
+         WHERE org_id_organization = pi_org_id;
 
+        pr_get_period_bounds(pi_org_id, v_sub_start, v_sub_end);
+
+        IF v_target = 'PLAN' THEN
+            BEGIN
+                SELECT id_plan, price_amount, currency, name
+                  INTO v_plan_id, v_gross, v_currency, v_item_name
+                  FROM ref_plan WHERE code = pi_plan_code AND is_active = 1;
+            EXCEPTION WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Plan no valido.');
+            END;
+
+            IF v_founder = 1 AND pi_plan_code = c_plan_premium THEN
+                v_gross := ROUND(v_gross * 0.5);
+                v_desc := 'Suscripcion ' || v_item_name || ' fundador 50% (1 mes)';
+            ELSE
+                v_desc := 'Suscripcion ' || v_item_name || ' (1 mes)';
+            END IF;
+            v_invoice_type := 'SUBSCRIPTION';
+
+        ELSIF v_target = 'CONSOLIDATED' THEN
+            BEGIN
+                SELECT id_plan, price_amount, currency, name
+                  INTO v_plan_id, v_gross, v_currency, v_item_name
+                  FROM ref_plan WHERE code = pi_plan_code AND is_active = 1;
+            EXCEPTION WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Plan no valido.');
+            END;
+
+            IF v_founder = 1 AND pi_plan_code = c_plan_premium THEN
+                v_gross := ROUND(v_gross * 0.5);
+            END IF;
+
+            v_addon_total  := fn_addons_monthly_total(pi_org_id);
+            v_addon_suffix := fn_addons_desc_suffix(pi_org_id);
+            v_gross        := NVL(v_gross, 0) + NVL(v_addon_total, 0);
+
+            IF v_addon_suffix IS NOT NULL THEN
+                v_desc := v_item_name || ' + ' || v_addon_suffix || ' (1 mes)';
+            ELSE
+                v_desc := 'Suscripcion ' || v_item_name || ' (1 mes)';
+            END IF;
+
+            IF v_sub_end IS NOT NULL THEN
+                v_period_start := NVL(v_sub_end, systimestamp);
+                v_period_end   := ADD_MONTHS(v_period_start, 1);
+            END IF;
+            v_invoice_type := 'SUBSCRIPTION';
+
+        ELSIF v_target = 'STORAGE_ADDON' THEN
+            IF pkg_aox_subscription_api.fn_org_has_feature(pi_org_id, 'APPOINTMENT_HISTORY') = 0 THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Los paquetes de almacenamiento solo estan disponibles en el plan Premium.');
+            END IF;
+            BEGIN
+                SELECT id_storage_addon, price_amount, currency, name
+                  INTO v_addon_id, v_full_amount, v_currency, v_item_name
+                  FROM ref_storage_addon WHERE code = pi_addon_code AND is_active = 1;
+            EXCEPTION WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Paquete de almacenamiento no valido.');
+            END;
+
+            IF v_sub_end IS NOT NULL AND v_sub_end > systimestamp THEN
+                v_days_rem    := fn_calendar_days_between(systimestamp, v_sub_end);
+                v_period_days := fn_calendar_days_between(
+                    NVL(v_sub_start, ADD_MONTHS(v_sub_end, -1)),
+                    v_sub_end
+                );
+                IF v_period_days < 1 THEN
+                    v_period_days := 30;
+                END IF;
+                v_gross        := fn_prorate_amount(v_full_amount, v_days_rem, v_period_days, 1);
+                v_period_start := systimestamp;
+                v_period_end   := v_sub_end;
+                IF v_days_rem <= 0 THEN
+                    v_desc := v_item_name || ' (sin cobro; entra en la renovacion)';
+                ELSE
+                    v_desc := v_item_name || ' (prorrateo ' || v_days_rem || ' dia(s))';
+                END IF;
+            ELSE
+                v_gross        := v_full_amount;
+                v_period_start := systimestamp;
+                v_period_end   := ADD_MONTHS(systimestamp, 1);
+                v_desc         := v_item_name || ' (1 mes)';
+            END IF;
+
+            IF NVL(v_gross, 0) <= 0 THEN
+                pr_activate_addon_free(pi_org_id, v_addon_id);
+                po_invoice_id := NULL;
+                po_hash       := NULL;
+                RETURN;
+            END IF;
+            v_invoice_type := 'STORAGE_ADDON';
+            v_plan_id      := NULL;
+        ELSE
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation,
+                'target_type invalido (PLAN, STORAGE_ADDON o CONSOLIDATED).');
+        END IF;
+
+        pr_apply_credit_to_amount(pi_org_id, v_gross, v_net, v_credit);
+        IF v_credit > 0 THEN
+            v_desc := SUBSTR(v_desc || ' - credito ' || TO_CHAR(v_credit) || ' Gs', 1, 255);
+        END IF;
+
+        -- Cubierto 100% por saldo: PAID sin Pagopar ni tarjeta.
+        IF v_net <= 0 THEN
+            INSERT /*+ no_parallel */ INTO org_subscription_invoice (
+                org_id_organization, sub_id_subscription, invoice_type, pln_id_plan,
+                sad_id_storage_addon, description, amount, gross_amount, credit_applied,
+                currency, status, period_start, period_end, due_date, paid_at, payment_provider
+            ) VALUES (
+                pi_org_id, v_sub_id, v_invoice_type, v_plan_id,
+                v_addon_id, v_desc, 0, v_gross, v_credit,
+                v_currency, 'PAID', v_period_start, v_period_end, v_expires_at, systimestamp, 'credit'
+            ) RETURNING id_invoice INTO po_invoice_id;
+
+            pr_consume_credit(pi_org_id, v_credit, po_invoice_id);
+
+            IF v_invoice_type = 'SUBSCRIPTION' THEN
+                pr_fulfill_paid_subscription(pi_org_id, v_plan_id);
+            ELSIF v_invoice_type = 'STORAGE_ADDON' THEN
+                pr_fulfill_paid_addon(pi_org_id, v_addon_id);
+            END IF;
+            COMMIT;
+            po_hash := NULL;
+            RETURN;
+        END IF;
+
+        pr_get_platform_keys(v_public_key, v_private_key);
         v_card_id := fn_default_card_pagopar_id(pi_org_id);
         IF v_card_id IS NULL THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation,
                 'Agrega una tarjeta antes de activar la suscripcion.');
         END IF;
 
-        SELECT id_subscription INTO v_sub_id FROM org_subscription WHERE org_id_organization = pi_org_id;
-
-        IF pi_target_type = 'PLAN' THEN
-            BEGIN
-                SELECT id_plan, price_amount, currency, name
-                  INTO v_plan_id, v_amount, v_currency, v_item_name
-                  FROM ref_plan WHERE code = pi_plan_code AND is_active = 1;
-            EXCEPTION WHEN NO_DATA_FOUND THEN
-                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Plan no valido.');
-            END;
-
-            SELECT NVL(is_founder, 0) INTO v_founder FROM org_subscription WHERE org_id_organization = pi_org_id;
-            IF v_founder = 1 AND pi_plan_code = c_plan_premium THEN
-                v_amount := ROUND(v_amount * 0.5);
-                v_desc := 'Suscripcion ' || v_item_name || ' fundador 50% (1 mes)';
-            ELSE
-                v_desc := 'Suscripcion ' || v_item_name || ' (1 mes)';
-            END IF;
-
-            INSERT /*+ no_parallel */ INTO org_subscription_invoice (
-                org_id_organization, sub_id_subscription, invoice_type, pln_id_plan,
-                description, amount, currency, status, period_start, period_end, due_date,
-                payment_provider
-            ) VALUES (
-                pi_org_id, v_sub_id, 'SUBSCRIPTION', v_plan_id,
-                v_desc, v_amount, v_currency, 'PENDING', v_period_start, v_period_end, v_expires_at,
-                'pagopar'
-            ) RETURNING id_invoice INTO po_invoice_id;
-
-        ELSIF pi_target_type = 'STORAGE_ADDON' THEN
-            IF pkg_aox_subscription_api.fn_org_has_feature(pi_org_id, 'APPOINTMENT_HISTORY') = 0 THEN
-                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Los paquetes de almacenamiento solo estan disponibles en el plan Premium.');
-            END IF;
-            BEGIN
-                SELECT price_amount, currency, name
-                  INTO v_amount, v_currency, v_item_name
-                  FROM ref_storage_addon WHERE code = pi_addon_code AND is_active = 1;
-            EXCEPTION WHEN NO_DATA_FOUND THEN
-                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Paquete de almacenamiento no valido.');
-            END;
-            v_desc := v_item_name || ' (1 mes)';
-
-            INSERT /*+ no_parallel */ INTO org_subscription_invoice (
-                org_id_organization, sub_id_subscription, invoice_type, pln_id_plan,
-                description, amount, currency, status, period_start, period_end, due_date,
-                payment_provider
-            ) VALUES (
-                pi_org_id, v_sub_id, 'STORAGE_ADDON', NULL,
-                v_desc, v_amount, v_currency, 'PENDING', v_period_start, v_period_end, v_expires_at,
-                'pagopar'
-            ) RETURNING id_invoice INTO po_invoice_id;
-        ELSE
-            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'target_type invalido (PLAN o STORAGE_ADDON).');
+        -- Minimo Pagopar 1000 Gs; no se consume credito extra.
+        v_pay_amount := v_net;
+        IF v_pay_amount > 0 AND v_pay_amount < 1000 THEN
+            v_pay_amount := 1000;
         END IF;
 
-        IF NVL(v_amount, 0) <= 0 THEN
-            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El monto a facturar es invalido.');
-        END IF;
+        INSERT /*+ no_parallel */ INTO org_subscription_invoice (
+            org_id_organization, sub_id_subscription, invoice_type, pln_id_plan,
+            sad_id_storage_addon, description, amount, gross_amount, credit_applied,
+            currency, status, period_start, period_end, due_date, payment_provider
+        ) VALUES (
+            pi_org_id, v_sub_id, v_invoice_type, v_plan_id,
+            v_addon_id, v_desc, v_pay_amount, v_gross, v_credit,
+            v_currency, 'PENDING', v_period_start, v_period_end, v_expires_at, 'pagopar'
+        ) RETURNING id_invoice INTO po_invoice_id;
 
         po_hash := fn_iniciar_transaccion(
             pi_org_id      => pi_org_id,
             pi_invoice_id  => po_invoice_id,
-            pi_amount      => v_amount,
+            pi_amount      => v_pay_amount,
             pi_item_name   => v_item_name,
             pi_desc        => v_desc,
             pi_public_key  => v_public_key,
@@ -587,10 +974,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
            SET external_reference = po_hash
          WHERE id_invoice = po_invoice_id;
 
-        -- Persistir invoice + hash antes de pagar: el webhook puede llegar muy rapido.
         COMMIT;
 
-        -- alias_token temporal (15 min) de la tarjeta default.
         v_alias_token := fn_alias_token_for(pi_org_id, v_card_id, v_public_key, v_private_key);
         IF v_alias_token IS NULL THEN
             UPDATE /*+ no_parallel */ org_subscription_invoice SET status = 'FAILED' WHERE id_invoice = po_invoice_id;
@@ -626,31 +1011,55 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_cur_plan_code   ref_plan.code%TYPE;
         v_cur_plan_name   ref_plan.name%TYPE;
         v_cur_plan_id     ref_plan.id_plan%TYPE;
+        v_cur_plan_price  ref_plan.price_amount%TYPE;
         v_status          org_subscription.status%TYPE;
         v_is_founder      org_subscription.is_founder%TYPE;
         v_billing_exempt  org_subscription.billing_exempt%TYPE;
         v_storage_used    org_subscription.storage_used_bytes%TYPE;
         v_trial_ends_at   org_subscription.trial_ends_at%TYPE;
+        v_period_start    org_subscription.current_period_start%TYPE;
         v_period_end      org_subscription.current_period_end%TYPE;
         v_grace_ends_at   org_subscription.grace_ends_at%TYPE;
+        v_account_balance NUMBER := 0;
+        v_pending_plan_id NUMBER;
+        v_pending_at      TIMESTAMP WITH TIME ZONE;
+        v_pending_code    VARCHAR2(30);
+        v_pending_name    VARCHAR2(100);
         v_eff_state       VARCHAR2(20);
         v_storage_limit   NUMBER;
         v_platform_ok     NUMBER := 0;
         v_dummy_pub       VARCHAR2(500);
         v_dummy_priv      VARCHAR2(500);
+        v_plan_monthly    NUMBER := 0;
+        v_addons_monthly  NUMBER := 0;
+        v_days_rem        NUMBER := 0;
+        v_period_days     NUMBER := 30;
+        v_active_addons   json_array_t := json_array_t();
     BEGIN
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_session, 'Token inv?lido o sin organizaci?n asociada.');
         END IF;
 
-        SELECT s.pln_id_plan, p.code, p.name, s.status, s.is_founder, s.billing_exempt,
-               s.storage_used_bytes, s.trial_ends_at, s.current_period_end, s.grace_ends_at
-          INTO v_cur_plan_id, v_cur_plan_code, v_cur_plan_name, v_status, v_is_founder, v_billing_exempt,
-               v_storage_used, v_trial_ends_at, v_period_end, v_grace_ends_at
+        SELECT s.pln_id_plan, p.code, p.name, p.price_amount, s.status, s.is_founder, s.billing_exempt,
+               s.storage_used_bytes, s.trial_ends_at, s.current_period_start, s.current_period_end, s.grace_ends_at,
+               NVL(s.account_balance, 0), s.pending_pln_id_plan, s.pending_plan_change_at
+          INTO v_cur_plan_id, v_cur_plan_code, v_cur_plan_name, v_cur_plan_price, v_status, v_is_founder, v_billing_exempt,
+               v_storage_used, v_trial_ends_at, v_period_start, v_period_end, v_grace_ends_at,
+               v_account_balance, v_pending_plan_id, v_pending_at
           FROM org_subscription s
           JOIN ref_plan p ON p.id_plan = s.pln_id_plan
          WHERE s.org_id_organization = v_org_id;
+
+        IF v_pending_plan_id IS NOT NULL THEN
+            BEGIN
+                SELECT code, name INTO v_pending_code, v_pending_name
+                  FROM ref_plan WHERE id_plan = v_pending_plan_id;
+            EXCEPTION WHEN NO_DATA_FOUND THEN
+                v_pending_code := NULL;
+                v_pending_name := NULL;
+            END;
+        END IF;
 
         v_eff_state     := pkg_aox_subscription_api.fn_get_subscription_state(v_org_id);
         v_storage_limit := pkg_aox_subscription_api.fn_get_storage_limit_bytes(v_org_id);
@@ -662,6 +1071,52 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             v_platform_ok := 0;
         END;
 
+        IF NVL(v_is_founder, 0) = 1 AND v_cur_plan_code = c_plan_premium THEN
+            v_plan_monthly := ROUND(v_cur_plan_price * 0.5);
+        ELSE
+            v_plan_monthly := NVL(v_cur_plan_price, 0);
+        END IF;
+        v_addons_monthly := fn_addons_monthly_total(v_org_id);
+
+        IF v_period_end IS NOT NULL AND v_period_end > systimestamp THEN
+            v_days_rem    := fn_calendar_days_between(systimestamp, v_period_end);
+            v_period_days := fn_calendar_days_between(
+                NVL(v_period_start, ADD_MONTHS(v_period_end, -1)),
+                v_period_end
+            );
+            IF v_period_days < 1 THEN
+                v_period_days := 30;
+            END IF;
+        ELSE
+            v_days_rem    := 0;
+            v_period_days := 30;
+        END IF;
+
+        FOR rec IN (
+            SELECT r.code, r.name, r.price_amount, o.quantity, r.extra_bytes
+              FROM org_storage_addon o
+              JOIN ref_storage_addon r ON r.id_storage_addon = o.sad_id_storage_addon
+             WHERE o.org_id_organization = v_org_id
+               AND o.status = 'ACTIVE'
+             ORDER BY r.sort_order, r.id_storage_addon
+        ) LOOP
+            DECLARE
+                v_oa json_object_t := json_object_t();
+                v_cancel_credit NUMBER;
+            BEGIN
+                v_cancel_credit := fn_prorate_amount(rec.price_amount, v_days_rem, v_period_days, 0);
+                v_oa.put('code', rec.code);
+                v_oa.put('name', rec.name);
+                v_oa.put('quantity', rec.quantity);
+                v_oa.put('price_amount', rec.price_amount);
+                v_oa.put('line_total', rec.price_amount * rec.quantity);
+                v_oa.put('extra_bytes', rec.extra_bytes);
+                v_oa.put('cancel_credit_amount', v_cancel_credit);
+                v_oa.put('cancelable', 1);
+                v_active_addons.append(v_oa);
+            END;
+        END LOOP;
+
         -- Snapshot actual
         v_current.put('plan_code'          , v_cur_plan_code);
         v_current.put('plan_name'          , v_cur_plan_name);
@@ -672,12 +1127,34 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_current.put('billing_exempt'     , v_billing_exempt);
         v_current.put('founder_discount_percent', CASE WHEN NVL(v_is_founder, 0) = 1 THEN 50 ELSE 0 END);
         v_current.put('trial_ends_at'      , fn_ts_to_iso(v_trial_ends_at));
+        v_current.put('current_period_start', fn_ts_to_iso(v_period_start));
         v_current.put('current_period_end' , fn_ts_to_iso(v_period_end));
+        -- Alias UX: proxima fecha de facturacion (= current_period_end; editable en APEX).
+        v_current.put('next_billing_at'    , fn_ts_to_iso(v_period_end));
         v_current.put('grace_ends_at'      , fn_ts_to_iso(v_grace_ends_at));
+        -- Estimado del proximo cargo neto (despues de saldo a favor).
+        v_current.put('next_charge_estimate',
+            GREATEST(0, (v_plan_monthly + v_addons_monthly) - NVL(v_account_balance, 0)));
         v_current.put('storage_used_bytes' , v_storage_used);
         v_current.put('storage_limit_bytes', v_storage_limit);
         v_current.put('supports_storage_addons', CASE WHEN v_cur_plan_code = c_plan_premium THEN 1 ELSE 0 END);
         v_current.put('billing_configured' , v_platform_ok);
+        v_current.put('plan_monthly_amount', v_plan_monthly);
+        v_current.put('addons_monthly_amount', v_addons_monthly);
+        v_current.put('monthly_total', v_plan_monthly + v_addons_monthly);
+        v_current.put('days_remaining_in_period', v_days_rem);
+        v_current.put('period_days', v_period_days);
+        v_current.put('account_balance', v_account_balance);
+        IF v_pending_code IS NOT NULL THEN
+            v_current.put('pending_plan_code', v_pending_code);
+            v_current.put('pending_plan_name', v_pending_name);
+            v_current.put('pending_plan_change_at', fn_ts_to_iso(v_pending_at));
+        ELSE
+            v_current.put_null('pending_plan_code');
+            v_current.put_null('pending_plan_name');
+            v_current.put_null('pending_plan_change_at');
+        END IF;
+        v_current.put('active_storage_addons', v_active_addons);
 
         -- Planes activos
         FOR rec IN (
@@ -686,7 +1163,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
              WHERE is_active = 1
              ORDER BY sort_order, id_plan
         ) LOOP
-            DECLARE v_plan json_object_t := json_object_t();
+            DECLARE
+                v_plan json_object_t := json_object_t();
+                v_checkout NUMBER;
             BEGIN
                 v_plan.put('id_plan'            , rec.id_plan);
                 v_plan.put('code'               , rec.code);
@@ -698,11 +1177,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                 v_plan.put('is_current'         , CASE WHEN rec.id_plan = v_cur_plan_id THEN 1 ELSE 0 END);
                 -- Precio a cobrar: fundadores pagan 50% del Premium de por vida.
                 IF NVL(v_is_founder, 0) = 1 AND rec.code = c_plan_premium THEN
-                    v_plan.put('checkout_price_amount', ROUND(rec.price_amount * 0.5));
+                    v_checkout := ROUND(rec.price_amount * 0.5);
+                    v_plan.put('checkout_price_amount', v_checkout);
                     v_plan.put('founder_discount_percent', 50);
                 ELSE
-                    v_plan.put('checkout_price_amount', rec.price_amount);
+                    v_checkout := rec.price_amount;
+                    v_plan.put('checkout_price_amount', v_checkout);
                     v_plan.put('founder_discount_percent', 0);
+                END IF;
+                -- Total mensual si eligen este plan (addons solo aplican en Premium).
+                IF rec.code = c_plan_premium THEN
+                    v_plan.put('monthly_total', v_checkout + v_addons_monthly);
+                ELSE
+                    v_plan.put('monthly_total', v_checkout);
                 END IF;
                 pr_put_features(rec.id_plan, v_plan);
                 v_plans.append(v_plan);
@@ -716,8 +1203,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
              WHERE is_active = 1
              ORDER BY sort_order, id_storage_addon
         ) LOOP
-            DECLARE v_addon json_object_t := json_object_t();
+            DECLARE
+                v_addon json_object_t := json_object_t();
+                v_prorate NUMBER;
             BEGIN
+                v_prorate := fn_prorate_amount(rec.price_amount, v_days_rem, v_period_days, 1);
                 v_addon.put('id_storage_addon', rec.id_storage_addon);
                 v_addon.put('code'            , rec.code);
                 v_addon.put('name'            , rec.name);
@@ -725,6 +1215,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                 v_addon.put('price_amount'    , rec.price_amount);
                 v_addon.put('currency'        , rec.currency);
                 v_addon.put('billing_period'  , rec.billing_period);
+                v_addon.put('prorate_amount'  , v_prorate);
+                v_addon.put('cancel_credit_amount', fn_prorate_amount(rec.price_amount, v_days_rem, v_period_days, 0));
+                v_addon.put('days_remaining'  , v_days_rem);
+                v_addon.put('period_days'     , v_period_days);
                 v_addons.append(v_addon);
             END;
         END LOOP;
@@ -787,6 +1281,21 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             po_hash        => v_hash
         );
 
+        IF v_hash IS NULL AND v_target_type = 'STORAGE_ADDON' THEN
+            po_status_code := pkg_aox_util.c_success_ok_code;
+            v_response.put('status', 'success');
+            v_response.put('message', 'Almacenamiento activado. Se sumara al cargo de la proxima renovacion.');
+            v_data.put_null('invoice_id');
+            v_data.put_null('hash');
+            v_data.put('status', 'ACTIVE');
+            v_data.put('charged', 0);
+            v_data.put('requires_polling', 0);
+            v_data.put('target_type', v_target_type);
+            v_response.put('data', v_data);
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
         po_status_code := pkg_aox_util.c_success_create_code;
         v_response.put('status', 'success');
         v_response.put('message', 'Cobro iniciado con la tarjeta registrada. Se confirmara en unos instantes.');
@@ -817,7 +1326,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     END pr_create_checkout;
 
     --------------------------------------------------------------------------
-    -- POST /workspace/subscription/change-plan  (sin pago; solo founders/exentos)
+    -- POST /workspace/subscription/change-plan
+    -- Downgrade: agenda hasta current_period_end (sin credito de plan).
+    -- Mantener plan actual: cancela agenda. Upgrade pago: usar activate.
     --------------------------------------------------------------------------
     PROCEDURE pr_change_plan(
         pi_auth_header   IN  VARCHAR2,
@@ -825,55 +1336,108 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
-        v_org_id         NUMBER;
-        v_req            json_object_t;
-        v_plan_code      VARCHAR2(30);
-        v_plan_id        ref_plan.id_plan%TYPE;
-        v_is_founder     org_subscription.is_founder%TYPE;
-        v_billing_exempt org_subscription.billing_exempt%TYPE;
-        v_response       json_object_t := json_object_t();
-        v_data           json_object_t := json_object_t();
+        v_org_id           NUMBER;
+        v_req              json_object_t;
+        v_plan_code        VARCHAR2(30);
+        v_plan_id          ref_plan.id_plan%TYPE;
+        v_plan_price       NUMBER;
+        v_cur_plan_id      NUMBER;
+        v_cur_plan_code    VARCHAR2(30);
+        v_cur_plan_price   NUMBER;
+        v_period_end       TIMESTAMP WITH TIME ZONE;
+        v_billing_exempt   org_subscription.billing_exempt%TYPE;
+        v_response         json_object_t := json_object_t();
+        v_data             json_object_t := json_object_t();
+        v_scheduled        NUMBER := 0;
     BEGIN
         pr_assert_admin(pi_auth_header, v_org_id);
 
         v_req       := json_object_t.parse(pi_body);
         v_plan_code := UPPER(TRIM(v_req.get_string('plan_code')));
 
-        SELECT is_founder, billing_exempt
-          INTO v_is_founder, v_billing_exempt
-          FROM org_subscription
-         WHERE org_id_organization = v_org_id;
+        BEGIN
+            SELECT id_plan, price_amount
+              INTO v_plan_id, v_plan_price
+              FROM ref_plan WHERE code = v_plan_code AND is_active = 1;
+        EXCEPTION WHEN NO_DATA_FOUND THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Plan no valido.');
+        END;
 
-        -- El cambio inmediato sin pago solo se permite a founders / exentos de facturaci?n.
-        -- El resto debe pasar por el checkout de Pagopar.
-        IF NVL(v_is_founder, 0) = 0 AND NVL(v_billing_exempt, 0) = 0 THEN
+        SELECT s.pln_id_plan, p.code, p.price_amount, s.current_period_end, s.billing_exempt
+          INTO v_cur_plan_id, v_cur_plan_code, v_cur_plan_price, v_period_end, v_billing_exempt
+          FROM org_subscription s
+          JOIN ref_plan p ON p.id_plan = s.pln_id_plan
+         WHERE s.org_id_organization = v_org_id;
+
+        -- Cancelar downgrade agendado (pedir el plan actual).
+        IF v_plan_id = v_cur_plan_id THEN
+            UPDATE /*+ no_parallel */ org_subscription
+               SET pending_pln_id_plan    = NULL,
+                   pending_plan_change_at = NULL,
+                   updated_at             = systimestamp
+             WHERE org_id_organization = v_org_id;
+            COMMIT;
+            po_status_code := pkg_aox_util.c_success_ok_code;
+            v_response.put('status', 'success');
+            v_response.put('message', 'Cambio de plan cancelado. Seguis con ' || v_cur_plan_code || '.');
+            v_data.put('plan_code', v_cur_plan_code);
+            v_data.put('scheduled', 0);
+            v_data.put('pending_cleared', 1);
+            v_data.put('effective_status', pkg_aox_subscription_api.fn_get_subscription_state(v_org_id));
+            v_response.put('data', v_data);
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        -- Upgrade (precio mayor): requiere cobro via activate, salvo exentos.
+        IF NVL(v_plan_price, 0) > NVL(v_cur_plan_price, 0) THEN
+            IF NVL(v_billing_exempt, 0) = 1 THEN
+                UPDATE /*+ no_parallel */ org_subscription
+                   SET pln_id_plan            = v_plan_id,
+                       pending_pln_id_plan    = NULL,
+                       pending_plan_change_at = NULL,
+                       updated_at             = systimestamp
+                 WHERE org_id_organization = v_org_id;
+                pr_refresh_storage_limit(v_org_id);
+                COMMIT;
+                po_status_code := pkg_aox_util.c_success_ok_code;
+                v_response.put('status', 'success');
+                v_response.put('message', 'Plan actualizado correctamente.');
+                v_data.put('plan_code', v_plan_code);
+                v_data.put('scheduled', 0);
+                v_data.put('effective_status', pkg_aox_subscription_api.fn_get_subscription_state(v_org_id));
+                v_response.put('data', v_data);
+                po_response_body := v_response.to_clob();
+                RETURN;
+            END IF;
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_forbidden,
-                'Para cambiar de plan necesit?s completar el pago del nuevo plan.'
+                'Para subir de plan necesitás completar el pago con tu tarjeta.'
             );
         END IF;
 
-        BEGIN
-            SELECT id_plan INTO v_plan_id FROM ref_plan WHERE code = v_plan_code AND is_active = 1;
-        EXCEPTION WHEN NO_DATA_FOUND THEN
-            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Plan no v?lido.');
-        END;
+        -- Downgrade / mismo precio hacia Base: agendar al fin del ciclo (sin credito de plan).
+        IF v_period_end IS NULL THEN
+            v_period_end := ADD_MONTHS(systimestamp, 1);
+        END IF;
 
         UPDATE /*+ no_parallel */ org_subscription
-           SET pln_id_plan          = v_plan_id,
-               current_period_start = systimestamp,
-               current_period_end   = ADD_MONTHS(systimestamp, 1),
-               grace_ends_at        = NULL,
-               updated_at           = systimestamp
+           SET pending_pln_id_plan    = v_plan_id,
+               pending_plan_change_at = v_period_end,
+               updated_at             = systimestamp
          WHERE org_id_organization = v_org_id;
-
-        pr_refresh_storage_limit(v_org_id);
         COMMIT;
+        v_scheduled := 1;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response.put('status', 'success');
-        v_response.put('message', 'Plan actualizado correctamente.');
-        v_data.put('plan_code', v_plan_code);
+        v_response.put('message',
+            'Cambio a ' || v_plan_code || ' programado. Seguis con ' || v_cur_plan_code
+            || ' hasta el fin del periodo.');
+        v_data.put('plan_code', v_cur_plan_code);
+        v_data.put('pending_plan_code', v_plan_code);
+        v_data.put('pending_plan_change_at', fn_ts_to_iso(v_period_end));
+        v_data.put('scheduled', v_scheduled);
         v_data.put('effective_status', pkg_aox_subscription_api.fn_get_subscription_state(v_org_id));
         v_response.put('data', v_data);
         po_response_body := v_response.to_clob();
@@ -882,6 +1446,98 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             ROLLBACK;
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_change_plan;
+
+    --------------------------------------------------------------------------
+    -- POST /workspace/subscription/addon/cancel
+    --------------------------------------------------------------------------
+    PROCEDURE pr_cancel_storage_addon(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id      NUMBER;
+        v_req         json_object_t;
+        v_addon_code  VARCHAR2(30);
+        v_addon_id    NUMBER;
+        v_addon_price NUMBER;
+        v_addon_name  VARCHAR2(150);
+        v_row_id      NUMBER;
+        v_qty         NUMBER;
+        v_credit      NUMBER;
+        v_balance     NUMBER;
+        v_response    json_object_t := json_object_t();
+        v_data        json_object_t := json_object_t();
+    BEGIN
+        pr_assert_admin(pi_auth_header, v_org_id);
+        v_req        := json_object_t.parse(pi_body);
+        v_addon_code := UPPER(TRIM(v_req.get_string('addon_code')));
+
+        BEGIN
+            SELECT id_storage_addon, price_amount, name
+              INTO v_addon_id, v_addon_price, v_addon_name
+              FROM ref_storage_addon
+             WHERE code = v_addon_code AND is_active = 1;
+        EXCEPTION WHEN NO_DATA_FOUND THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Paquete de almacenamiento no valido.');
+        END;
+
+        BEGIN
+            SELECT id_org_storage_addon, quantity
+              INTO v_row_id, v_qty
+              FROM org_storage_addon
+             WHERE org_id_organization = v_org_id
+               AND sad_id_storage_addon = v_addon_id
+               AND status = 'ACTIVE'
+             ORDER BY id_org_storage_addon DESC
+             FETCH FIRST 1 ROW ONLY;
+        EXCEPTION WHEN NO_DATA_FOUND THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'No tenes ese paquete de almacenamiento activo.');
+        END;
+
+        v_credit := fn_unused_credit_amount(v_org_id, v_addon_price);
+        pr_grant_credit(v_org_id, v_credit, 'CANCEL_ADDON', v_addon_code, NULL);
+
+        IF v_qty > 1 THEN
+            UPDATE /*+ no_parallel */ org_storage_addon
+               SET quantity = quantity - 1
+             WHERE id_org_storage_addon = v_row_id;
+        ELSE
+            UPDATE /*+ no_parallel */ org_storage_addon
+               SET status  = 'CANCELED',
+                   ends_at = systimestamp,
+                   quantity = 1
+             WHERE id_org_storage_addon = v_row_id;
+        END IF;
+
+        pr_refresh_storage_limit(v_org_id);
+
+        SELECT NVL(account_balance, 0)
+          INTO v_balance
+          FROM org_subscription
+         WHERE org_id_organization = v_org_id;
+
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('message',
+            CASE WHEN v_credit > 0
+                 THEN 'Almacenamiento cancelado. Se acreditaron ' || TO_CHAR(v_credit) || ' Gs a favor.'
+                 ELSE 'Almacenamiento cancelado.'
+            END);
+        v_data.put('addon_code', v_addon_code);
+        v_data.put('addon_name', v_addon_name);
+        v_data.put('credit_granted', v_credit);
+        v_data.put('account_balance', v_balance);
+        v_data.put('storage_limit_bytes', pkg_aox_subscription_api.fn_get_storage_limit_bytes(v_org_id));
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_cancel_storage_addon;
 
     --------------------------------------------------------------------------
     -- GET /workspace/subscription/invoice/:hash
@@ -942,6 +1598,96 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     END pr_get_invoice_by_hash;
 
     --------------------------------------------------------------------------
+    -- GET /workspace/subscription/invoices
+    --------------------------------------------------------------------------
+    PROCEDURE pr_list_invoices(
+        pi_auth_header   IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id   NUMBER;
+        v_response json_object_t := json_object_t();
+        v_data     json_object_t := json_object_t();
+        v_items    json_array_t  := json_array_t();
+        v_period_end TIMESTAMP WITH TIME ZONE;
+        v_balance  NUMBER;
+        v_plan_amt NUMBER;
+        v_addon_amt NUMBER;
+        v_plan_code VARCHAR2(30);
+        v_plan_name VARCHAR2(100);
+        v_founder  NUMBER;
+    BEGIN
+        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        IF NVL(v_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_session, 'Token invalido o sin organizacion asociada.');
+        END IF;
+
+        SELECT s.current_period_end, NVL(s.account_balance, 0), NVL(s.is_founder, 0),
+               p.code, p.name,
+               CASE WHEN NVL(s.is_founder, 0) = 1 AND p.code = c_plan_premium
+                    THEN ROUND(p.price_amount * 0.5) ELSE p.price_amount END
+          INTO v_period_end, v_balance, v_founder, v_plan_code, v_plan_name, v_plan_amt
+          FROM org_subscription s
+          JOIN ref_plan p ON p.id_plan = s.pln_id_plan
+         WHERE s.org_id_organization = v_org_id;
+
+        v_addon_amt := fn_addons_monthly_total(v_org_id);
+
+        FOR rec IN (
+            SELECT i.id_invoice, i.invoice_type, i.status, i.amount,
+                   NVL(i.gross_amount, i.amount) AS gross_amount,
+                   NVL(i.credit_applied, 0) AS credit_applied,
+                   i.currency, i.description, i.payment_provider,
+                   i.created_at, i.paid_at, i.period_start, i.period_end,
+                   i.external_reference, p.code AS plan_code, p.name AS plan_name
+              FROM org_subscription_invoice i
+              LEFT JOIN ref_plan p ON p.id_plan = i.pln_id_plan
+             WHERE i.org_id_organization = v_org_id
+             ORDER BY i.created_at DESC, i.id_invoice DESC
+             FETCH FIRST 50 ROWS ONLY
+        ) LOOP
+            DECLARE v_item json_object_t := json_object_t();
+            BEGIN
+                v_item.put('invoice_id', rec.id_invoice);
+                v_item.put('invoice_type', rec.invoice_type);
+                v_item.put('status', rec.status);
+                v_item.put('amount', rec.amount);
+                v_item.put('gross_amount', rec.gross_amount);
+                v_item.put('credit_applied', rec.credit_applied);
+                v_item.put('currency', rec.currency);
+                v_item.put('description', rec.description);
+                v_item.put('payment_provider', rec.payment_provider);
+                v_item.put('plan_code', rec.plan_code);
+                v_item.put('plan_name', rec.plan_name);
+                v_item.put('created_at', fn_ts_to_iso(rec.created_at));
+                v_item.put('paid_at', fn_ts_to_iso(rec.paid_at));
+                v_item.put('period_start', fn_ts_to_iso(rec.period_start));
+                v_item.put('period_end', fn_ts_to_iso(rec.period_end));
+                v_item.put('hash', rec.external_reference);
+                v_items.append(v_item);
+            END;
+        END LOOP;
+
+        v_data.put('next_billing_at', fn_ts_to_iso(v_period_end));
+        v_data.put('plan_code', v_plan_code);
+        v_data.put('plan_name', v_plan_name);
+        v_data.put('plan_monthly_amount', v_plan_amt);
+        v_data.put('addons_monthly_amount', v_addon_amt);
+        v_data.put('monthly_total', v_plan_amt + v_addon_amt);
+        v_data.put('account_balance', v_balance);
+        v_data.put('next_charge_estimate', GREATEST(0, (v_plan_amt + v_addon_amt) - v_balance));
+        v_data.put('invoices', v_items);
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_list_invoices;
+
+    --------------------------------------------------------------------------
     -- POST /pagopar/subscription/webhook
     --------------------------------------------------------------------------
     PROCEDURE pr_subscription_webhook(
@@ -963,7 +1709,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_status         VARCHAR2(20);
         v_plan_id        NUMBER;
         v_addon_id       NUMBER;
-        v_addon_code     VARCHAR2(30);
+        v_invoice_amount NUMBER;
+        v_credit_applied NUMBER;
         v_period_start   TIMESTAMP WITH TIME ZONE;
         v_period_end     TIMESTAMP WITH TIME ZONE;
         v_desc           VARCHAR2(255);
@@ -982,9 +1729,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
         BEGIN
             SELECT id_invoice, org_id_organization, invoice_type, status, pln_id_plan,
-                   period_start, period_end, description
+                   sad_id_storage_addon, amount, credit_applied, period_start, period_end, description
               INTO v_invoice_id, v_org_id, v_invoice_type, v_status, v_plan_id,
-                   v_period_start, v_period_end, v_desc
+                   v_addon_id, v_invoice_amount, v_credit_applied, v_period_start, v_period_end, v_desc
               FROM org_subscription_invoice
              WHERE external_reference = v_hash_pedido
              ORDER BY id_invoice DESC
@@ -1017,53 +1764,36 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                SET status = 'PAID', paid_at = systimestamp
              WHERE id_invoice = v_invoice_id;
 
-            IF v_invoice_type = 'SUBSCRIPTION' THEN
-                -- Cobro recurrente: extiende el periodo +1 mes desde el fin vigente
-                -- (o desde ahora si ya vencio) y resetea el dunning.
-                UPDATE /*+ no_parallel */ org_subscription
-                   SET pln_id_plan          = v_plan_id,
-                       status               = 'ACTIVE',
-                       current_period_start = systimestamp,
-                       current_period_end   = ADD_MONTHS(GREATEST(NVL(current_period_end, systimestamp), systimestamp), 1),
-                       grace_ends_at        = NULL,
-                       charge_retry_count   = 0,
-                       last_charge_at       = systimestamp,
-                       updated_at           = systimestamp
-                 WHERE org_id_organization = v_org_id;
+            -- Consumir credito declarado en la factura (idempotente via ledger).
+            pr_consume_credit(v_org_id, NVL(v_credit_applied, 0), v_invoice_id);
 
-                pr_refresh_storage_limit(v_org_id);
+            IF v_invoice_type = 'SUBSCRIPTION' THEN
+                pr_fulfill_paid_subscription(v_org_id, v_plan_id);
 
             ELSIF v_invoice_type = 'STORAGE_ADDON' THEN
-                -- Resolver el addon por su nombre (guardado en la descripci?n) no es fiable;
-                -- lo resolvemos por el monto de la factura (precio del addon).
-                BEGIN
-                    SELECT id_storage_addon INTO v_addon_id
-                      FROM ref_storage_addon
-                     WHERE price_amount = (SELECT amount FROM org_subscription_invoice WHERE id_invoice = v_invoice_id)
-                       AND is_active = 1
-                     FETCH FIRST 1 ROW ONLY;
-                EXCEPTION WHEN NO_DATA_FOUND THEN
-                    v_addon_id := NULL;
-                END;
-
-                IF v_addon_id IS NOT NULL THEN
-                    MERGE /*+ no_parallel */ INTO org_storage_addon t
-                    USING (SELECT v_org_id AS org_id, v_addon_id AS addon_id FROM dual) s
-                       ON (t.org_id_organization = s.org_id AND t.sad_id_storage_addon = s.addon_id AND t.status = 'ACTIVE')
-                    WHEN MATCHED THEN
-                        UPDATE SET t.quantity = t.quantity + 1
-                    WHEN NOT MATCHED THEN
-                        INSERT (org_id_organization, sad_id_storage_addon, quantity, status)
-                        VALUES (s.org_id, s.addon_id, 1, 'ACTIVE');
+                IF v_addon_id IS NULL THEN
+                    BEGIN
+                        SELECT id_storage_addon INTO v_addon_id
+                          FROM ref_storage_addon
+                         WHERE price_amount = (
+                                   SELECT NVL(gross_amount, amount)
+                                     FROM org_subscription_invoice
+                                    WHERE id_invoice = v_invoice_id
+                               )
+                           AND is_active = 1
+                         FETCH FIRST 1 ROW ONLY;
+                    EXCEPTION WHEN NO_DATA_FOUND THEN
+                        v_addon_id := NULL;
+                    END;
                 END IF;
-
-                pr_refresh_storage_limit(v_org_id);
+                pr_fulfill_paid_addon(v_org_id, v_addon_id);
             END IF;
         ELSE
             UPDATE /*+ no_parallel */ org_subscription_invoice
                SET status = 'FAILED'
              WHERE id_invoice = v_invoice_id
                AND status = 'PENDING';
+            -- FAILED: no se consume credito (sigue disponible).
         END IF;
 
         COMMIT;
@@ -1347,6 +2077,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_plan_code   := UPPER(TRIM(NVL(v_req.get_string('plan_code'), c_plan_premium)));
         v_addon_code  := UPPER(TRIM(v_req.get_string('addon_code')));
 
+        -- Upgrade/activacion limpia cualquier downgrade pendiente.
+        IF v_target_type = 'PLAN' THEN
+            UPDATE /*+ no_parallel */ org_subscription
+               SET pending_pln_id_plan    = NULL,
+                   pending_plan_change_at = NULL,
+                   updated_at             = systimestamp
+             WHERE org_id_organization = v_org_id;
+            COMMIT;
+        END IF;
+
         pr_charge_target(
             pi_org_id      => v_org_id,
             pi_target_type => v_target_type,
@@ -1355,6 +2095,32 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             po_invoice_id  => v_invoice_id,
             po_hash        => v_hash
         );
+
+        -- Sin hash: alta gratis (addon 0 dias) o factura cubierta 100% por saldo a favor.
+        IF v_hash IS NULL THEN
+            po_status_code := pkg_aox_util.c_success_ok_code;
+            v_response.put('status', 'success');
+            IF v_invoice_id IS NOT NULL THEN
+                v_response.put('message', 'Activado usando tu saldo a favor. No hubo cargo en la tarjeta.');
+                v_data.put('invoice_id', v_invoice_id);
+                v_data.put('status', 'PAID');
+            ELSIF v_target_type = 'STORAGE_ADDON' THEN
+                v_response.put('message', 'Almacenamiento activado. Se sumara al cargo de la proxima renovacion.');
+                v_data.put_null('invoice_id');
+                v_data.put('status', 'ACTIVE');
+                v_data.put('prorated', 0);
+            ELSE
+                v_response.put('message', 'Activacion completada.');
+                v_data.put_null('invoice_id');
+                v_data.put('status', 'ACTIVE');
+            END IF;
+            v_data.put_null('hash');
+            v_data.put('requires_polling', 0);
+            v_data.put('target_type', v_target_type);
+            v_response.put('data', v_data);
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
 
         po_status_code := pkg_aox_util.c_success_create_code;
         v_response.put('status', 'success');
@@ -1382,43 +2148,61 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     PROCEDURE pr_run_billing_cycle IS
         v_invoice_id NUMBER;
         v_hash       VARCHAR2(128);
+        v_plan_code  VARCHAR2(30);
         v_max_retry  NUMBER := NVL(TO_NUMBER(fn_get_parameter('SUBSCRIPTION_MAX_CHARGE_RETRIES')), 4);
+        v_has_addons NUMBER;
     BEGIN
         FOR rec IN (
-            SELECT s.org_id_organization AS org_id, p.code AS plan_code
+            SELECT s.org_id_organization AS org_id
               FROM org_subscription s
-              JOIN ref_plan p ON p.id_plan = s.pln_id_plan
              WHERE s.status IN ('ACTIVE', 'PAST_DUE')
                AND NVL(s.auto_renew, 1) = 1
                AND NVL(s.billing_exempt, 0) = 0
-               AND NVL(s.is_founder, 0) = 0
                AND s.current_period_end IS NOT NULL
                AND s.current_period_end <= systimestamp
                AND NVL(s.charge_retry_count, 0) < v_max_retry
-               AND p.code <> c_plan_base
-               AND EXISTS (
-                   SELECT 1 FROM org_payment_card c
-                    WHERE c.org_id_organization = s.org_id_organization
-                      AND c.status = 'ACTIVE' AND c.is_default = 1
-               )
         ) LOOP
             BEGIN
-                -- Contabilizar el intento (dunning). El webhook lo resetea al confirmar.
-                UPDATE /*+ no_parallel */ org_subscription
-                   SET charge_retry_count = NVL(charge_retry_count, 0) + 1,
-                       last_charge_at     = systimestamp,
-                       updated_at         = systimestamp
-                 WHERE org_id_organization = rec.org_id;
+                -- 1) Aplicar downgrade agendado antes del cargo.
+                pr_apply_due_pending_plan(rec.org_id);
                 COMMIT;
 
-                pr_charge_target(
-                    pi_org_id      => rec.org_id,
-                    pi_target_type => 'PLAN',
-                    pi_plan_code   => rec.plan_code,
-                    pi_addon_code  => NULL,
-                    po_invoice_id  => v_invoice_id,
-                    po_hash        => v_hash
-                );
+                SELECT p.code
+                  INTO v_plan_code
+                  FROM org_subscription s
+                  JOIN ref_plan p ON p.id_plan = s.pln_id_plan
+                 WHERE s.org_id_organization = rec.org_id;
+
+                SELECT COUNT(*)
+                  INTO v_has_addons
+                  FROM org_storage_addon
+                 WHERE org_id_organization = rec.org_id
+                   AND status = 'ACTIVE'
+                   AND ROWNUM = 1;
+
+                -- Base sin addons: no cobrar.
+                IF v_plan_code = c_plan_base AND v_has_addons = 0 THEN
+                    NULL; -- skip charge
+                ELSE
+
+                    -- Contabilizar el intento (dunning). El webhook / PAID por credito lo resetea.
+                    UPDATE /*+ no_parallel */ org_subscription
+                       SET charge_retry_count = NVL(charge_retry_count, 0) + 1,
+                           last_charge_at     = systimestamp,
+                           updated_at         = systimestamp
+                     WHERE org_id_organization = rec.org_id;
+                    COMMIT;
+
+                    -- Un solo cargo: plan efectivo + addons ACTIVE, menos account_balance.
+                    pr_charge_target(
+                        pi_org_id      => rec.org_id,
+                        pi_target_type => 'CONSOLIDATED',
+                        pi_plan_code   => v_plan_code,
+                        pi_addon_code  => NULL,
+                        po_invoice_id  => v_invoice_id,
+                        po_hash        => v_hash
+                    );
+                END IF;
             EXCEPTION
                 WHEN OTHERS THEN
                     ROLLBACK;

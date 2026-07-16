@@ -152,6 +152,7 @@ PROMPT [40/41] org_storage_addon
 
 PROMPT [41/43] org_subscription_invoice
 @@tables\ORG_SUBSCRIPTION_INVOICE.sql
+@@tables\ORG_BILLING_CREDIT_LEDGER.sql
 
 PROMPT [41b/43] org_payment_card (Pagopar pago-recurrente / catastro de tarjetas)
 @@tables\ORG_PAYMENT_CARD.sql

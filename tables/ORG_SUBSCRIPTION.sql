@@ -17,6 +17,9 @@ CREATE TABLE org_subscription (
   auto_renew            NUMBER(1,0)                 DEFAULT 1 NOT NULL,
   last_charge_at        TIMESTAMP(6) WITH TIME ZONE NULL,
   charge_retry_count    NUMBER                      DEFAULT 0 NOT NULL,
+  account_balance       NUMBER                      DEFAULT 0 NOT NULL,
+  pending_pln_id_plan   NUMBER                      NULL,
+  pending_plan_change_at TIMESTAMP(6) WITH TIME ZONE NULL,
   created_at            TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   updated_at            TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 )
@@ -89,6 +92,15 @@ ALTER TABLE org_subscription
   )
 /
 
+PROMPT ALTER TABLE org_subscription ADD CONSTRAINT fk_orgsub_pending_plan FOREIGN KEY
+ALTER TABLE org_subscription
+  ADD CONSTRAINT fk_orgsub_pending_plan FOREIGN KEY (
+    pending_pln_id_plan
+  ) REFERENCES ref_plan (
+    id_plan
+  )
+/
+
 COMMENT ON TABLE org_subscription IS 'Suscripcion vigente por organizacion (1:1). Fuente de verdad del estado de facturacion y entitlements.';
 COMMENT ON COLUMN org_subscription.status IS 'TRIAL, ACTIVE, PAST_DUE (3d gracia), READ_ONLY (vencido), CANCELED, FOUNDER (early adopter).';
 COMMENT ON COLUMN org_subscription.billing_exempt IS 'Si es 1, la organizacion no se factura. Fundadores usan is_founder=1 con 50% permanente en checkout (no exencion total).';
@@ -98,3 +110,6 @@ COMMENT ON COLUMN org_subscription.grace_ends_at IS 'Fin de los 3 dias de gracia
 COMMENT ON COLUMN org_subscription.auto_renew IS 'Si es 1, el job de facturacion cobra automaticamente con la tarjeta catastrada al vencer el periodo.';
 COMMENT ON COLUMN org_subscription.last_charge_at IS 'Ultimo intento de debito recurrente disparado por el job / activacion.';
 COMMENT ON COLUMN org_subscription.charge_retry_count IS 'Intentos de cobro del ciclo actual (dunning). Se resetea a 0 cuando el webhook confirma el pago.';
+COMMENT ON COLUMN org_subscription.account_balance IS 'Saldo a favor en Gs. Se aplica automaticamente en el proximo cargo.';
+COMMENT ON COLUMN org_subscription.pending_pln_id_plan IS 'Plan agendado (downgrade) que se aplica al fin del ciclo.';
+COMMENT ON COLUMN org_subscription.pending_plan_change_at IS 'Fecha/hora de aplicacion del plan pendiente (normalmente current_period_end).';

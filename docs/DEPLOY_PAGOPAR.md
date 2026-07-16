@@ -59,6 +59,16 @@ Migraciones (aplicar en orden):
    - `POST   /api/v1/workspace/subscription/activate`      → `pr_activate_subscription`
    - Webhook reutilizado: `POST /pagopar/v1/subscription/webhook` (el `pagar` dispara la misma notificación).
 3. `migrations/20260711_subscription_recurring_job.sql` — **SOLO PRODUCCIÓN**. Job `HASEL_SUBSCRIPTION_BILLING_CYCLE` (diario 03:00 America/Asunción) → `pr_run_billing_cycle` (cobro + dunning). NO ejecutar en DEV.
+4. `migrations/20260716_subscription_invoice_addon_fk.sql` — columna `org_subscription_invoice.sad_id_storage_addon` + recompilar `PKG_AOX_SUBSCRIPTION_BILLING_API` (prorrateo mid-cycle de storage + renovación consolidada plan+addons).
+5. `migrations/20260716_billing_credit_pending_plan.sql` — `account_balance`, `pending_plan_*`, `gross_amount`/`credit_applied`, ledger.
+6. `migrations/20260716_billing_credit_ords.sql` — `POST /workspace/subscription/addon/cancel`.
+7. `migrations/20260716_subscription_invoices_ords.sql` — `GET /workspace/subscription/invoices` (historial + resumen).
+
+**Facturación consolidada + saldo a favor (julio 2026):**
+- Mid-cycle `STORAGE_ADDON`: cobra prorrateo hasta `current_period_end` (mín. 1000 Gs).
+- Cancel addon: crédito inmediato por días no usados → `account_balance`.
+- Downgrade plan: agendado a `current_period_end` (sin crédito de plan).
+- Renovación: un cargo `CONSOLIDATED` = plan (+50% fundador) + addons − saldo a favor.
 
 **Prerrequisito Pagopar:** solicitar a `administracion@pagopar.com` habilitar `pago-recurrente/3.0` para HASEL (RUC 6038964-8) en dev y prod. Sin la habilitación, `agregar-cliente`/`listar-tarjeta` devuelven `El comercio no tiene permisos. CF`. El token de estos endpoints es `sha1(private_key + "PAGO-RECURRENTE")` (distinto del de `iniciar-transaccion`). El `url` de `agregar-tarjeta` debe ser el dominio HTTPS donde se incrusta el iframe (`PAGOPAR_UPAY_RETURN_URL`).
 

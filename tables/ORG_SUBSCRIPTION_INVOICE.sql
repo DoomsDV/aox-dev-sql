@@ -5,8 +5,11 @@ CREATE TABLE org_subscription_invoice (
   sub_id_subscription NUMBER                      NULL,
   invoice_type        VARCHAR2(20)                DEFAULT 'SUBSCRIPTION' NOT NULL,
   pln_id_plan         NUMBER                      NULL,
+  sad_id_storage_addon NUMBER                     NULL,
   description         VARCHAR2(255)               NULL,
   amount              NUMBER                      NOT NULL,
+  gross_amount        NUMBER                      NULL,
+  credit_applied      NUMBER                      DEFAULT 0 NOT NULL,
   currency            VARCHAR2(3)                 DEFAULT 'PYG' NOT NULL,
   status              VARCHAR2(20)                NOT NULL,
   period_start        TIMESTAMP(6) WITH TIME ZONE NULL,
@@ -82,4 +85,16 @@ ALTER TABLE org_subscription_invoice
   )
 /
 
+PROMPT ALTER TABLE org_subscription_invoice ADD CONSTRAINT fk_orginv_storage_addon FOREIGN KEY
+ALTER TABLE org_subscription_invoice
+  ADD CONSTRAINT fk_orginv_storage_addon FOREIGN KEY (
+    sad_id_storage_addon
+  ) REFERENCES ref_storage_addon (
+    id_storage_addon
+  )
+/
+
 COMMENT ON TABLE org_subscription_invoice IS 'Facturacion de plan y addons de storage (separado de payment_transaction, que corresponde a senas de citas).';
+COMMENT ON COLUMN org_subscription_invoice.sad_id_storage_addon IS 'Addon de storage asociado (facturas STORAGE_ADDON mid-cycle / prorrateo).';
+COMMENT ON COLUMN org_subscription_invoice.gross_amount IS 'Monto antes de descontar saldo a favor.';
+COMMENT ON COLUMN org_subscription_invoice.credit_applied IS 'Gs de saldo a favor aplicados (se consumen al pasar a PAID).';
