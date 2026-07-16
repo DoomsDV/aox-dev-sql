@@ -34,6 +34,17 @@ Ver [ORDS_SUBSCRIPTION_BILLING.md](./ORDS_SUBSCRIPTION_BILLING.md):
 - Parámetros: `SUBSCRIPTION_PAGOPAR_PUBLIC_KEY` / `SUBSCRIPTION_PAGOPAR_PRIVATE_KEY`
 - Util compartido: `pkg_aox_pagopar_api.fn_pagopar_sha1_token`
 
+#### URLs del panel Pagopar (“Integrar con mi sitio web”)
+
+Pegar en el comercio **HASEL - API** (placeholder de hash con paréntesis, según panel):
+
+| Entorno | URL de respuesta (webhook ORDS) | URL de redireccionamiento |
+|---|---|---|
+| **DESARROLLO** | `https://g9549f707e8ebfa-aoxdev.adb.sa-saopaulo-1.oraclecloudapps.com/ords/aoxdev/pagopar/v1/subscription/webhook` | `https://staging.hasel.app/pagopar/resultado/($hash)` |
+| **PRODUCCIÓN** | `https://g9549f707e8ebfa-aox.adb.sa-saopaulo-1.oraclecloudapps.com/ords/bookmate/pagopar/v1/subscription/webhook` | `https://hasel.app/pagopar/resultado/($hash)` |
+
+La ruta Astro `/pagopar/resultado/[hash]` redirige a `/panel/plan?checkout={hash}` (polling de factura). El return del catastro uPay **no** usa esta URL: va por `PAGOPAR_UPAY_RETURN_URL` (`/panel/plan?status=add_new_card_*`).
+
 ### Suscripción con pago recurrente (uPay, catastro de tarjeta) — julio 2026
 
 Modelo **solo recurrente**: para suscribirse hay que **catastrar una tarjeta** (proveedor uPay, API `pago-recurrente/3.0`) y el cobro mensual es **automático** (job). Se eliminó el redirect manual a `pagopar.com/pagos`.
