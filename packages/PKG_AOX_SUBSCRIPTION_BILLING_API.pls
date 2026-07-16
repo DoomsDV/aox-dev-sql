@@ -34,7 +34,27 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
     -- POST /workspace/subscription/change-plan
     -- Downgrade: agenda pending_plan hasta current_period_end (sin credito de plan).
     -- Cancelar agenda: plan_code = plan actual. Upgrade de pago: usar activate.
+    -- FREE no se agenda aqui: usar pr_cancel_subscription.
     PROCEDURE pr_change_plan(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    -- POST /workspace/subscription/cancel
+    -- Terminar suscripcion: agenda FREE al fin de ciclo, auto_renew=0, canceled_at.
+    -- Al aplicar: FREE + READ_ONLY + cancela addons sin credito.
+    PROCEDURE pr_cancel_subscription(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    -- POST /workspace/subscription/cancel/undo
+    -- Deshace cancelacion programada (antes del period_end).
+    PROCEDURE pr_undo_cancel_subscription(
         pi_auth_header   IN  VARCHAR2,
         pi_body          IN  CLOB,
         po_status_code   OUT NUMBER,
@@ -130,6 +150,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     c_iso_fmt      CONSTANT VARCHAR2(40) := 'YYYY-MM-DD"T"HH24:MI:SSTZH:TZM';
     c_plan_premium CONSTANT VARCHAR2(30) := 'PREMIUM';
     c_plan_base    CONSTANT VARCHAR2(30) := 'BASE';
+    c_plan_free    CONSTANT VARCHAR2(30) := 'FREE';
 
     --------------------------------------------------------------------------
     -- Helpers
@@ -647,10 +668,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         );
     END pr_consume_credit;
 
+    PROCEDURE pr_cancel_active_addons_no_credit(pi_org_id IN NUMBER) IS
+    BEGIN
+        UPDATE /*+ no_parallel */ org_storage_addon
+           SET status  = 'CANCELED',
+               ends_at = NVL(ends_at, systimestamp)
+         WHERE org_id_organization = pi_org_id
+           AND status = 'ACTIVE';
+    END pr_cancel_active_addons_no_credit;
+
     PROCEDURE pr_apply_due_pending_plan(pi_org_id IN NUMBER) IS
-        v_pending_id NUMBER;
-        v_pending_at TIMESTAMP WITH TIME ZONE;
-        v_period_end TIMESTAMP WITH TIME ZONE;
+        v_pending_id   NUMBER;
+        v_pending_at   TIMESTAMP WITH TIME ZONE;
+        v_period_end   TIMESTAMP WITH TIME ZONE;
+        v_pending_code VARCHAR2(30);
     BEGIN
         SELECT pending_pln_id_plan, pending_plan_change_at, current_period_end
           INTO v_pending_id, v_pending_at, v_period_end
@@ -663,12 +694,31 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
         IF (v_pending_at IS NOT NULL AND v_pending_at <= systimestamp)
            OR (v_period_end IS NOT NULL AND v_period_end <= systimestamp) THEN
-            UPDATE /*+ no_parallel */ org_subscription
-               SET pln_id_plan           = v_pending_id,
-                   pending_pln_id_plan   = NULL,
-                   pending_plan_change_at = NULL,
-                   updated_at            = systimestamp
-             WHERE org_id_organization = pi_org_id;
+            BEGIN
+                SELECT code INTO v_pending_code FROM ref_plan WHERE id_plan = v_pending_id;
+            EXCEPTION WHEN NO_DATA_FOUND THEN
+                v_pending_code := NULL;
+            END;
+
+            IF v_pending_code = c_plan_free THEN
+                -- Terminar: FREE + READ_ONLY + apagar cobros + cancelar addons (sin credito).
+                UPDATE /*+ no_parallel */ org_subscription
+                   SET pln_id_plan            = v_pending_id,
+                       status                 = 'READ_ONLY',
+                       auto_renew             = 0,
+                       pending_pln_id_plan    = NULL,
+                       pending_plan_change_at = NULL,
+                       updated_at             = systimestamp
+                 WHERE org_id_organization = pi_org_id;
+                pr_cancel_active_addons_no_credit(pi_org_id);
+            ELSE
+                UPDATE /*+ no_parallel */ org_subscription
+                   SET pln_id_plan            = v_pending_id,
+                       pending_pln_id_plan    = NULL,
+                       pending_plan_change_at = NULL,
+                       updated_at             = systimestamp
+                 WHERE org_id_organization = pi_org_id;
+            END IF;
             pr_refresh_storage_limit(pi_org_id);
         END IF;
     END pr_apply_due_pending_plan;
@@ -679,16 +729,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     ) IS
     BEGIN
         UPDATE /*+ no_parallel */ org_subscription
-           SET pln_id_plan           = pi_plan_id,
-               status                = 'ACTIVE',
-               current_period_start  = systimestamp,
-               current_period_end    = ADD_MONTHS(GREATEST(NVL(current_period_end, systimestamp), systimestamp), 1),
-               grace_ends_at         = NULL,
-               charge_retry_count    = 0,
-               last_charge_at        = systimestamp,
-               pending_pln_id_plan   = NULL,
+           SET pln_id_plan            = pi_plan_id,
+               status                 = 'ACTIVE',
+               auto_renew             = 1,
+               canceled_at            = NULL,
+               current_period_start   = systimestamp,
+               current_period_end     = ADD_MONTHS(GREATEST(NVL(current_period_end, systimestamp), systimestamp), 1),
+               grace_ends_at          = NULL,
+               charge_retry_count     = 0,
+               last_charge_at         = systimestamp,
+               pending_pln_id_plan    = NULL,
                pending_plan_change_at = NULL,
-               updated_at            = systimestamp
+               updated_at             = systimestamp
          WHERE org_id_organization = pi_org_id;
         pr_refresh_storage_limit(pi_org_id);
     END pr_fulfill_paid_subscription;
@@ -810,6 +862,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
          WHERE org_id_organization = pi_org_id;
 
         pr_get_period_bounds(pi_org_id, v_sub_start, v_sub_end);
+
+        IF v_target IN ('PLAN', 'CONSOLIDATED') AND UPPER(TRIM(pi_plan_code)) = c_plan_free THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'El plan Continuidad no se cobra. Elegi Base o Premium para reactivar.'
+            );
+        END IF;
 
         IF v_target = 'PLAN' THEN
             BEGIN
@@ -1035,18 +1094,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_days_rem        NUMBER := 0;
         v_period_days     NUMBER := 30;
         v_active_addons   json_array_t := json_array_t();
+        v_auto_renew      NUMBER(1,0) := 1;
+        v_canceled_at     TIMESTAMP WITH TIME ZONE;
     BEGIN
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_session, 'Token inv?lido o sin organizaci?n asociada.');
         END IF;
 
+        -- Aplicar cancelacion/downgrade vencidos antes de armar el snapshot.
+        pr_apply_due_pending_plan(v_org_id);
+        COMMIT;
+
         SELECT s.pln_id_plan, p.code, p.name, p.price_amount, s.status, s.is_founder, s.billing_exempt,
                s.storage_used_bytes, s.trial_ends_at, s.current_period_start, s.current_period_end, s.grace_ends_at,
-               NVL(s.account_balance, 0), s.pending_pln_id_plan, s.pending_plan_change_at
+               NVL(s.account_balance, 0), s.pending_pln_id_plan, s.pending_plan_change_at,
+               NVL(s.auto_renew, 1), s.canceled_at
           INTO v_cur_plan_id, v_cur_plan_code, v_cur_plan_name, v_cur_plan_price, v_status, v_is_founder, v_billing_exempt,
                v_storage_used, v_trial_ends_at, v_period_start, v_period_end, v_grace_ends_at,
-               v_account_balance, v_pending_plan_id, v_pending_at
+               v_account_balance, v_pending_plan_id, v_pending_at,
+               v_auto_renew, v_canceled_at
           FROM org_subscription s
           JOIN ref_plan p ON p.id_plan = s.pln_id_plan
          WHERE s.org_id_organization = v_org_id;
@@ -1145,6 +1212,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_current.put('days_remaining_in_period', v_days_rem);
         v_current.put('period_days', v_period_days);
         v_current.put('account_balance', v_account_balance);
+        v_current.put('auto_renew', v_auto_renew);
+        v_current.put('canceled_at', fn_ts_to_iso(v_canceled_at));
+        v_current.put('cancel_scheduled',
+            CASE WHEN v_pending_code = c_plan_free THEN 1 ELSE 0 END);
         IF v_pending_code IS NOT NULL THEN
             v_current.put('pending_plan_code', v_pending_code);
             v_current.put('pending_plan_name', v_pending_name);
@@ -1156,11 +1227,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
         v_current.put('active_storage_addons', v_active_addons);
 
-        -- Planes activos
+        -- Planes comerciales (excluye FREE / Continuidad del catalogo de compra)
         FOR rec IN (
             SELECT id_plan, code, name, price_amount, currency, billing_period, storage_limit_bytes, sort_order
               FROM ref_plan
              WHERE is_active = 1
+               AND code <> c_plan_free
              ORDER BY sort_order, id_plan
         ) LOOP
             DECLARE
@@ -1363,17 +1435,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Plan no valido.');
         END;
 
+        IF v_plan_code = c_plan_free THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Para terminar la suscripcion usa Terminar suscripcion (no Pasar a Base).'
+            );
+        END IF;
+
         SELECT s.pln_id_plan, p.code, p.price_amount, s.current_period_end, s.billing_exempt
           INTO v_cur_plan_id, v_cur_plan_code, v_cur_plan_price, v_period_end, v_billing_exempt
           FROM org_subscription s
           JOIN ref_plan p ON p.id_plan = s.pln_id_plan
          WHERE s.org_id_organization = v_org_id;
 
-        -- Cancelar downgrade agendado (pedir el plan actual).
+        -- Cancelar downgrade / terminacion agendada (pedir el plan actual).
         IF v_plan_id = v_cur_plan_id THEN
             UPDATE /*+ no_parallel */ org_subscription
                SET pending_pln_id_plan    = NULL,
                    pending_plan_change_at = NULL,
+                   auto_renew             = 1,
+                   canceled_at            = NULL,
                    updated_at             = systimestamp
              WHERE org_id_organization = v_org_id;
             COMMIT;
@@ -1417,6 +1498,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         -- Downgrade / mismo precio hacia Base: agendar al fin del ciclo (sin credito de plan).
+        -- Cliente de pago: limpia cancelacion (auto_renew) y agenda BASE.
         IF v_period_end IS NULL THEN
             v_period_end := ADD_MONTHS(systimestamp, 1);
         END IF;
@@ -1424,6 +1506,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         UPDATE /*+ no_parallel */ org_subscription
            SET pending_pln_id_plan    = v_plan_id,
                pending_plan_change_at = v_period_end,
+               auto_renew             = 1,
+               canceled_at            = NULL,
                updated_at             = systimestamp
          WHERE org_id_organization = v_org_id;
         COMMIT;
@@ -1433,7 +1517,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_response.put('status', 'success');
         v_response.put('message',
             'Cambio a ' || v_plan_code || ' programado. Seguis con ' || v_cur_plan_code
-            || ' hasta el fin del periodo.');
+            || ' hasta el fin del periodo. Luego se cobra la tarifa de ' || v_plan_code || '.');
         v_data.put('plan_code', v_cur_plan_code);
         v_data.put('pending_plan_code', v_plan_code);
         v_data.put('pending_plan_change_at', fn_ts_to_iso(v_period_end));
@@ -1446,6 +1530,181 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             ROLLBACK;
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_change_plan;
+
+    --------------------------------------------------------------------------
+    -- POST /workspace/subscription/cancel
+    --------------------------------------------------------------------------
+    PROCEDURE pr_cancel_subscription(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id         NUMBER;
+        v_cur_plan_code  VARCHAR2(30);
+        v_period_end     TIMESTAMP WITH TIME ZONE;
+        v_billing_exempt NUMBER(1,0);
+        v_is_founder     NUMBER(1,0);
+        v_status         VARCHAR2(20);
+        v_free_id        NUMBER;
+        v_response       json_object_t := json_object_t();
+        v_data           json_object_t := json_object_t();
+    BEGIN
+        pr_assert_admin(pi_auth_header, v_org_id);
+
+        BEGIN
+            SELECT id_plan INTO v_free_id FROM ref_plan WHERE code = c_plan_free AND is_active = 1;
+        EXCEPTION WHEN NO_DATA_FOUND THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Plan de continuidad no configurado.');
+        END;
+
+        SELECT p.code, s.current_period_end, NVL(s.billing_exempt, 0), NVL(s.is_founder, 0), s.status
+          INTO v_cur_plan_code, v_period_end, v_billing_exempt, v_is_founder, v_status
+          FROM org_subscription s
+          JOIN ref_plan p ON p.id_plan = s.pln_id_plan
+         WHERE s.org_id_organization = v_org_id;
+
+        IF v_billing_exempt = 1 OR v_is_founder = 1 THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_forbidden,
+                'Las cuentas fundador o exentas no usan Terminar suscripcion.'
+            );
+        END IF;
+
+        IF v_cur_plan_code = c_plan_free OR v_status = 'READ_ONLY' THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Tu cuenta ya esta en modo continuidad / solo lectura. Renova un plan para reactivar.'
+            );
+        END IF;
+
+        IF v_period_end IS NULL THEN
+            v_period_end := ADD_MONTHS(systimestamp, 1);
+        END IF;
+
+        UPDATE /*+ no_parallel */ org_subscription
+           SET pending_pln_id_plan    = v_free_id,
+               pending_plan_change_at = v_period_end,
+               auto_renew             = 0,
+               canceled_at            = NVL(canceled_at, systimestamp),
+               updated_at             = systimestamp
+         WHERE org_id_organization = v_org_id;
+
+        -- Si el periodo ya vencio, aplicar de inmediato.
+        pr_apply_due_pending_plan(v_org_id);
+        COMMIT;
+
+        DECLARE
+            v_pending_id   NUMBER;
+            v_pending_at   TIMESTAMP WITH TIME ZONE;
+            v_pending_code VARCHAR2(30);
+        BEGIN
+            SELECT s.pending_pln_id_plan, s.pending_plan_change_at, p.code, s.status
+              INTO v_pending_id, v_pending_at, v_cur_plan_code, v_status
+              FROM org_subscription s
+              JOIN ref_plan p ON p.id_plan = s.pln_id_plan
+             WHERE s.org_id_organization = v_org_id;
+
+            IF v_pending_id IS NOT NULL THEN
+                SELECT code INTO v_pending_code FROM ref_plan WHERE id_plan = v_pending_id;
+            END IF;
+
+            po_status_code := pkg_aox_util.c_success_ok_code;
+            v_response.put('status', 'success');
+            IF v_status = 'READ_ONLY' OR v_cur_plan_code = c_plan_free THEN
+                v_response.put('message',
+                    'Suscripcion terminada. Tu cuenta quedo en modo solo lectura (Continuidad).');
+                v_data.put('scheduled', 0);
+                v_data.put('applied', 1);
+            ELSE
+                v_response.put('message',
+                    'Cancelacion programada. Seguis con ' || v_cur_plan_code
+                    || ' hasta el fin del periodo; luego pasas a Continuidad (solo lectura) sin cobros.');
+                v_data.put('scheduled', 1);
+                v_data.put('applied', 0);
+                v_data.put('pending_plan_code', NVL(v_pending_code, c_plan_free));
+                v_data.put('pending_plan_change_at', fn_ts_to_iso(v_pending_at));
+            END IF;
+            v_data.put('plan_code', v_cur_plan_code);
+            v_data.put('effective_status', pkg_aox_subscription_api.fn_get_subscription_state(v_org_id));
+            v_response.put('data', v_data);
+            po_response_body := v_response.to_clob();
+        END;
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_cancel_subscription;
+
+    --------------------------------------------------------------------------
+    -- POST /workspace/subscription/cancel/undo
+    --------------------------------------------------------------------------
+    PROCEDURE pr_undo_cancel_subscription(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_cur_plan_code VARCHAR2(30);
+        v_pending_id    NUMBER;
+        v_pending_code  VARCHAR2(30);
+        v_response      json_object_t := json_object_t();
+        v_data          json_object_t := json_object_t();
+    BEGIN
+        pr_assert_admin(pi_auth_header, v_org_id);
+
+        SELECT p.code, s.pending_pln_id_plan
+          INTO v_cur_plan_code, v_pending_id
+          FROM org_subscription s
+          JOIN ref_plan p ON p.id_plan = s.pln_id_plan
+         WHERE s.org_id_organization = v_org_id;
+
+        IF v_pending_id IS NULL THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'No hay una cancelacion programada para deshacer.'
+            );
+        END IF;
+
+        SELECT code INTO v_pending_code FROM ref_plan WHERE id_plan = v_pending_id;
+        IF v_pending_code <> c_plan_free THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Hay un cambio de plan programado (no una cancelacion). Usa Mantener plan.'
+            );
+        END IF;
+
+        IF v_cur_plan_code = c_plan_free THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'La cancelacion ya se aplico. Renova un plan Base o Premium para reactivar.'
+            );
+        END IF;
+
+        UPDATE /*+ no_parallel */ org_subscription
+           SET pending_pln_id_plan    = NULL,
+               pending_plan_change_at = NULL,
+               auto_renew             = 1,
+               canceled_at            = NULL,
+               updated_at             = systimestamp
+         WHERE org_id_organization = v_org_id;
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('message', 'Cancelacion anulada. Seguis con ' || v_cur_plan_code || '.');
+        v_data.put('plan_code', v_cur_plan_code);
+        v_data.put('scheduled', 0);
+        v_data.put('pending_cleared', 1);
+        v_data.put('effective_status', pkg_aox_subscription_api.fn_get_subscription_state(v_org_id));
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_undo_cancel_subscription;
 
     --------------------------------------------------------------------------
     -- POST /workspace/subscription/addon/cancel
@@ -2149,9 +2408,36 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_invoice_id NUMBER;
         v_hash       VARCHAR2(128);
         v_plan_code  VARCHAR2(30);
+        v_auto_renew NUMBER(1,0);
         v_max_retry  NUMBER := NVL(TO_NUMBER(fn_get_parameter('SUBSCRIPTION_MAX_CHARGE_RETRIES')), 4);
-        v_has_addons NUMBER;
     BEGIN
+        -- 1) Aplicar pending vencidos (incluye Terminar→FREE aunque auto_renew=0).
+        FOR rec IN (
+            SELECT s.org_id_organization AS org_id
+              FROM org_subscription s
+             WHERE s.pending_pln_id_plan IS NOT NULL
+               AND (
+                    (s.pending_plan_change_at IS NOT NULL AND s.pending_plan_change_at <= systimestamp)
+                 OR (s.current_period_end IS NOT NULL AND s.current_period_end <= systimestamp)
+               )
+        ) LOOP
+            BEGIN
+                pr_apply_due_pending_plan(rec.org_id);
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    ROLLBACK;
+                    pkg_aox_util.pr_log_api(
+                        pi_api_name => 'SUBSCRIPTION_BILLING_CYCLE', pi_process_name => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_APPLY_PENDING',
+                        pi_http_method => 'JOB', pi_endpoint => 'HASEL_SUBSCRIPTION_BILLING_CYCLE', pi_status => 'ERROR',
+                        pi_error_code => SQLCODE, pi_error_message => SQLERRM,
+                        pi_error_stack => DBMS_UTILITY.FORMAT_ERROR_STACK, pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                        pi_request_body => TO_CLOB('org_id=' || rec.org_id)
+                    );
+            END;
+        END LOOP;
+
+        -- 2) Cobrar renovaciones (Base y Premium). No cobra FREE ni auto_renew=0.
         FOR rec IN (
             SELECT s.org_id_organization AS org_id
               FROM org_subscription s
@@ -2163,46 +2449,33 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                AND NVL(s.charge_retry_count, 0) < v_max_retry
         ) LOOP
             BEGIN
-                -- 1) Aplicar downgrade agendado antes del cargo.
-                pr_apply_due_pending_plan(rec.org_id);
-                COMMIT;
-
-                SELECT p.code
-                  INTO v_plan_code
+                SELECT p.code, NVL(s.auto_renew, 1)
+                  INTO v_plan_code, v_auto_renew
                   FROM org_subscription s
                   JOIN ref_plan p ON p.id_plan = s.pln_id_plan
                  WHERE s.org_id_organization = rec.org_id;
 
-                SELECT COUNT(*)
-                  INTO v_has_addons
-                  FROM org_storage_addon
-                 WHERE org_id_organization = rec.org_id
-                   AND status = 'ACTIVE'
-                   AND ROWNUM = 1;
-
-                -- Base sin addons: no cobrar.
-                IF v_plan_code = c_plan_base AND v_has_addons = 0 THEN
-                    NULL; -- skip charge
-                ELSE
-
-                    -- Contabilizar el intento (dunning). El webhook / PAID por credito lo resetea.
-                    UPDATE /*+ no_parallel */ org_subscription
-                       SET charge_retry_count = NVL(charge_retry_count, 0) + 1,
-                           last_charge_at     = systimestamp,
-                           updated_at         = systimestamp
-                     WHERE org_id_organization = rec.org_id;
-                    COMMIT;
-
-                    -- Un solo cargo: plan efectivo + addons ACTIVE, menos account_balance.
-                    pr_charge_target(
-                        pi_org_id      => rec.org_id,
-                        pi_target_type => 'CONSOLIDATED',
-                        pi_plan_code   => v_plan_code,
-                        pi_addon_code  => NULL,
-                        po_invoice_id  => v_invoice_id,
-                        po_hash        => v_hash
-                    );
+                IF v_plan_code = c_plan_free OR v_auto_renew = 0 THEN
+                    CONTINUE;
                 END IF;
+
+                -- Contabilizar el intento (dunning). El webhook / PAID por credito lo resetea.
+                UPDATE /*+ no_parallel */ org_subscription
+                   SET charge_retry_count = NVL(charge_retry_count, 0) + 1,
+                       last_charge_at     = systimestamp,
+                       updated_at         = systimestamp
+                 WHERE org_id_organization = rec.org_id;
+                COMMIT;
+
+                -- Un solo cargo: plan efectivo (BASE o PREMIUM) + addons ACTIVE, menos account_balance.
+                pr_charge_target(
+                    pi_org_id      => rec.org_id,
+                    pi_target_type => 'CONSOLIDATED',
+                    pi_plan_code   => v_plan_code,
+                    pi_addon_code  => NULL,
+                    po_invoice_id  => v_invoice_id,
+                    po_hash        => v_hash
+                );
             EXCEPTION
                 WHEN OTHERS THEN
                     ROLLBACK;

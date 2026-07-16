@@ -40,5 +40,5 @@ ALTER TABLE ref_plan
   )
 /
 
-COMMENT ON TABLE ref_plan IS 'Catalogo de planes comerciales (BASE, PREMIUM). Precios mensuales en la moneda indicada.';
-COMMENT ON COLUMN ref_plan.storage_limit_bytes IS 'Storage base incluido en el plan (sin addons). Base=0, Premium=5GB.';
+COMMENT ON TABLE ref_plan IS 'Catalogo de planes (BASE, PREMIUM, FREE/Continuidad). FREE no se ofrece en checkout; es destino de Terminar suscripcion.';
+COMMENT ON COLUMN ref_plan.storage_limit_bytes IS 'Storage base incluido en el plan (sin addons). Base/FREE=0, Premium=5GB.';

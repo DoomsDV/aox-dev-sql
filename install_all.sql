@@ -206,8 +206,9 @@ COMMIT;
 PROMPT --- Seed catalogo de planes / features / storage addons ---
 MERGE INTO ref_plan t
 USING (
-  SELECT 1 AS id_plan, 'BASE'    AS code, 'Base'    AS name,  99000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 0          AS storage_limit_bytes, 1 AS is_active, 1 AS sort_order FROM dual UNION ALL
-  SELECT 2 AS id_plan, 'PREMIUM' AS code, 'Premium' AS name, 229000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 5368709120 AS storage_limit_bytes, 1 AS is_active, 2 AS sort_order FROM dual
+  SELECT 1 AS id_plan, 'BASE'    AS code, 'Base'        AS name,  99000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 0          AS storage_limit_bytes, 1 AS is_active, 1 AS sort_order FROM dual UNION ALL
+  SELECT 2 AS id_plan, 'PREMIUM' AS code, 'Premium'     AS name, 229000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 5368709120 AS storage_limit_bytes, 1 AS is_active, 2 AS sort_order FROM dual UNION ALL
+  SELECT 3 AS id_plan, 'FREE'    AS code, 'Continuidad' AS name,      0 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 0          AS storage_limit_bytes, 1 AS is_active, 0 AS sort_order FROM dual
 ) s
 ON (t.id_plan = s.id_plan)
 WHEN MATCHED THEN UPDATE SET

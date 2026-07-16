@@ -228,9 +228,30 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
     procedure fn_assert_org_can_write(
         pi_org_id in number
     ) is
-        v_state varchar2(20) := fn_get_subscription_state(pi_org_id);
+        v_state      varchar2(20) := fn_get_subscription_state(pi_org_id);
+        v_plan_code  varchar2(30);
+        v_canceled   timestamp with time zone;
     begin
         if v_state in ('READ_ONLY', 'CANCELED', 'TRIAL_EXPIRED') then
+            begin
+                select p.code, s.canceled_at
+                  into v_plan_code, v_canceled
+                  from org_subscription s
+                  join ref_plan p on p.id_plan = s.pln_id_plan
+                 where s.org_id_organization = pi_org_id;
+            exception
+                when no_data_found then
+                    v_plan_code := null;
+                    v_canceled  := null;
+            end;
+
+            if v_plan_code = 'FREE' or v_canceled is not null then
+                raise_application_error(
+                    pkg_aox_util.c_sqlcode_forbidden,
+                    'Tu cuenta está en solo lectura. Renová tu plan para seguir agendando.'
+                );
+            end if;
+
             raise_application_error(
                 pkg_aox_util.c_sqlcode_forbidden,
                 'Tu suscripción no permite esta acción (estado ' || v_state ||
@@ -345,6 +366,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         v_period_start      org_subscription.current_period_start%type;
         v_period_end        org_subscription.current_period_end%type;
         v_grace_ends_at     org_subscription.grace_ends_at%type;
+        v_canceled_at       org_subscription.canceled_at%type;
+        v_auto_renew        org_subscription.auto_renew%type;
 
         v_effective_state   varchar2(20);
         v_storage_limit     number;
@@ -375,7 +398,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
             s.trial_ends_at,
             s.current_period_start,
             s.current_period_end,
-            s.grace_ends_at
+            s.grace_ends_at,
+            s.canceled_at,
+            nvl(s.auto_renew, 1)
         into
             v_plan_id,
             v_plan_code,
@@ -390,7 +415,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
             v_trial_ends_at,
             v_period_start,
             v_period_end,
-            v_grace_ends_at
+            v_grace_ends_at,
+            v_canceled_at,
+            v_auto_renew
         from org_subscription s
         join ref_plan p
             on p.id_plan = s.pln_id_plan
@@ -409,6 +436,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         v_sub_obj.put('current_period_start', fn_ts_to_iso(v_period_start));
         v_sub_obj.put('current_period_end'  , fn_ts_to_iso(v_period_end));
         v_sub_obj.put('grace_ends_at'       , fn_ts_to_iso(v_grace_ends_at));
+        v_sub_obj.put('canceled_at'         , fn_ts_to_iso(v_canceled_at));
+        v_sub_obj.put('auto_renew'          , v_auto_renew);
 
         -- Plan
         v_plan_obj.put('code'          , v_plan_code);

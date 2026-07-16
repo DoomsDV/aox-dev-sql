@@ -12,6 +12,8 @@ las claves por-organización que se usan para las señas de citas.
 | GET  | `/api/v1/workspace/plans` | `hasel` | `pkg_aox_subscription_billing_api.pr_get_plans` |
 | POST | `/api/v1/workspace/subscription/checkout` | `hasel` | `pkg_aox_subscription_billing_api.pr_create_checkout` |
 | POST | `/api/v1/workspace/subscription/change-plan` | `hasel` | `pkg_aox_subscription_billing_api.pr_change_plan` |
+| POST | `/api/v1/workspace/subscription/cancel` | `hasel` | `pkg_aox_subscription_billing_api.pr_cancel_subscription` |
+| POST | `/api/v1/workspace/subscription/cancel/undo` | `hasel` | `pkg_aox_subscription_billing_api.pr_undo_cancel_subscription` |
 | GET  | `/api/v1/workspace/subscription/invoice/:hash` | `hasel` | `pkg_aox_subscription_billing_api.pr_get_invoice_by_hash` |
 | POST | `/pagopar/v1/subscription/webhook` | `pagopar` | `pkg_aox_subscription_billing_api.pr_subscription_webhook` |
 
@@ -78,16 +80,27 @@ Cobro con tarjeta catastrada (uPay). Request:
 Misma lógica que `activate` (cobro recurrente con tarjeta). Preferir `activate` desde el panel.
 
 ### Renovación — `pr_run_billing_cycle`
-1. Aplica `pending_pln_id_plan` si el periodo venció.  
-2. Un cargo **CONSOLIDATED**: `gross = plan (+50% fundador) + Σ addons`;  
+1. Aplica `pending_pln_id_plan` vencidos (incluye Terminar→FREE aunque `auto_renew=0`).  
+2. Un cargo **CONSOLIDATED** si `auto_renew=1` y plan ≠ FREE:  
+   `gross = plan BASE/PREMIUM (+50% fundador) + Σ addons`;  
    `amount = max(0, gross - account_balance)` (mín. Pagopar 1000 si `0 < net < 1000`).  
 3. Si `net = 0`: factura `PAID` con `payment_provider=credit`, sin Pagopar.  
-Excluye `billing_exempt` y Base **sin** addons ACTIVE.
+Excluye `billing_exempt`, `auto_renew=0` y plan `FREE`. **Base se cobra siempre** (99.000 Gs).
 
 ### POST /workspace/subscription/change-plan  (solo ADMIN)
-- **Downgrade** (p.ej. Premium→Base): agenda `pending_plan_*` = fin de ciclo. Sigue Premium hasta entonces. **Sin crédito de plan.**
-- **Cancelar agenda:** `plan_code` = plan actual.
+- **Downgrade** (p.ej. Premium→Base): agenda `pending_plan_*` = fin de ciclo. Sigue Premium hasta entonces. **Sin crédito de plan.** Luego se cobra Base.
+- **Cancelar agenda / undo terminación:** `plan_code` = plan actual (restaura `auto_renew=1`).
 - **Upgrade:** requiere `activate` (pago), salvo `billing_exempt`.
+- **FREE:** no se agenda aquí; usar `cancel`.
+
+### POST /workspace/subscription/cancel  (solo ADMIN)
+Terminar suscripción (soft-exit):
+- Agenda `pending = FREE` al `current_period_end`, `auto_renew=0`, `canceled_at`.
+- Al aplicar: plan Continuidad, `status=READ_ONLY`, cancela addons ACTIVE **sin crédito**.
+- No cobra. Reactivar con `activate` (Base/Premium) → `ACTIVE` + `auto_renew=1`.
+
+### POST /workspace/subscription/cancel/undo  (solo ADMIN)
+Deshace cancelación programada (solo si pending=FREE y aún no aplicado).
 
 ### POST /workspace/subscription/addon/cancel  (solo ADMIN)
 Cancela 1 unidad ACTIVE de inmediato, acredita `fn_unused_credit_amount` a `account_balance` (`CANCEL_ADDON` en ledger).  
