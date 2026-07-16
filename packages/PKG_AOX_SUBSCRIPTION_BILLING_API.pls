@@ -223,13 +223,48 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         po_email  OUT VARCHAR2,
         po_phone  OUT VARCHAR2
     ) IS
+        -- Pagopar (agregar-cliente) exige celular con minimo 10 digitos.
+        c_phone_fallback CONSTANT VARCHAR2(20) := '0981000000';
+        v_digits         VARCHAR2(60);
     BEGIN
         SELECT name, company_email
           INTO po_name, po_email
           FROM organization
          WHERE id_organization = pi_org_id;
 
-        po_phone := '0';
+        BEGIN
+            SELECT REGEXP_REPLACE(public_whatsapp, '[^0-9]', '')
+              INTO v_digits
+              FROM workspace_setting
+             WHERE org_id_organization = pi_org_id
+               AND public_whatsapp IS NOT NULL
+               AND LENGTH(REGEXP_REPLACE(public_whatsapp, '[^0-9]', '')) >= 10
+               AND ROWNUM = 1;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_digits := NULL;
+        END;
+
+        IF v_digits IS NULL THEN
+            BEGIN
+                SELECT REGEXP_REPLACE(phone_number, '[^0-9]', '')
+                  INTO v_digits
+                  FROM professional
+                 WHERE org_id_organization = pi_org_id
+                   AND LENGTH(REGEXP_REPLACE(phone_number, '[^0-9]', '')) >= 10
+                   AND ROWNUM = 1;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_digits := NULL;
+            END;
+        END IF;
+
+        IF v_digits IS NULL OR LENGTH(v_digits) < 10 THEN
+            po_phone := c_phone_fallback;
+        ELSE
+            po_phone := v_digits;
+        END IF;
+
         IF po_email IS NULL OR po_email NOT LIKE '%@%' THEN
             po_email := 'facturacion+org' || pi_org_id || '@hasel.app';
         END IF;
