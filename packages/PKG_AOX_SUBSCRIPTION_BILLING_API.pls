@@ -385,7 +385,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
         v_arr := v_resp.get_array('resultado');
         FOR i IN 0 .. v_arr.get_size - 1 LOOP
-            v_obj := TREAT(v_arr.get(i) AS json_object_t);
+            v_obj := json_object_t(v_arr.get(i));
             IF v_obj.get_string('tarjeta') = pi_pagopar_card_id THEN
                 RETURN v_obj.get_string('alias_token');
             END IF;
@@ -399,6 +399,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_arr      json_array_t;
         v_obj      json_object_t;
         v_card_id  VARCHAR2(64);
+        v_brand    VARCHAR2(40);
+        v_masked   VARCHAR2(40);
+        v_card_type VARCHAR2(20);
+        v_issuer   VARCHAR2(120);
+        v_provider VARCHAR2(20);
         v_has_def  NUMBER := 0;
         v_active   NUMBER := 0;
     BEGIN
@@ -409,27 +414,32 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
         v_arr := v_resp.get_array('resultado');
         FOR i IN 0 .. v_arr.get_size - 1 LOOP
-            v_obj     := TREAT(v_arr.get(i) AS json_object_t);
-            v_card_id := v_obj.get_string('tarjeta');
+            -- Extraer a variables PL/SQL: no usar json_object_t.* dentro de MERGE (ORA-40573).
+            v_obj       := json_object_t(v_arr.get(i));
+            v_card_id   := v_obj.get_string('tarjeta');
+            v_brand     := v_obj.get_string('marca');
+            v_masked    := v_obj.get_string('tarjeta_numero');
+            v_card_type := v_obj.get_string('tipo_tarjeta');
+            v_issuer    := v_obj.get_string('emisor');
+            v_provider  := NVL(v_obj.get_string('proveedor'), 'uPay');
 
             MERGE /*+ no_parallel */ INTO org_payment_card t
             USING (SELECT pi_org_id AS org_id, v_card_id AS card_id FROM dual) s
                ON (t.org_id_organization = s.org_id AND t.pagopar_card_id = s.card_id)
             WHEN MATCHED THEN
                 UPDATE SET t.status        = 'ACTIVE',
-                           t.brand         = v_obj.get_string('marca'),
-                           t.masked_number = v_obj.get_string('tarjeta_numero'),
-                           t.card_type     = v_obj.get_string('tipo_tarjeta'),
-                           t.issuer        = v_obj.get_string('emisor'),
-                           t.provider      = NVL(v_obj.get_string('proveedor'), t.provider),
+                           t.brand         = v_brand,
+                           t.masked_number = v_masked,
+                           t.card_type     = v_card_type,
+                           t.issuer        = v_issuer,
+                           t.provider      = NVL(v_provider, t.provider),
                            t.confirmed_at  = NVL(t.confirmed_at, systimestamp),
                            t.updated_at    = systimestamp
             WHEN NOT MATCHED THEN
                 INSERT (org_id_organization, provider, pagopar_identificador, pagopar_card_id,
                         brand, masked_number, card_type, issuer, status, is_default, confirmed_at)
-                VALUES (pi_org_id, NVL(v_obj.get_string('proveedor'), 'uPay'), TO_CHAR(pi_org_id), s.card_id,
-                        v_obj.get_string('marca'), v_obj.get_string('tarjeta_numero'),
-                        v_obj.get_string('tipo_tarjeta'), v_obj.get_string('emisor'),
+                VALUES (pi_org_id, v_provider, TO_CHAR(pi_org_id), s.card_id,
+                        v_brand, v_masked, v_card_type, v_issuer,
                         'ACTIVE', 0, systimestamp);
         END LOOP;
 
