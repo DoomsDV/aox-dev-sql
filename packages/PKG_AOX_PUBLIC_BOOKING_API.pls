@@ -16,6 +16,13 @@ CREATE OR REPLACE PACKAGE pkg_aox_public_booking_api IS
         po_response_body OUT CLOB
     );
 
+    -- Hub publico del negocio: logo, about, sucursales y equipo (/:org_slug)
+    PROCEDURE pr_get_org_hub(
+        pi_org_slug      IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- Perfil público global por platform_user.public_slug (/u/:slug)
     PROCEDURE pr_get_user_public_profile(
         pi_public_slug   IN  VARCHAR2,
@@ -569,6 +576,199 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 pi_request_params  => 'org_slug=' || pi_org_slug || ';prof_slug=' || pi_prof_slug
             );
     END pr_get_profile;
+
+    PROCEDURE pr_get_org_hub(
+        pi_org_slug      IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_response_json   json_object_t := json_object_t();
+        v_hub_obj         json_object_t := json_object_t();
+        v_locations_arr   json_array_t  := json_array_t();
+        v_professionals_arr json_array_t := json_array_t();
+        v_categories_arr  json_array_t  := json_array_t();
+        v_loc_ids_arr     json_array_t;
+        v_loc_obj         json_object_t;
+        v_pro_obj         json_object_t;
+
+        v_org_id          NUMBER;
+        v_org_slug        VARCHAR2(100);
+        v_org_name        VARCHAR2(255);
+        v_logo_url        VARCHAR2(500);
+        v_description     VARCHAR2(1000);
+        v_public_whatsapp VARCHAR2(20);
+        v_sub_state       VARCHAR2(20);
+        v_maintenance     BOOLEAN := FALSE;
+        v_booking_path    VARCHAR2(300);
+    BEGIN
+        IF pi_org_slug IS NULL OR trim(pi_org_slug) = '' THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'org_slug es obligatorio.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        IF pkg_aox_util.fn_is_reserved_org_slug(pi_org_slug) = 1 THEN
+            po_status_code := pkg_aox_util.c_not_found_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'Negocio no encontrado.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        BEGIN
+            SELECT
+                o.id_organization,
+                ws.profile_slug,
+                o.name,
+                ws.logo_url,
+                ws.description,
+                ws.public_whatsapp
+            INTO
+                v_org_id,
+                v_org_slug,
+                v_org_name,
+                v_logo_url,
+                v_description,
+                v_public_whatsapp
+            FROM workspace_setting ws
+            JOIN organization o ON o.id_organization = ws.org_id_organization
+            WHERE lower(trim(ws.profile_slug)) = lower(trim(pi_org_slug));
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                po_status_code := pkg_aox_util.c_not_found_code;
+                v_response_json.put('status', 'error');
+                v_response_json.put('message', 'Negocio no encontrado.');
+                po_response_body := v_response_json.to_clob();
+                RETURN;
+        END;
+
+        v_sub_state := pkg_aox_subscription_api.fn_get_subscription_state(v_org_id);
+        IF v_sub_state IN ('READ_ONLY', 'CANCELED', 'TRIAL_EXPIRED') THEN
+            v_maintenance := TRUE;
+        END IF;
+
+        v_hub_obj.put('organization_name', v_org_name);
+        v_hub_obj.put('organization_slug', v_org_slug);
+        v_hub_obj.put('logo_url', NVL(v_logo_url, ''));
+        v_hub_obj.put('description', NVL(v_description, ''));
+        v_hub_obj.put('public_whatsapp', NVL(v_public_whatsapp, ''));
+        v_hub_obj.put('maintenance', v_maintenance);
+
+        FOR loc_rec IN (
+            SELECT
+                id_location,
+                name,
+                address,
+                latitude,
+                longitude
+            FROM location
+            WHERE org_id_organization = v_org_id
+              AND is_active = 1
+            ORDER BY name
+        ) LOOP
+            v_loc_obj := json_object_t();
+            v_loc_obj.put('id_location', loc_rec.id_location);
+            v_loc_obj.put('name', loc_rec.name);
+            v_loc_obj.put('address', NVL(loc_rec.address, ''));
+            IF loc_rec.latitude IS NOT NULL THEN
+                v_loc_obj.put('latitude', loc_rec.latitude);
+            END IF;
+            IF loc_rec.longitude IS NOT NULL THEN
+                v_loc_obj.put('longitude', loc_rec.longitude);
+            END IF;
+            v_locations_arr.append(v_loc_obj);
+        END LOOP;
+
+        -- Categorias / servicios activos del negocio (tags del Overview)
+        FOR cat_rec IN (
+            SELECT s.name
+              FROM service s
+             WHERE s.org_id_organization = v_org_id
+               AND s.is_active = 1
+               AND s.name IS NOT NULL
+               AND TRIM(s.name) IS NOT NULL
+             ORDER BY LOWER(s.name)
+             FETCH FIRST 16 ROWS ONLY
+        ) LOOP
+            v_categories_arr.append(cat_rec.name);
+        END LOOP;
+
+        FOR pro_rec IN (
+            SELECT
+                p.id_professional,
+                p.profile_slug,
+                NVL(p.display_name, TRIM(pu.first_name || ' ' || pu.last_name)) AS full_name,
+                NVL(s.name, 'Sin especialidad') AS specialty,
+                NVL(
+                    NULLIF(TRIM(p.profile_image_url), ''),
+                    NULLIF(TRIM(pu.profile_image_url), '')
+                ) AS image_url
+            FROM professional p
+            JOIN org_member m ON m.id_org_member = p.usr_id_user
+            JOIN platform_user pu ON pu.id_platform_user = m.platform_user_id
+            LEFT JOIN specialty s ON p.spe_id_specialty = s.id_specialty
+            WHERE p.org_id_organization = v_org_id
+              AND p.is_active = 1
+              AND p.profile_slug IS NOT NULL
+              AND TRIM(p.profile_slug) IS NOT NULL
+            ORDER BY full_name
+        ) LOOP
+            v_pro_obj := json_object_t();
+            v_pro_obj.put('id_professional', pro_rec.id_professional);
+            v_pro_obj.put('full_name', pro_rec.full_name);
+            v_pro_obj.put('specialty', pro_rec.specialty);
+            v_pro_obj.put('image_url', NVL(pro_rec.image_url, ''));
+            v_pro_obj.put('profile_slug', pro_rec.profile_slug);
+            v_booking_path :=
+                '/' || lower(trim(v_org_slug)) ||
+                '/p/' || lower(trim(pro_rec.profile_slug));
+            v_pro_obj.put('booking_path', v_booking_path);
+
+            v_loc_ids_arr := json_array_t();
+            FOR loc_id_rec IN (
+                SELECT DISTINCT ps.loc_id_location AS id_location
+                  FROM professional_schedule ps
+                  JOIN location l ON l.id_location = ps.loc_id_location
+                 WHERE ps.pro_id_professional = pro_rec.id_professional
+                   AND l.org_id_organization = v_org_id
+                   AND l.is_active = 1
+                 ORDER BY ps.loc_id_location
+            ) LOOP
+                v_loc_ids_arr.append(loc_id_rec.id_location);
+            END LOOP;
+            v_pro_obj.put('location_ids', v_loc_ids_arr);
+
+            v_professionals_arr.append(v_pro_obj);
+        END LOOP;
+
+        v_hub_obj.put('locations', v_locations_arr);
+        v_hub_obj.put('professionals', v_professionals_arr);
+        v_hub_obj.put('service_categories', v_categories_arr);
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data', v_hub_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'PUBLIC_ORG_HUB',
+                pi_process_name    => 'PKG_AOX_PUBLIC_BOOKING_API.PR_GET_ORG_HUB',
+                pi_http_method     => 'GET',
+                pi_endpoint        => '/public/org/:slug',
+                pi_status          => 'ERROR',
+                pi_status_code     => po_status_code,
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_request_params  => 'org_slug=' || pi_org_slug
+            );
+    END pr_get_org_hub;
 
     PROCEDURE pr_get_user_public_profile(
         pi_public_slug   IN  VARCHAR2,

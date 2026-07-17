@@ -77,6 +77,24 @@ CREATE OR REPLACE package pkg_aox_util as
     ) return varchar2;
 
     /**
+     * Indica si un slug de negocio choca con rutas estaticas del sitio
+     * (panel, auth, api, u, ...). Retorna 1 si esta reservado, 0 si no.
+     */
+    function fn_is_reserved_org_slug (
+        pi_slug in varchar2
+    ) return number;
+
+    /**
+     * Genera un profile_slug de organizacion unico y no reservado a partir
+     * del nombre del negocio. Si pi_exclude_org_id viene informado, ignora
+     * el slug actual de esa org (para reasignaciones).
+     */
+    function fn_allocate_org_profile_slug (
+        pi_source         in varchar2,
+        pi_exclude_org_id in number default null
+    ) return varchar2;
+
+    /**
      * Slug publico global sugerido para platform_user (/u/{slug}).
      * Base: nombre + apellido normalizados; si pi_id_platform_user viene informado
      * y el base ya existe en otro usuario, agrega -{id}.
@@ -317,6 +335,104 @@ CREATE OR REPLACE package body pkg_aox_util as
         v_slug := trim(both '-' from v_slug);
         return v_slug;
     end fn_generate_slug;
+
+    function fn_is_reserved_org_slug (
+        pi_slug in varchar2
+    ) return number is
+        v_slug varchar2(200) := lower(trim(pi_slug));
+    begin
+        if v_slug is null then
+            return 0;
+        end if;
+
+        return case
+            when v_slug in (
+                'panel',
+                'auth',
+                'api',
+                'u',
+                'r',
+                'p',
+                'pagopar',
+                'reserva-exitosa',
+                'politicas-y-privacidad',
+                'politicas-de-cancelacion-y-reembolso',
+                'icons',
+                'assets',
+                'static',
+                'admin',
+                'login',
+                'register',
+                'hasel',
+                'bookmate',
+                'www',
+                'app',
+                'support',
+                'help',
+                'pricing',
+                'blog',
+                'docs',
+                'sitemap',
+                'robots',
+                'favicon',
+                '_astro'
+            ) then 1
+            else 0
+        end;
+    end fn_is_reserved_org_slug;
+
+    function fn_allocate_org_profile_slug (
+        pi_source         in varchar2,
+        pi_exclude_org_id in number default null
+    ) return varchar2 is
+        v_base      varchar2(200);
+        v_candidate varchar2(200);
+        v_n         pls_integer := 0;
+        v_exists    pls_integer := 0;
+    begin
+        v_base := fn_generate_slug(pi_source);
+        if v_base is null or length(v_base) = 0 then
+            v_base := 'negocio';
+        end if;
+
+        -- Dejar margen para sufijo -NNNN
+        if length(v_base) > 90 then
+            v_base := substr(v_base, 1, 90);
+            v_base := trim(both '-' from v_base);
+            if v_base is null or length(v_base) = 0 then
+                v_base := 'negocio';
+            end if;
+        end if;
+
+        loop
+            if v_n = 0 then
+                v_candidate := v_base;
+            else
+                v_candidate := v_base || '-' || to_char(v_n);
+            end if;
+
+            if fn_is_reserved_org_slug(v_candidate) = 0 then
+                select count(*)
+                  into v_exists
+                  from workspace_setting ws
+                 where lower(trim(ws.profile_slug)) = lower(v_candidate)
+                   and (pi_exclude_org_id is null
+                        or ws.org_id_organization <> pi_exclude_org_id);
+
+                if v_exists = 0 then
+                    return v_candidate;
+                end if;
+            end if;
+
+            v_n := v_n + 1;
+            if v_n > 9999 then
+                raise_application_error(
+                    -20005,
+                    'No fue posible generar un enlace publico unico para el negocio.'
+                );
+            end if;
+        end loop;
+    end fn_allocate_org_profile_slug;
 
     function fn_build_platform_user_public_slug (
         pi_first_name         in varchar2,
@@ -586,7 +702,7 @@ CREATE OR REPLACE package body pkg_aox_util as
             select a.start_time, a.end_time, a.loc_id_location
               from appointment a
              where a.pro_id_professional = pi_pro_id
-               and a.org_id_organization = v_org_id
+               and a.org_id_organization = pi_org_id
                and a.status in ('PENDIENTE', 'CONFIRMADO')
                and trunc(a.start_time) >= trunc(sysdate)
         ) loop

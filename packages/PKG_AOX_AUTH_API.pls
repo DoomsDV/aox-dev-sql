@@ -623,8 +623,8 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         )
         returning id_organization into v_org_id;
 
-        -- Crear Configuración del Workspace y Slug
-        v_org_slug := pkg_aox_util.fn_generate_slug(trim(v_business_name));
+        -- Crear Configuración del Workspace y Slug (unico y no reservado)
+        v_org_slug := pkg_aox_util.fn_allocate_org_profile_slug(trim(v_business_name));
         insert into workspace_setting (
             org_id_organization,
             profile_slug,
@@ -2054,7 +2054,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         )
         returning id_organization into v_org_id;
 
-        v_org_slug := pkg_aox_util.fn_generate_slug(trim(v_business_name));
+        v_org_slug := pkg_aox_util.fn_allocate_org_profile_slug(trim(v_business_name));
         insert into workspace_setting (
             org_id_organization,
             profile_slug,

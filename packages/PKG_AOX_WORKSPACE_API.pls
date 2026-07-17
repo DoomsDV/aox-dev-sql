@@ -16,6 +16,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_workspace_api IS
         po_response_body OUT CLOB
     );
 
+    -- Validar disponibilidad de profile_slug del negocio (Solo Admin)
+    PROCEDURE pr_check_profile_slug(
+        pi_auth_header   IN  VARCHAR2,
+        pi_slug          IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
 END pkg_aox_workspace_api;
 /
 
@@ -474,10 +482,36 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 raise_application_error(-20005, 'El slug público es obligatorio.');
             end if;
 
-            v_profile_slug := lower(v_profile_slug);
-            /*if not regexp_like(v_profile_slug, '^[a-z0-9]+(?:-[a-z0-9]+)*$') THEN
-                raise_application_error(-20005, 'El slug solo permite minúsculas, números y guiones.');
-            end if;*/
+            v_profile_slug := lower(trim(v_profile_slug));
+            v_profile_slug := pkg_aox_util.fn_generate_slug(v_profile_slug);
+
+            if v_profile_slug is null then
+                raise_application_error(-20005, 'El slug público es obligatorio.');
+            end if;
+
+            if pkg_aox_util.fn_is_reserved_org_slug(v_profile_slug) = 1 then
+                raise_application_error(
+                    -20005,
+                    'Ese enlace publico esta reservado por el sistema. Elegi otro (por ejemplo, el nombre de tu negocio).'
+                );
+            end if;
+
+            declare
+                v_slug_taken pls_integer := 0;
+            begin
+                select count(*)
+                  into v_slug_taken
+                  from workspace_setting ws
+                 where lower(trim(ws.profile_slug)) = v_profile_slug
+                   and ws.org_id_organization <> v_org_id;
+
+                if v_slug_taken > 0 then
+                    raise_application_error(
+                        -20005,
+                        'Ese enlace publico ya esta en uso. Elegi otro.'
+                    );
+                end if;
+            end;
         end if;
 
         if v_has_time_format = 1 then
@@ -784,6 +818,82 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 po_response_body => po_response_body
             );
     end pr_update_workspace;
+
+    PROCEDURE pr_check_profile_slug(
+        pi_auth_header   IN  VARCHAR2,
+        pi_slug          IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_slug          VARCHAR2(100);
+        v_taken         PLS_INTEGER := 0;
+        v_response_json json_object_t := json_object_t();
+        v_data_obj      json_object_t := json_object_t();
+    BEGIN
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+
+        IF NVL(v_role_id, 0) <> 1 THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_forbidden,
+                'Acceso denegado. Solo el administrador puede validar el enlace del negocio.'
+            );
+        END IF;
+
+        v_slug := LOWER(TRIM(pi_slug));
+        IF v_slug IS NULL THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'El slug es obligatorio.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        v_slug := pkg_aox_util.fn_generate_slug(v_slug);
+        IF v_slug IS NULL THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'El slug no es válido.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        IF pkg_aox_util.fn_is_reserved_org_slug(v_slug) = 1 THEN
+            po_status_code := pkg_aox_util.c_success_ok_code;
+            v_data_obj.put('slug', v_slug);
+            v_data_obj.put('available', FALSE);
+            v_data_obj.put('reason', 'reserved');
+            v_response_json.put('status', 'success');
+            v_response_json.put('data', v_data_obj);
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_taken
+          FROM workspace_setting ws
+         WHERE LOWER(TRIM(ws.profile_slug)) = v_slug
+           AND ws.org_id_organization <> v_org_id;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_data_obj.put('slug', v_slug);
+        IF v_taken > 0 THEN
+            v_data_obj.put('available', FALSE);
+            v_data_obj.put('reason', 'taken');
+        ELSE
+            v_data_obj.put('available', TRUE);
+            v_data_obj.put('reason', 'ok');
+        END IF;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data', v_data_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_check_profile_slug;
 
 END pkg_aox_workspace_api;
 /
