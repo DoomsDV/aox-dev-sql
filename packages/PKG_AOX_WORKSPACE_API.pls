@@ -24,6 +24,28 @@ CREATE OR REPLACE PACKAGE pkg_aox_workspace_api IS
         po_response_body OUT CLOB
     );
 
+    -- Galeria del perfil publico (Solo Admin)
+    PROCEDURE pr_add_gallery_image(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    PROCEDURE pr_delete_gallery_image(
+        pi_auth_header   IN  VARCHAR2,
+        pi_gallery_id    IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    PROCEDURE pr_reorder_gallery(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
 END pkg_aox_workspace_api;
 /
 
@@ -31,6 +53,69 @@ PROMPT CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api
 CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
 
     c_max_logo_base64_chars CONSTANT PLS_INTEGER := 10000000; -- aprox 7.5 MB binario
+    c_max_media_base64_chars CONSTANT PLS_INTEGER := 7000000;  -- aprox 5 MB binario
+    c_max_media_bytes        CONSTANT PLS_INTEGER := 5242880;  -- 5 MB
+
+    function fn_normalize_social_url(
+        pi_url  in varchar2,
+        pi_kind in varchar2 -- FACEBOOK | INSTAGRAM
+    ) return varchar2 is
+        v_url  varchar2(500);
+        v_host varchar2(255);
+    begin
+        v_url := trim(pi_url);
+        if v_url is null then
+            return null;
+        end if;
+
+        if length(v_url) > 500 then
+            raise_application_error(-20005, 'La URL de ' || lower(pi_kind) || ' es demasiado larga.');
+        end if;
+
+        if not regexp_like(lower(v_url), '^https?://') then
+            raise_application_error(-20005, 'La URL de ' || lower(pi_kind) || ' debe comenzar con http:// o https://.');
+        end if;
+
+        v_host := lower(regexp_substr(v_url, '^https?://([^/?#]+)', 1, 1, null, 1));
+        v_host := regexp_replace(v_host, '^www\.', '');
+
+        if pi_kind = 'FACEBOOK' then
+            if v_host not in ('facebook.com', 'fb.com', 'm.facebook.com')
+               and v_host not like '%.facebook.com' then
+                raise_application_error(-20005, 'Usa una URL valida de Facebook.');
+            end if;
+        elsif pi_kind = 'INSTAGRAM' then
+            if v_host not in ('instagram.com', 'm.instagram.com')
+               and v_host not like '%.instagram.com' then
+                raise_application_error(-20005, 'Usa una URL valida de Instagram.');
+            end if;
+        end if;
+
+        return v_url;
+    end fn_normalize_social_url;
+
+    function fn_gallery_array(
+        pi_org_id in number
+    ) return json_array_t is
+        v_arr  json_array_t := json_array_t();
+        v_item json_object_t;
+    begin
+        for rec in (
+            select id_gallery_image, image_url, filename, mime_type, sort_order
+              from org_gallery_image
+             where org_id_organization = pi_org_id
+             order by sort_order, id_gallery_image
+        ) loop
+            v_item := json_object_t();
+            v_item.put('id', rec.id_gallery_image);
+            v_item.put('url', nvl(rec.image_url, ''));
+            v_item.put('filename', nvl(rec.filename, ''));
+            v_item.put('mime_type', nvl(rec.mime_type, ''));
+            v_item.put('sort_order', rec.sort_order);
+            v_arr.append(v_item);
+        end loop;
+        return v_arr;
+    end fn_gallery_array;
 
     function fn_get_optional_string(
         pi_json in json_object_t,
@@ -229,6 +314,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_description             workspace_setting.description%type;
         v_public_whatsapp         workspace_setting.public_whatsapp%type;
         v_logo_url                workspace_setting.logo_url%type;
+        v_banner_url              workspace_setting.banner_url%type;
+        v_facebook_url            workspace_setting.facebook_url%type;
+        v_instagram_url           workspace_setting.instagram_url%type;
         v_time_format             workspace_setting.time_format%type;
         v_theme_pref              workspace_setting.theme_pref%type;
         v_hidden_public_price_label workspace_setting.hidden_public_price_label%type;
@@ -259,6 +347,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             ws.description,
             ws.public_whatsapp,
             ws.logo_url,
+            ws.banner_url,
+            ws.facebook_url,
+            ws.instagram_url,
             nvl(ws.time_format, '24H'),
             nvl(ws.theme_pref, 'light'),
             nvl(nullif(trim(ws.hidden_public_price_label), ''), 'A evaluar'),
@@ -276,6 +367,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             v_description,
             v_public_whatsapp,
             v_logo_url,
+            v_banner_url,
+            v_facebook_url,
+            v_instagram_url,
             v_time_format,
             v_theme_pref,
             v_hidden_public_price_label,
@@ -314,6 +408,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_org_obj.put('description'             , v_description);
         v_org_obj.put('public_whatsapp'         , v_public_whatsapp);
         v_org_obj.put('logo_url'                , NVL(v_logo_url, ''));
+        v_org_obj.put('banner_url'              , NVL(v_banner_url, ''));
+        v_org_obj.put('facebook_url'            , NVL(v_facebook_url, ''));
+        v_org_obj.put('instagram_url'           , NVL(v_instagram_url, ''));
+        v_org_obj.put('gallery_images'          , fn_gallery_array(v_id_organization));
         v_org_obj.put('time_format'             , v_time_format);
         v_org_obj.put('theme_pref'              , v_theme_pref);
         v_org_obj.put('hidden_public_price_label', v_hidden_public_price_label);
@@ -386,6 +484,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_has_profile_slug              pls_integer := 0;
         v_has_description               pls_integer := 0;
         v_has_public_whatsapp           pls_integer := 0;
+        v_has_facebook_url              pls_integer := 0;
+        v_has_instagram_url             pls_integer := 0;
         v_has_timezone                  pls_integer := 0;
         v_has_time_format               pls_integer := 0;
         v_has_theme_pref                pls_integer := 0;
@@ -395,10 +495,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_has_cwh_id_cancel_wait        pls_integer := 0;
         v_has_notify_all_professionals  pls_integer := 0;
 
+        v_facebook_url                  workspace_setting.facebook_url%type;
+        v_instagram_url                 workspace_setting.instagram_url%type;
+
         v_logo_base64                   clob;
         v_logo_name                     varchar2(255);
         v_logo_mime                     varchar2(100);
         v_logo_blob                     blob;
+
+        v_banner_base64                 clob;
+        v_banner_name                   varchar2(255);
+        v_banner_mime                   varchar2(100);
+        v_banner_blob                   blob;
     begin
         v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
@@ -431,6 +539,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         if v_json_req.has('public_whatsapp') then
             v_has_public_whatsapp := 1;
         end if;
+        if v_json_req.has('facebook_url') then
+            v_has_facebook_url := 1;
+        end if;
+        if v_json_req.has('instagram_url') then
+            v_has_instagram_url := 1;
+        end if;
         if v_json_req.has('time_format') then
             v_has_time_format := 1;
         end if;
@@ -460,6 +574,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_profile_slug            := fn_get_optional_string(v_json_req      , 'profile_slug');
         v_description             := fn_get_optional_string(v_json_req      , 'description');
         v_public_whatsapp         := fn_get_optional_string(v_json_req      , 'public_whatsapp');
+        v_facebook_url            := fn_get_optional_string(v_json_req      , 'facebook_url');
+        v_instagram_url           := fn_get_optional_string(v_json_req      , 'instagram_url');
         v_time_format             := fn_get_optional_string(v_json_req      , 'time_format');
         v_theme_pref              := fn_get_optional_string(v_json_req      , 'theme_pref');
         v_hidden_public_price_label := fn_get_optional_string(v_json_req, 'hidden_public_price_label');
@@ -472,6 +588,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_logo_base64             := fn_get_optional_clob(v_json_req        , 'logo_base64');
         v_logo_name               := fn_get_optional_string(v_json_req      , 'logo_name');
         v_logo_mime               := lower(fn_get_optional_string(v_json_req, 'logo_mime'));
+
+        v_banner_base64           := fn_get_optional_clob(v_json_req        , 'banner_base64');
+        v_banner_name             := fn_get_optional_string(v_json_req      , 'banner_name');
+        v_banner_mime             := lower(fn_get_optional_string(v_json_req, 'banner_mime'));
+
+        if v_has_facebook_url = 1 then
+            v_facebook_url := fn_normalize_social_url(v_facebook_url, 'FACEBOOK');
+        end if;
+        if v_has_instagram_url = 1 then
+            v_instagram_url := fn_normalize_social_url(v_instagram_url, 'INSTAGRAM');
+        end if;
 
         if v_has_name = 1 and v_name is null then
             raise_application_error(-20005, 'El nombre del negocio es obligatorio.');
@@ -568,11 +695,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         end if;
 
         if (v_has_name + v_has_profile_slug + v_has_description + v_has_public_whatsapp +
+           v_has_facebook_url + v_has_instagram_url +
            v_has_time_format + v_has_theme_pref + v_has_hidden_public_price_label +
            v_has_unanswered_alert_action +
            v_has_rsi_id_slot_interval + v_has_rh_id_reminder_hours + v_has_cwh_id_cancel_wait +
            v_has_notify_all_professionals) = 0
-           and v_logo_base64 is null then
+           and v_logo_base64 is null
+           and v_banner_base64 is null then
             raise_application_error(-20006, 'No se recibieron campos para actualizar.');
         end if;
 
@@ -675,6 +804,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 profile_slug    = case when v_has_profile_slug    = 1 then v_profile_slug else ws.profile_slug end,
                 description     = case when v_has_description     = 1 then v_description else ws.description end,
                 public_whatsapp = case when v_has_public_whatsapp = 1 then v_public_whatsapp else ws.public_whatsapp end,
+                facebook_url    = case when v_has_facebook_url    = 1 then v_facebook_url else ws.facebook_url end,
+                instagram_url   = case when v_has_instagram_url   = 1 then v_instagram_url else ws.instagram_url end,
                 time_format     = case when v_has_time_format     = 1 then v_time_format else ws.time_format end,
                 theme_pref      = case when v_has_theme_pref      = 1 then v_theme_pref else ws.theme_pref end,
                 hidden_public_price_label = case
@@ -692,6 +823,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 profile_slug,
                 description,
                 public_whatsapp,
+                facebook_url,
+                instagram_url,
                 time_format,
                 theme_pref,
                 hidden_public_price_label,
@@ -705,6 +838,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 v_profile_slug,
                 v_description,
                 v_public_whatsapp,
+                v_facebook_url,
+                v_instagram_url,
                 NVL(v_time_format, '24H'),
                 NVL(v_theme_pref, 'light'),
                 NVL(v_hidden_public_price_label, 'A evaluar'),
@@ -782,6 +917,60 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             end;
         end if;
 
+        -- 4. Manejo del Banner
+        if v_banner_base64 is not null then
+            v_banner_base64 := REGEXP_REPLACE(v_banner_base64, '^\s*data:[^,]+,', '');
+
+            if dbms_lob.getlength(v_banner_base64) = 0 then
+                raise_application_error(-20007, 'El banner enviado está vacío.');
+            end if;
+
+            if dbms_lob.getlength(v_banner_base64) > c_max_media_base64_chars then
+                raise_application_error(-20007, 'El banner supera el tamaño máximo permitido (5 MB).');
+            end if;
+
+            if v_banner_mime is null then
+                v_banner_mime := 'image/webp';
+            end if;
+
+            if v_banner_mime not in ('image/png', 'image/jpeg', 'image/jpg', 'image/webp') then
+                raise_application_error(-20007, 'Tipo MIME de banner no permitido.');
+            end if;
+
+            begin
+                v_banner_blob := apex_web_service.clobbase642blob(v_banner_base64);
+
+                if dbms_lob.getlength(v_banner_blob) > c_max_media_bytes then
+                    raise_application_error(-20007, 'El banner supera el tamaño máximo permitido (5 MB).');
+                end if;
+
+                pkg_aox_bucket.pr_upload_org_banner(
+                    pi_blob            => v_banner_blob,
+                    pi_filename        => nvl(v_banner_name, 'banner.webp'),
+                    pi_mime_type       => v_banner_mime,
+                    pi_id_organization => v_org_id
+                );
+
+                update workspace_setting
+                   set banner_filename      = nvl(v_banner_name, 'banner.webp'),
+                       banner_mime_type     = v_banner_mime
+                 where org_id_organization  = v_org_id;
+
+                if v_banner_blob is not null and dbms_lob.istemporary(v_banner_blob) = 1 then
+                    dbms_lob.freetemporary(v_banner_blob);
+                end if;
+            exception
+                when others then
+                    if v_banner_blob is not null and dbms_lob.istemporary(v_banner_blob) = 1 then
+                        dbms_lob.freetemporary(v_banner_blob);
+                    end if;
+                    if sqlcode in (-20007, -20005) then
+                        raise;
+                    end if;
+                    raise_application_error(-20008, 'No fue posible procesar o subir el banner.');
+            end;
+        end if;
+
         commit;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
@@ -811,7 +1000,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                     when sqlcode = -1 then 'Ese enlace (slug) ya está siendo usado por otra clínica. Por favor, elige otro.'
                     when sqlcode = -20003 then 'JSON inválido o malformado.'
                     when sqlcode = -20006 then 'No se recibieron campos para actualizar.'
-                    when sqlcode = -20008 then 'No fue posible procesar o subir el logo.'
+                    when sqlcode = -20008 then 'No fue posible procesar o subir la imagen.'
                     when sqlcode = -20009 then 'Organización no encontrada.'
                     else pkg_aox_util.fn_clean_sqlerrm(sqlerrm)
                 end,
@@ -894,6 +1083,301 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         WHEN OTHERS THEN
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_check_profile_slug;
+
+    PROCEDURE pr_add_gallery_image(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_json_req      json_object_t;
+        v_response_json json_object_t := json_object_t();
+        v_data_obj      json_object_t := json_object_t();
+        v_image_base64  CLOB;
+        v_image_name    VARCHAR2(255);
+        v_image_mime    VARCHAR2(100);
+        v_image_blob    BLOB;
+        v_gallery_id    NUMBER;
+        v_url           VARCHAR2(1000);
+    BEGIN
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+
+        IF NVL(v_role_id, 0) <> 1 THEN
+            raise_application_error(pkg_aox_util.c_sqlcode_forbidden, 'Solo el administrador puede editar la galeria.');
+        END IF;
+
+        IF pi_body IS NULL OR dbms_lob.getlength(pi_body) = 0 THEN
+            raise_application_error(-20003, 'JSON invalido o vacio.');
+        END IF;
+
+        BEGIN
+            v_json_req := json_object_t.parse(pi_body);
+        EXCEPTION
+            WHEN OTHERS THEN
+                raise_application_error(-20003, 'JSON invalido o malformado.');
+        END;
+
+        v_image_base64 := fn_get_optional_clob(v_json_req, 'image_base64');
+        IF v_image_base64 IS NULL THEN
+            v_image_base64 := fn_get_optional_clob(v_json_req, 'banner_base64');
+        END IF;
+        v_image_name := NVL(fn_get_optional_string(v_json_req, 'image_name'), fn_get_optional_string(v_json_req, 'filename'));
+        v_image_mime := lower(NVL(fn_get_optional_string(v_json_req, 'image_mime'), fn_get_optional_string(v_json_req, 'mime_type')));
+
+        IF v_image_base64 IS NULL THEN
+            raise_application_error(-20005, 'image_base64 es obligatorio.');
+        END IF;
+
+        v_image_base64 := REGEXP_REPLACE(v_image_base64, '^\s*data:[^,]+,', '');
+
+        IF dbms_lob.getlength(v_image_base64) = 0 THEN
+            raise_application_error(-20007, 'La imagen enviada esta vacia.');
+        END IF;
+
+        IF dbms_lob.getlength(v_image_base64) > c_max_media_base64_chars THEN
+            raise_application_error(-20007, 'La imagen supera el tamano maximo permitido (5 MB).');
+        END IF;
+
+        IF v_image_mime IS NULL THEN
+            v_image_mime := 'image/webp';
+        END IF;
+
+        IF v_image_mime NOT IN ('image/png', 'image/jpeg', 'image/jpg', 'image/webp') THEN
+            raise_application_error(-20007, 'Tipo MIME de imagen no permitido.');
+        END IF;
+
+        v_image_blob := apex_web_service.clobbase642blob(v_image_base64);
+
+        IF dbms_lob.getlength(v_image_blob) > c_max_media_bytes THEN
+            raise_application_error(-20007, 'La imagen supera el tamano maximo permitido (5 MB).');
+        END IF;
+
+        pkg_aox_bucket.pr_upload_org_gallery_image(
+            pi_blob            => v_image_blob,
+            pi_filename        => NVL(v_image_name, 'gallery.webp'),
+            pi_mime_type       => v_image_mime,
+            pi_id_organization => v_org_id,
+            pi_sort_order      => NULL,
+            po_gallery_id      => v_gallery_id,
+            po_url             => v_url
+        );
+
+        IF v_image_blob IS NOT NULL AND dbms_lob.istemporary(v_image_blob) = 1 THEN
+            dbms_lob.freetemporary(v_image_blob);
+        END IF;
+
+        COMMIT;
+
+        v_data_obj.put('id', v_gallery_id);
+        v_data_obj.put('url', NVL(v_url, ''));
+        v_data_obj.put('filename', NVL(v_image_name, 'gallery.webp'));
+        v_data_obj.put('mime_type', v_image_mime);
+        v_data_obj.put('gallery_images', fn_gallery_array(v_org_id));
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('message', 'Imagen agregada a la galeria.');
+        v_response_json.put('data', v_data_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            IF v_image_blob IS NOT NULL AND dbms_lob.istemporary(v_image_blob) = 1 THEN
+                dbms_lob.freetemporary(v_image_blob);
+            END IF;
+            po_status_code := CASE
+                WHEN sqlcode = pkg_aox_util.c_sqlcode_forbidden THEN pkg_aox_util.c_forbidden_code
+                WHEN sqlcode IN (-20003, -20004, -20005, -20007) THEN pkg_aox_util.c_bad_request_code
+                ELSE NULL
+            END;
+            IF po_status_code IS NULL THEN
+                pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+            ELSE
+                pkg_aox_util.pr_build_api_error_response(
+                    pi_status_code   => po_status_code,
+                    pi_api_code      => pkg_aox_util.fn_resolve_api_code(po_status_code, sqlcode, sqlerrm),
+                    pi_message       => pkg_aox_util.fn_clean_sqlerrm(sqlerrm),
+                    po_response_body => po_response_body
+                );
+            END IF;
+    END pr_add_gallery_image;
+
+    PROCEDURE pr_delete_gallery_image(
+        pi_auth_header   IN  VARCHAR2,
+        pi_gallery_id    IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_gallery_id    NUMBER;
+        v_response_json json_object_t := json_object_t();
+        v_data_obj      json_object_t := json_object_t();
+    BEGIN
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+
+        IF NVL(v_role_id, 0) <> 1 THEN
+            raise_application_error(pkg_aox_util.c_sqlcode_forbidden, 'Solo el administrador puede editar la galeria.');
+        END IF;
+
+        BEGIN
+            v_gallery_id := TO_NUMBER(TRIM(pi_gallery_id));
+        EXCEPTION
+            WHEN OTHERS THEN
+                raise_application_error(-20005, 'id de galeria invalido.');
+        END;
+
+        IF NVL(v_gallery_id, 0) <= 0 THEN
+            raise_application_error(-20005, 'id de galeria invalido.');
+        END IF;
+
+        pkg_aox_bucket.pr_delete_org_gallery_image(
+            pi_id_organization => v_org_id,
+            pi_gallery_id      => v_gallery_id
+        );
+
+        -- Compactar sort_order
+        MERGE INTO org_gallery_image g
+        USING (
+            SELECT id_gallery_image,
+                   ROW_NUMBER() OVER (ORDER BY sort_order, id_gallery_image) AS new_order
+              FROM org_gallery_image
+             WHERE org_id_organization = v_org_id
+        ) src
+        ON (g.id_gallery_image = src.id_gallery_image)
+        WHEN MATCHED THEN
+            UPDATE SET g.sort_order = src.new_order;
+
+        COMMIT;
+
+        v_data_obj.put('gallery_images', fn_gallery_array(v_org_id));
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('message', 'Imagen eliminada de la galeria.');
+        v_response_json.put('data', v_data_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            po_status_code := CASE
+                WHEN sqlcode = pkg_aox_util.c_sqlcode_forbidden THEN pkg_aox_util.c_forbidden_code
+                WHEN sqlcode = -20009 THEN pkg_aox_util.c_not_found_code
+                WHEN sqlcode IN (-20005, -20007) THEN pkg_aox_util.c_bad_request_code
+                ELSE NULL
+            END;
+            IF po_status_code IS NULL THEN
+                pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+            ELSE
+                pkg_aox_util.pr_build_api_error_response(
+                    pi_status_code   => po_status_code,
+                    pi_api_code      => pkg_aox_util.fn_resolve_api_code(po_status_code, sqlcode, sqlerrm),
+                    pi_message       => pkg_aox_util.fn_clean_sqlerrm(sqlerrm),
+                    po_response_body => po_response_body
+                );
+            END IF;
+    END pr_delete_gallery_image;
+
+    PROCEDURE pr_reorder_gallery(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_json_req      json_object_t;
+        v_ids_arr       json_array_t;
+        v_response_json json_object_t := json_object_t();
+        v_data_obj      json_object_t := json_object_t();
+        v_id            NUMBER;
+        v_count         NUMBER;
+        v_owned         NUMBER;
+    BEGIN
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+
+        IF NVL(v_role_id, 0) <> 1 THEN
+            raise_application_error(pkg_aox_util.c_sqlcode_forbidden, 'Solo el administrador puede editar la galeria.');
+        END IF;
+
+        IF pi_body IS NULL OR dbms_lob.getlength(pi_body) = 0 THEN
+            raise_application_error(-20003, 'JSON invalido o vacio.');
+        END IF;
+
+        BEGIN
+            v_json_req := json_object_t.parse(pi_body);
+            v_ids_arr := TREAT(v_json_req.get('ids') AS json_array_t);
+        EXCEPTION
+            WHEN OTHERS THEN
+                raise_application_error(-20003, 'JSON invalido. Se espera { "ids": [1,2,...] }.');
+        END;
+
+        IF v_ids_arr IS NULL OR v_ids_arr.get_size = 0 THEN
+            raise_application_error(-20005, 'ids es obligatorio.');
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_count
+          FROM org_gallery_image
+         WHERE org_id_organization = v_org_id;
+
+        IF v_ids_arr.get_size <> v_count THEN
+            raise_application_error(-20005, 'La lista de ids debe incluir todas las imagenes de la galeria.');
+        END IF;
+
+        FOR i IN 0 .. v_ids_arr.get_size - 1 LOOP
+            v_id := v_ids_arr.get_number(i);
+
+            SELECT COUNT(*)
+              INTO v_owned
+              FROM org_gallery_image
+             WHERE id_gallery_image = v_id
+               AND org_id_organization = v_org_id;
+
+            IF v_owned = 0 THEN
+                raise_application_error(-20005, 'Hay ids que no pertenecen a la galeria.');
+            END IF;
+
+            UPDATE org_gallery_image
+               SET sort_order = i + 1
+             WHERE id_gallery_image = v_id
+               AND org_id_organization = v_org_id;
+        END LOOP;
+
+        COMMIT;
+
+        v_data_obj.put('gallery_images', fn_gallery_array(v_org_id));
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('message', 'Orden de galeria actualizado.');
+        v_response_json.put('data', v_data_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            po_status_code := CASE
+                WHEN sqlcode = pkg_aox_util.c_sqlcode_forbidden THEN pkg_aox_util.c_forbidden_code
+                WHEN sqlcode IN (-20003, -20005) THEN pkg_aox_util.c_bad_request_code
+                ELSE NULL
+            END;
+            IF po_status_code IS NULL THEN
+                pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+            ELSE
+                pkg_aox_util.pr_build_api_error_response(
+                    pi_status_code   => po_status_code,
+                    pi_api_code      => pkg_aox_util.fn_resolve_api_code(po_status_code, sqlcode, sqlerrm),
+                    pi_message       => pkg_aox_util.fn_clean_sqlerrm(sqlerrm),
+                    po_response_body => po_response_body
+                );
+            END IF;
+    END pr_reorder_gallery;
 
 END pkg_aox_workspace_api;
 /

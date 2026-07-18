@@ -31,6 +31,32 @@ CREATE OR REPLACE package pkg_aox_bucket AS
         pi_id_organization in organization.id_organization%type
     );
 
+    procedure pr_upload_org_banner(
+        pi_blob            in blob,
+        pi_filename        in varchar2,
+        pi_mime_type       in varchar2,
+        pi_id_organization in organization.id_organization%type
+    );
+
+    procedure pr_delete_org_banner(
+        pi_id_organization in organization.id_organization%type
+    );
+
+    procedure pr_upload_org_gallery_image(
+        pi_blob            in blob,
+        pi_filename        in varchar2,
+        pi_mime_type       in varchar2,
+        pi_id_organization in organization.id_organization%type,
+        pi_sort_order      in number default null,
+        po_gallery_id      out number,
+        po_url             out varchar2
+    );
+
+    procedure pr_delete_org_gallery_image(
+        pi_id_organization in organization.id_organization%type,
+        pi_gallery_id      in org_gallery_image.id_gallery_image%type
+    );
+
     procedure pr_upload_platform_user_avatar(
         pi_blob              in blob,
         pi_filename          in varchar2,
@@ -103,6 +129,8 @@ CREATE OR REPLACE package body pkg_aox_bucket as
     c_organizations_dir constant varchar2(30) := 'organizations/';
     c_users_dir         constant varchar2(30) := 'users/';
     c_logos_dir         constant varchar2(30) := 'logos/';
+    c_banners_dir       constant varchar2(30) := 'banners/';
+    c_gallery_dir       constant varchar2(30) := 'gallery/';
     c_platform_users_dir constant varchar2(30) := 'platform_users/';
     c_appointments_dir  constant varchar2(30) := 'appointments/';
     c_payments_dir      constant varchar2(30) := 'payments/';
@@ -436,6 +464,186 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         where org_id_organization = pi_id_organization;
 
     end pr_delete_org_logo;
+
+    procedure pr_upload_org_banner(
+        pi_blob            in blob,
+        pi_filename        in varchar2,
+        pi_mime_type       in varchar2,
+        pi_id_organization in organization.id_organization%type
+    ) is
+        v_file_name   varchar2(255);
+        v_response    clob;
+        v_status_code number;
+        v_org_url     varchar2(3000);
+    begin
+        pr_delete_org_banner(pi_id_organization);
+
+        v_file_name := TO_CHAR(CURRENT_DATE, 'YYYYMMDD_HH24MISS') || '_banner_' || fn_safe_file_name(pi_filename);
+        v_org_url := fn_build_org_asset_url(pi_id_organization, c_banners_dir, v_file_name);
+
+        apex_web_service.g_request_headers.delete;
+        apex_web_service.g_request_headers(1).name := 'Content-Type';
+        apex_web_service.g_request_headers(1).value := pi_mime_type;
+
+        v_response := apex_web_service.make_rest_request(
+            p_url                  => v_org_url,
+            p_http_method          => 'PUT',
+            p_credential_static_id => g_credential,
+            p_body_blob            => pi_blob
+        );
+
+        v_status_code := apex_web_service.g_status_code;
+
+        if v_status_code not between 200 and 299 then
+            raise_application_error(-20001, 'Error al subir banner de la empresa a OCI. HTTP: ' || v_status_code);
+        end if;
+
+        update workspace_setting
+           set banner_url = v_org_url
+         where org_id_organization = pi_id_organization;
+    end pr_upload_org_banner;
+
+    procedure pr_delete_org_banner(
+        pi_id_organization in organization.id_organization%type
+    ) is
+        v_saved_url   varchar2(4000);
+        v_response    clob;
+        v_status_code number;
+    begin
+        begin
+            select banner_url
+              into v_saved_url
+              from workspace_setting
+             where org_id_organization = pi_id_organization;
+        exception
+            when no_data_found then
+                return;
+        end;
+
+        if v_saved_url is not null then
+            apex_web_service.g_request_headers.delete;
+            v_response := apex_web_service.make_rest_request(
+                p_url                  => v_saved_url,
+                p_http_method          => 'DELETE',
+                p_credential_static_id => g_credential
+            );
+            v_status_code := apex_web_service.g_status_code;
+            if v_status_code not in (200, 204, 404) then
+                raise_application_error(-20998, 'Codigo HTTP al eliminar banner en OCI: ' || v_status_code);
+            end if;
+        end if;
+
+        update workspace_setting
+           set banner_url = null
+         where org_id_organization = pi_id_organization;
+    end pr_delete_org_banner;
+
+    procedure pr_upload_org_gallery_image(
+        pi_blob            in blob,
+        pi_filename        in varchar2,
+        pi_mime_type       in varchar2,
+        pi_id_organization in organization.id_organization%type,
+        pi_sort_order      in number default null,
+        po_gallery_id      out number,
+        po_url             out varchar2
+    ) is
+        v_file_name   varchar2(255);
+        v_response    clob;
+        v_status_code number;
+        v_org_url     varchar2(3000);
+        v_sort_order  number;
+        v_count       number;
+    begin
+        select count(*)
+          into v_count
+          from org_gallery_image
+         where org_id_organization = pi_id_organization;
+
+        if v_count >= 30 then
+            raise_application_error(-20005, 'La galeria admite un maximo de 30 imagenes.');
+        end if;
+
+        if pi_sort_order is null or pi_sort_order < 1 then
+            v_sort_order := v_count + 1;
+        else
+            v_sort_order := least(pi_sort_order, 30);
+        end if;
+
+        v_file_name := TO_CHAR(CURRENT_DATE, 'YYYYMMDD_HH24MISS')
+                    || '_gal_'
+                    || fn_safe_file_name(pi_filename);
+        v_org_url := fn_build_org_asset_url(pi_id_organization, c_gallery_dir, v_file_name);
+
+        apex_web_service.g_request_headers.delete;
+        apex_web_service.g_request_headers(1).name := 'Content-Type';
+        apex_web_service.g_request_headers(1).value := pi_mime_type;
+
+        v_response := apex_web_service.make_rest_request(
+            p_url                  => v_org_url,
+            p_http_method          => 'PUT',
+            p_credential_static_id => g_credential,
+            p_body_blob            => pi_blob
+        );
+
+        v_status_code := apex_web_service.g_status_code;
+        if v_status_code not between 200 and 299 then
+            raise_application_error(-20001, 'Error al subir imagen de galeria a OCI. HTTP: ' || v_status_code);
+        end if;
+
+        insert into org_gallery_image (
+            org_id_organization,
+            image_url,
+            filename,
+            mime_type,
+            sort_order
+        ) values (
+            pi_id_organization,
+            v_org_url,
+            nvl(pi_filename, v_file_name),
+            pi_mime_type,
+            v_sort_order
+        )
+        returning id_gallery_image into po_gallery_id;
+
+        po_url := v_org_url;
+    end pr_upload_org_gallery_image;
+
+    procedure pr_delete_org_gallery_image(
+        pi_id_organization in organization.id_organization%type,
+        pi_gallery_id      in org_gallery_image.id_gallery_image%type
+    ) is
+        v_saved_url   varchar2(4000);
+        v_response    clob;
+        v_status_code number;
+    begin
+        begin
+            select image_url
+              into v_saved_url
+              from org_gallery_image
+             where id_gallery_image = pi_gallery_id
+               and org_id_organization = pi_id_organization;
+        exception
+            when no_data_found then
+                raise_application_error(-20009, 'Imagen de galeria no encontrada.');
+        end;
+
+        if v_saved_url is not null then
+            apex_web_service.g_request_headers.delete;
+            v_response := apex_web_service.make_rest_request(
+                p_url                  => v_saved_url,
+                p_http_method          => 'DELETE',
+                p_credential_static_id => g_credential
+            );
+            v_status_code := apex_web_service.g_status_code;
+            if v_status_code not in (200, 204, 404) then
+                raise_application_error(-20998, 'Codigo HTTP al eliminar imagen de galeria en OCI: ' || v_status_code);
+            end if;
+        end if;
+
+        delete from org_gallery_image
+         where id_gallery_image = pi_gallery_id
+           and org_id_organization = pi_id_organization;
+    end pr_delete_org_gallery_image;
 
     procedure pr_upload_platform_user_avatar(
         pi_blob             in blob,

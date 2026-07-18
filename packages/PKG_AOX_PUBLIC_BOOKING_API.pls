@@ -595,11 +595,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_org_slug        VARCHAR2(100);
         v_org_name        VARCHAR2(255);
         v_logo_url        VARCHAR2(500);
+        v_banner_url      VARCHAR2(500);
+        v_facebook_url    VARCHAR2(500);
+        v_instagram_url   VARCHAR2(500);
         v_description     VARCHAR2(1000);
         v_public_whatsapp VARCHAR2(20);
         v_sub_state       VARCHAR2(20);
         v_maintenance     BOOLEAN := FALSE;
         v_booking_path    VARCHAR2(300);
+        v_gallery_arr     json_array_t := json_array_t();
+        v_gallery_item    json_object_t;
     BEGIN
         IF pi_org_slug IS NULL OR trim(pi_org_slug) = '' THEN
             po_status_code := pkg_aox_util.c_bad_request_code;
@@ -623,6 +628,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 ws.profile_slug,
                 o.name,
                 ws.logo_url,
+                ws.banner_url,
+                ws.facebook_url,
+                ws.instagram_url,
                 ws.description,
                 ws.public_whatsapp
             INTO
@@ -630,6 +638,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_org_slug,
                 v_org_name,
                 v_logo_url,
+                v_banner_url,
+                v_facebook_url,
+                v_instagram_url,
                 v_description,
                 v_public_whatsapp
             FROM workspace_setting ws
@@ -652,9 +663,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_hub_obj.put('organization_name', v_org_name);
         v_hub_obj.put('organization_slug', v_org_slug);
         v_hub_obj.put('logo_url', NVL(v_logo_url, ''));
+        v_hub_obj.put('banner_url', NVL(v_banner_url, ''));
+        v_hub_obj.put('facebook_url', NVL(v_facebook_url, ''));
+        v_hub_obj.put('instagram_url', NVL(v_instagram_url, ''));
         v_hub_obj.put('description', NVL(v_description, ''));
         v_hub_obj.put('public_whatsapp', NVL(v_public_whatsapp, ''));
         v_hub_obj.put('maintenance', v_maintenance);
+
+        FOR gal_rec IN (
+            SELECT id_gallery_image, image_url, sort_order
+              FROM org_gallery_image
+             WHERE org_id_organization = v_org_id
+             ORDER BY sort_order, id_gallery_image
+        ) LOOP
+            v_gallery_item := json_object_t();
+            v_gallery_item.put('id', gal_rec.id_gallery_image);
+            v_gallery_item.put('url', NVL(gal_rec.image_url, ''));
+            v_gallery_item.put('sort_order', gal_rec.sort_order);
+            v_gallery_arr.append(v_gallery_item);
+        END LOOP;
+        v_hub_obj.put('gallery_images', v_gallery_arr);
 
         FOR loc_rec IN (
             SELECT

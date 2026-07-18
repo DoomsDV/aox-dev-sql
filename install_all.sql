@@ -94,31 +94,34 @@ PROMPT [25/34] ref_reminder_hours
 PROMPT [26/34] ref_cancel_wait_hours
 @@tables\REF_CANCEL_WAIT_HOURS.sql
 
-PROMPT [27/34] workspace_setting
+PROMPT [27/35] workspace_setting
 @@tables\WORKSPACE_SETTING.sql
 
-PROMPT [28/34] ai_chat_session
+PROMPT [28/35] org_gallery_image
+@@tables\ORG_GALLERY_IMAGE.sql
+
+PROMPT [29/35] ai_chat_session
 @@tables\AI_CHAT_SESSION.sql
 
-PROMPT [29/34] ai_chat_message
+PROMPT [30/36] ai_chat_message
 @@tables\AI_CHAT_MESSAGE.sql
 
-PROMPT [30/34] aox_api_log
+PROMPT [31/36] aox_api_log
 @@tables\AOX_API_LOG.sql
 
-PROMPT [31/34] aox_ai_log
+PROMPT [32/36] aox_ai_log
 @@tables\AOX_AI_LOG.sql
 
-PROMPT [32/34] aox_whatsapp_template_log
+PROMPT [33/36] aox_whatsapp_template_log
 @@tables\AOX_WHATSAPP_TEMPLATE_LOG.sql
 
-PROMPT [33/34] aox_push_fcm_log
+PROMPT [34/36] aox_push_fcm_log
 @@tables\AOX_PUSH_FCM_LOG.sql
 
-PROMPT [34/35] aox_fcm_log
+PROMPT [35/36] aox_fcm_log
 @@tables\AOX_FCM_LOG.sql
 
-PROMPT [35/35] org_entity_embedding
+PROMPT [36/36] org_entity_embedding
 @@tables\ORG_ENTITY_EMBEDDING.sql
 
 PROMPT --- Campanas push admin (Hasel_admn) ---
