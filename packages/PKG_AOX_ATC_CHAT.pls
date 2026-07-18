@@ -161,7 +161,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_atc_chat IS
 
         v_system := 'Sos el asistente de Atencion al Cliente (ATC) de Hasel. '
                  || 'Responde en espanol, claro y breve. Usa SOLO el contexto de documentos provisto. '
-                 || 'Si el contexto no alcanza, dilo explicitamente. No inventes funciones ni datos.';
+                 || 'Si el contexto no alcanza, dilo explicitamente. No inventes funciones ni datos. '
+                 || 'Formatea la respuesta en Markdown: listas numeradas o con viñetas cuando haya pasos, '
+                 || 'negritas para acciones o botones de la UI, y parrafos cortos. '
+                 || 'No uses bloques de codigo salvo que el usuario lo pida.';
 
         v_user := 'Contexto de documentos:' || CHR(10) || v_context
                || CHR(10) || 'Pregunta del usuario:' || CHR(10) || pi_question;
