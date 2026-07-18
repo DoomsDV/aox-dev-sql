@@ -65,7 +65,7 @@ END;
     );
 
     ----------------------------------------------------------------------------
-    -- GET /dashboard/profitability  (metricas de rentabilidad Premium)
+    -- GET /dashboard/profitability  (metricas de rentabilidad Base + Premium)
     ----------------------------------------------------------------------------
     ORDS.define_template(p_module_name => 'hasel', p_pattern => 'dashboard/profitability');
     ORDS.define_handler(

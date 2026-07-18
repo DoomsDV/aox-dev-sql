@@ -9,7 +9,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_dashboard_api IS
         po_response_body OUT CLOB
     );
 
-    -- Fase 6: métricas de rentabilidad para el panel Premium.
+    -- Fase 6: métricas de rentabilidad del dashboard (Base + Premium).
     -- Solo ADMIN y organizaciones con feature PROFITABILITY_ANALYTICS.
     PROCEDURE pr_get_profitability(
         pi_auth_header   IN  VARCHAR2,
@@ -311,7 +311,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
                 'Solo los administradores pueden ver la rentabilidad.');
         END IF;
 
-        -- Gate de plan: requiere feature PROFITABILITY_ANALYTICS (Premium).
+        -- Gate de plan: requiere feature PROFITABILITY_ANALYTICS (Base + Premium).
         pkg_aox_subscription_api.pr_assert_org_has_feature(v_org_id, 'PROFITABILITY_ANALYTICS');
 
         v_now_local        := CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP);

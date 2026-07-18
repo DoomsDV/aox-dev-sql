@@ -278,7 +278,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_history_enabled  NUMBER  := 0;
         v_history_arr      json_array_t := json_array_t();
 
-        -- Fase 6: métricas de rentabilidad (solo ADMIN + feature PROFITABILITY_ANALYTICS).
+        -- Fase 6: métricas de rentabilidad (ADMIN + feature PROFITABILITY_ANALYTICS; Base + Premium).
         v_analytics_enabled NUMBER := 0;
         v_profit_obj       json_object_t;
         v_year_value       NUMBER := 0;
@@ -302,7 +302,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         -- Historial (Fase 4): ¿el plan incluye historial por cita?
         v_history_enabled := pkg_aox_subscription_api.fn_org_has_feature(v_org_id, 'APPOINTMENT_HISTORY');
 
-        -- Rentabilidad (Fase 6): solo ADMIN y si el plan incluye PROFITABILITY_ANALYTICS.
+        -- Rentabilidad (Fase 6): ADMIN + PROFITABILITY_ANALYTICS (Base + Premium).
         IF v_role_id = pkg_aox_util.fn_rol('ADMIN')
            AND pkg_aox_subscription_api.fn_org_has_feature(v_org_id, 'PROFITABILITY_ANALYTICS') = 1 THEN
             v_analytics_enabled := 1;
@@ -566,7 +566,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_stats_obj.put('top_services', v_top_services_arr);
 
         -- Rentabilidad (Fase 6): ingresos del año en curso, ticket promedio y valor
-        -- perdido por cancelaciones. Solo para ADMIN con feature PROFITABILITY_ANALYTICS.
+        -- perdido por cancelaciones. ADMIN con feature PROFITABILITY_ANALYTICS (Base + Premium).
         IF v_analytics_enabled = 1 THEN
             SELECT
                 NVL(SUM(CASE
