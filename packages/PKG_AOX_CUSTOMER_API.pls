@@ -6,6 +6,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_customer_api IS
         pi_page          IN  NUMBER DEFAULT 1,
         pi_limit         IN  NUMBER DEFAULT 9,
         pi_pro_id        IN  NUMBER DEFAULT NULL,
+        pi_search        IN  VARCHAR2 DEFAULT NULL,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
@@ -154,6 +155,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         pi_page          IN  NUMBER DEFAULT 1,
         pi_limit         IN  NUMBER DEFAULT 9,
         pi_pro_id        IN  NUMBER DEFAULT NULL,
+        pi_search        IN  VARCHAR2 DEFAULT NULL,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
@@ -171,6 +173,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_offset        NUMBER;
         v_total_records NUMBER := 0;
         v_total_pages   NUMBER := 0;
+        -- Mayúsculas + sin tildes/diacríticos para LIKE accent-insensitive (Maria = María).
+        v_search        VARCHAR2(200) := TRANSLATE(
+            UPPER(TRIM(pi_search)),
+            'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ',
+            'AEIOUUNAEIOUAAEIOU'
+        );
     BEGIN
         pr_resolve_customer_access(
             pi_auth_header,
@@ -183,6 +191,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
 
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
+        IF v_search IS NOT NULL AND LENGTH(v_search) = 0 THEN
+            v_search := NULL;
+        END IF;
 
         SELECT COUNT(*)
           INTO v_total_records
@@ -194,7 +205,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                   WHERE a.cus_id_customer = c.id_customer
                     AND a.org_id_organization = c.org_id_organization
                     AND a.pro_id_professional = v_effective_pro_id
-               ));
+               ))
+           AND (
+                v_search IS NULL
+                OR TRANSLATE(UPPER(c.full_name), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU')
+                   LIKE '%' || v_search || '%'
+                OR UPPER(NVL(c.phone_number, '')) LIKE '%' || v_search || '%'
+               );
 
         v_total_pages := CEIL(v_total_records / v_limit);
 
@@ -213,6 +230,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                        AND a.org_id_organization = c.org_id_organization
                        AND a.pro_id_professional = v_effective_pro_id
                   ))
+              AND (
+                    v_search IS NULL
+                    OR TRANSLATE(UPPER(c.full_name), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU')
+                       LIKE '%' || v_search || '%'
+                    OR UPPER(NVL(c.phone_number, '')) LIKE '%' || v_search || '%'
+                  )
             ORDER BY c.id_customer DESC
             OFFSET v_offset ROWS FETCH NEXT v_limit ROWS ONLY
         ) LOOP
