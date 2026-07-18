@@ -6,6 +6,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_location_api IS
         pi_auth_header   IN  VARCHAR2,
         pi_page          IN  NUMBER DEFAULT 1,
         pi_limit         IN  NUMBER DEFAULT 9,
+        pi_is_active     IN  NUMBER DEFAULT NULL,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
@@ -104,6 +105,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         pi_auth_header   IN  VARCHAR2,
         pi_page          IN  NUMBER DEFAULT 1,
         pi_limit         IN  NUMBER DEFAULT 9,
+        pi_is_active     IN  NUMBER DEFAULT NULL,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
@@ -125,7 +127,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
 
-        SELECT COUNT(*) INTO v_total_records FROM location WHERE org_id_organization = v_org_id;
+        SELECT COUNT(*)
+        INTO v_total_records
+        FROM location
+        WHERE org_id_organization = v_org_id
+          AND (pi_is_active IS NULL OR is_active = pi_is_active);
         v_total_pages := CEIL(v_total_records / v_limit);
 
         FOR rec IN (
@@ -145,6 +151,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             JOIN cities c ON l.cit_id_city = c.id_city
             JOIN departments d ON l.dep_id_department = d.id_department
             WHERE l.org_id_organization = v_org_id
+              AND (pi_is_active IS NULL OR l.is_active = pi_is_active)
             ORDER BY l.id_location DESC
             OFFSET v_offset ROWS FETCH NEXT v_limit ROWS ONLY
         ) LOOP

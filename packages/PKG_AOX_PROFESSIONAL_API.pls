@@ -14,6 +14,8 @@ CREATE OR REPLACE PACKAGE pkg_aox_professional_api IS
         pi_auth_header   IN  VARCHAR2,
         pi_page          IN  NUMBER DEFAULT 1,
         pi_limit         IN  NUMBER DEFAULT 9,
+        pi_search        IN  VARCHAR2 DEFAULT NULL,
+        pi_is_active     IN  NUMBER DEFAULT NULL,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
@@ -423,6 +425,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         pi_auth_header   IN  VARCHAR2,
         pi_page          IN  NUMBER DEFAULT 1,
         pi_limit         IN  NUMBER DEFAULT 9,
+        pi_search        IN  VARCHAR2 DEFAULT NULL,
+        pi_is_active     IN  NUMBER DEFAULT NULL,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
@@ -442,6 +446,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_offset        NUMBER;
         v_total_records NUMBER := 0;
         v_total_pages   NUMBER := 0;
+        v_search        VARCHAR2(200) := TRANSLATE(
+            UPPER(TRIM(pi_search)),
+            'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ',
+            'AEIOUUNAEIOUAAEIOU'
+        );
     BEGIN
         -- 1. Validar JWT y Organización
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
@@ -449,10 +458,45 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
 
+        IF v_search IS NOT NULL AND LENGTH(v_search) = 0 THEN
+            v_search := NULL;
+        END IF;
+
         -- 2. Conteo total para la metadata
-        SELECT COUNT(*) INTO v_total_records
-        FROM professional
-        WHERE org_id_organization = v_org_id;
+        -- pi_is_active: 1 = cuenta activa (tiene usuario y user/prof activo);
+        --               0 = cuenta inactiva (tiene usuario y ambos inactivos); excluye invitaciones pendientes
+        SELECT COUNT(*)
+        INTO v_total_records
+        FROM professional p
+        LEFT JOIN app_user u ON p.usr_id_user = u.id_user
+        LEFT JOIN org_invitation i
+               ON i.pro_id_professional = p.id_professional
+              AND i.status = 'PENDING'
+        WHERE p.org_id_organization = v_org_id
+          AND (
+                v_search IS NULL
+                OR TRANSLATE(
+                       UPPER(NVL(p.display_name, i.display_name)),
+                       'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ',
+                       'AEIOUUNAEIOUAAEIOU'
+                   ) LIKE '%' || v_search || '%'
+                OR UPPER(NVL(u.email, i.invite_email)) LIKE '%' || v_search || '%'
+                OR UPPER(NVL(p.phone_number, '')) LIKE '%' || v_search || '%'
+              )
+          AND (
+                pi_is_active IS NULL
+                OR (
+                    pi_is_active = 1
+                    AND p.usr_id_user IS NOT NULL
+                    AND (NVL(u.is_active, 0) = 1 OR p.is_active = 1)
+                )
+                OR (
+                    pi_is_active = 0
+                    AND p.usr_id_user IS NOT NULL
+                    AND NVL(u.is_active, 0) = 0
+                    AND p.is_active = 0
+                )
+              );
 
         v_total_pages := CEIL(v_total_records / v_limit);
 
@@ -483,6 +527,30 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
                   AND i.status = 'PENDING'
             LEFT JOIN specialty s ON p.spe_id_specialty = s.id_specialty
             WHERE p.org_id_organization = v_org_id
+              AND (
+                    v_search IS NULL
+                    OR TRANSLATE(
+                           UPPER(NVL(p.display_name, i.display_name)),
+                           'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ',
+                           'AEIOUUNAEIOUAAEIOU'
+                       ) LIKE '%' || v_search || '%'
+                    OR UPPER(NVL(u.email, i.invite_email)) LIKE '%' || v_search || '%'
+                    OR UPPER(NVL(p.phone_number, '')) LIKE '%' || v_search || '%'
+                  )
+              AND (
+                    pi_is_active IS NULL
+                    OR (
+                        pi_is_active = 1
+                        AND p.usr_id_user IS NOT NULL
+                        AND (NVL(u.is_active, 0) = 1 OR p.is_active = 1)
+                    )
+                    OR (
+                        pi_is_active = 0
+                        AND p.usr_id_user IS NOT NULL
+                        AND NVL(u.is_active, 0) = 0
+                        AND p.is_active = 0
+                    )
+                  )
             ORDER BY
                 CASE
                     WHEN p.usr_id_user IS NOT NULL
