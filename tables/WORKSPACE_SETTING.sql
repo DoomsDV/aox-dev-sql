@@ -13,6 +13,7 @@ CREATE TABLE workspace_setting (
   banner_mime_type        VARCHAR2(100)  NULL,
   facebook_url            VARCHAR2(500)  NULL,
   instagram_url           VARCHAR2(500)  NULL,
+  business_hours          VARCHAR2(4000) NULL,
   time_format             VARCHAR2(10)   DEFAULT '24H' NULL,
   theme_pref              VARCHAR2(20)   DEFAULT 'light' NULL,
   hidden_public_price_label VARCHAR2(80) DEFAULT 'A evaluar' NULL,

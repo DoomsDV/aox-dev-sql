@@ -598,6 +598,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_banner_url      VARCHAR2(500);
         v_facebook_url    VARCHAR2(500);
         v_instagram_url   VARCHAR2(500);
+        v_business_hours  VARCHAR2(4000);
         v_description     VARCHAR2(1000);
         v_public_whatsapp VARCHAR2(20);
         v_sub_state       VARCHAR2(20);
@@ -631,6 +632,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 ws.banner_url,
                 ws.facebook_url,
                 ws.instagram_url,
+                ws.business_hours,
                 ws.description,
                 ws.public_whatsapp
             INTO
@@ -641,6 +643,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_banner_url,
                 v_facebook_url,
                 v_instagram_url,
+                v_business_hours,
                 v_description,
                 v_public_whatsapp
             FROM workspace_setting ws
@@ -666,6 +669,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_hub_obj.put('banner_url', NVL(v_banner_url, ''));
         v_hub_obj.put('facebook_url', NVL(v_facebook_url, ''));
         v_hub_obj.put('instagram_url', NVL(v_instagram_url, ''));
+        IF v_business_hours IS NOT NULL AND length(trim(v_business_hours)) > 0 THEN
+            BEGIN
+                v_hub_obj.put('business_hours', json_object_t.parse(v_business_hours));
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_hub_obj.put('business_hours', v_business_hours);
+            END;
+        ELSE
+            v_hub_obj.put_null('business_hours');
+        END IF;
         v_hub_obj.put('description', NVL(v_description, ''));
         v_hub_obj.put('public_whatsapp', NVL(v_public_whatsapp, ''));
         v_hub_obj.put('maintenance', v_maintenance);

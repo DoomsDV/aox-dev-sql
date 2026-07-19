@@ -317,6 +317,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_banner_url              workspace_setting.banner_url%type;
         v_facebook_url            workspace_setting.facebook_url%type;
         v_instagram_url           workspace_setting.instagram_url%type;
+        v_business_hours          workspace_setting.business_hours%type;
         v_time_format             workspace_setting.time_format%type;
         v_theme_pref              workspace_setting.theme_pref%type;
         v_hidden_public_price_label workspace_setting.hidden_public_price_label%type;
@@ -350,6 +351,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             ws.banner_url,
             ws.facebook_url,
             ws.instagram_url,
+            ws.business_hours,
             nvl(ws.time_format, '24H'),
             nvl(ws.theme_pref, 'light'),
             nvl(nullif(trim(ws.hidden_public_price_label), ''), 'A evaluar'),
@@ -370,6 +372,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             v_banner_url,
             v_facebook_url,
             v_instagram_url,
+            v_business_hours,
             v_time_format,
             v_theme_pref,
             v_hidden_public_price_label,
@@ -411,6 +414,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_org_obj.put('banner_url'              , NVL(v_banner_url, ''));
         v_org_obj.put('facebook_url'            , NVL(v_facebook_url, ''));
         v_org_obj.put('instagram_url'           , NVL(v_instagram_url, ''));
+        if v_business_hours is not null and length(trim(v_business_hours)) > 0 then
+            begin
+                v_org_obj.put('business_hours', json_object_t.parse(v_business_hours));
+            exception
+                when others then
+                    v_org_obj.put('business_hours', v_business_hours);
+            end;
+        else
+            v_org_obj.put_null('business_hours');
+        end if;
         v_org_obj.put('gallery_images'          , fn_gallery_array(v_id_organization));
         v_org_obj.put('time_format'             , v_time_format);
         v_org_obj.put('theme_pref'              , v_theme_pref);
@@ -486,6 +499,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_has_public_whatsapp           pls_integer := 0;
         v_has_facebook_url              pls_integer := 0;
         v_has_instagram_url             pls_integer := 0;
+        v_has_business_hours            pls_integer := 0;
         v_has_timezone                  pls_integer := 0;
         v_has_time_format               pls_integer := 0;
         v_has_theme_pref                pls_integer := 0;
@@ -497,6 +511,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
 
         v_facebook_url                  workspace_setting.facebook_url%type;
         v_instagram_url                 workspace_setting.instagram_url%type;
+        v_business_hours                workspace_setting.business_hours%type;
 
         v_logo_base64                   clob;
         v_logo_name                     varchar2(255);
@@ -544,6 +559,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         end if;
         if v_json_req.has('instagram_url') then
             v_has_instagram_url := 1;
+        end if;
+        if v_json_req.has('business_hours') then
+            v_has_business_hours := 1;
         end if;
         if v_json_req.has('time_format') then
             v_has_time_format := 1;
@@ -598,6 +616,64 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         end if;
         if v_has_instagram_url = 1 then
             v_instagram_url := fn_normalize_social_url(v_instagram_url, 'INSTAGRAM');
+        end if;
+
+        if v_has_business_hours = 1 then
+            declare
+                v_bh_el   json_element_t;
+                v_bh_obj  json_object_t;
+                v_bh_raw  varchar2(4000);
+            begin
+                if v_json_req.get('business_hours').is_null then
+                    v_business_hours := null;
+                else
+                    v_bh_el := v_json_req.get('business_hours');
+                    if v_bh_el.is_object then
+                        v_bh_obj := treat(v_bh_el as json_object_t);
+                        v_bh_raw := v_bh_obj.to_string;
+                    elsif v_bh_el.is_string then
+                        v_bh_raw := trim(v_json_req.get_string('business_hours'));
+                        if v_bh_raw is null or length(v_bh_raw) = 0 then
+                            v_business_hours := null;
+                            v_bh_raw := null;
+                        else
+                            begin
+                                v_bh_obj := json_object_t.parse(v_bh_raw);
+                            exception
+                                when others then
+                                    raise_application_error(
+                                        -20005,
+                                        'business_hours debe ser un JSON válido con clave "days".'
+                                    );
+                            end;
+                        end if;
+                    else
+                        raise_application_error(
+                            -20005,
+                            'business_hours debe ser un objeto JSON o texto JSON.'
+                        );
+                    end if;
+
+                    if v_bh_raw is not null then
+                        if v_bh_obj is null then
+                            v_bh_obj := json_object_t.parse(v_bh_raw);
+                        end if;
+                        if not v_bh_obj.has('days') then
+                            raise_application_error(
+                                -20005,
+                                'business_hours debe incluir la clave "days".'
+                            );
+                        end if;
+                        if length(v_bh_raw) > 4000 then
+                            raise_application_error(
+                                -20005,
+                                'business_hours supera el tamaño máximo permitido.'
+                            );
+                        end if;
+                        v_business_hours := v_bh_raw;
+                    end if;
+                end if;
+            end;
         end if;
 
         if v_has_name = 1 and v_name is null then
@@ -695,7 +771,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         end if;
 
         if (v_has_name + v_has_profile_slug + v_has_description + v_has_public_whatsapp +
-           v_has_facebook_url + v_has_instagram_url +
+           v_has_facebook_url + v_has_instagram_url + v_has_business_hours +
            v_has_time_format + v_has_theme_pref + v_has_hidden_public_price_label +
            v_has_unanswered_alert_action +
            v_has_rsi_id_slot_interval + v_has_rh_id_reminder_hours + v_has_cwh_id_cancel_wait +
@@ -806,6 +882,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 public_whatsapp = case when v_has_public_whatsapp = 1 then v_public_whatsapp else ws.public_whatsapp end,
                 facebook_url    = case when v_has_facebook_url    = 1 then v_facebook_url else ws.facebook_url end,
                 instagram_url   = case when v_has_instagram_url   = 1 then v_instagram_url else ws.instagram_url end,
+                business_hours  = case when v_has_business_hours  = 1 then v_business_hours else ws.business_hours end,
                 time_format     = case when v_has_time_format     = 1 then v_time_format else ws.time_format end,
                 theme_pref      = case when v_has_theme_pref      = 1 then v_theme_pref else ws.theme_pref end,
                 hidden_public_price_label = case
@@ -825,6 +902,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 public_whatsapp,
                 facebook_url,
                 instagram_url,
+                business_hours,
                 time_format,
                 theme_pref,
                 hidden_public_price_label,
@@ -840,6 +918,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 v_public_whatsapp,
                 v_facebook_url,
                 v_instagram_url,
+                v_business_hours,
                 NVL(v_time_format, '24H'),
                 NVL(v_theme_pref, 'light'),
                 NVL(v_hidden_public_price_label, 'A evaluar'),
