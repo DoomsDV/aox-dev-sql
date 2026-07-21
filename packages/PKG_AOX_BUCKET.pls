@@ -559,14 +559,10 @@ CREATE OR REPLACE package body pkg_aox_bucket as
           from org_gallery_image
          where org_id_organization = pi_id_organization;
 
-        if v_count >= 30 then
-            raise_application_error(-20005, 'La galeria admite un maximo de 30 imagenes.');
-        end if;
-
         if pi_sort_order is null or pi_sort_order < 1 then
             v_sort_order := v_count + 1;
         else
-            v_sort_order := least(pi_sort_order, 30);
+            v_sort_order := pi_sort_order;
         end if;
 
         v_file_name := TO_CHAR(CURRENT_DATE, 'YYYYMMDD_HH24MISS')

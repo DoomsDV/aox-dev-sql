@@ -37,7 +37,7 @@ ALTER TABLE org_gallery_image
 PROMPT ALTER TABLE org_gallery_image ADD CONSTRAINT chk_orggal_sort CHECK
 ALTER TABLE org_gallery_image
   ADD CONSTRAINT chk_orggal_sort CHECK (
-    sort_order BETWEEN 1 AND 30
+    sort_order >= 1
   )
 /
 
