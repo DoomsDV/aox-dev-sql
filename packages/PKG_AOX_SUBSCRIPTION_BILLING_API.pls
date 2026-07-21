@@ -1544,7 +1544,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_cur_plan_code  VARCHAR2(30);
         v_period_end     TIMESTAMP WITH TIME ZONE;
         v_billing_exempt NUMBER(1,0);
-        v_is_founder     NUMBER(1,0);
         v_status         VARCHAR2(20);
         v_free_id        NUMBER;
         v_response       json_object_t := json_object_t();
@@ -1558,16 +1557,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Plan de continuidad no configurado.');
         END;
 
-        SELECT p.code, s.current_period_end, NVL(s.billing_exempt, 0), NVL(s.is_founder, 0), s.status
-          INTO v_cur_plan_code, v_period_end, v_billing_exempt, v_is_founder, v_status
+        SELECT p.code, s.current_period_end, NVL(s.billing_exempt, 0), s.status
+          INTO v_cur_plan_code, v_period_end, v_billing_exempt, v_status
           FROM org_subscription s
           JOIN ref_plan p ON p.id_plan = s.pln_id_plan
          WHERE s.org_id_organization = v_org_id;
 
-        IF v_billing_exempt = 1 OR v_is_founder = 1 THEN
+        IF v_billing_exempt = 1 THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_forbidden,
-                'Las cuentas fundador o exentas no usan Terminar suscripcion.'
+                'Las cuentas exentas de facturacion no usan Cancelar suscripcion.'
             );
         END IF;
 
