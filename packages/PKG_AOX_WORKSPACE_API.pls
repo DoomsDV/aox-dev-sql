@@ -517,11 +517,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_logo_name                     varchar2(255);
         v_logo_mime                     varchar2(100);
         v_logo_blob                     blob;
+        v_clear_logo                    number := 0;
 
         v_banner_base64                 clob;
         v_banner_name                   varchar2(255);
         v_banner_mime                   varchar2(100);
         v_banner_blob                   blob;
+        v_clear_banner                  number := 0;
     begin
         v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
@@ -607,9 +609,35 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_logo_name               := fn_get_optional_string(v_json_req      , 'logo_name');
         v_logo_mime               := lower(fn_get_optional_string(v_json_req, 'logo_mime'));
 
+        if v_json_req.has('clear_logo') then
+            begin
+                if nvl(v_json_req.get_number('clear_logo'), 0) = 1 then
+                    v_clear_logo := 1;
+                end if;
+            exception
+                when others then
+                    if lower(trim(nvl(v_json_req.get_string('clear_logo'), ''))) in ('true', '1') then
+                        v_clear_logo := 1;
+                    end if;
+            end;
+        end if;
+
         v_banner_base64           := fn_get_optional_clob(v_json_req        , 'banner_base64');
         v_banner_name             := fn_get_optional_string(v_json_req      , 'banner_name');
         v_banner_mime             := lower(fn_get_optional_string(v_json_req, 'banner_mime'));
+
+        if v_json_req.has('clear_banner') then
+            begin
+                if nvl(v_json_req.get_number('clear_banner'), 0) = 1 then
+                    v_clear_banner := 1;
+                end if;
+            exception
+                when others then
+                    if lower(trim(nvl(v_json_req.get_string('clear_banner'), ''))) in ('true', '1') then
+                        v_clear_banner := 1;
+                    end if;
+            end;
+        end if;
 
         if v_has_facebook_url = 1 then
             v_facebook_url := fn_normalize_social_url(v_facebook_url, 'FACEBOOK');
@@ -777,7 +805,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
            v_has_rsi_id_slot_interval + v_has_rh_id_reminder_hours + v_has_cwh_id_cancel_wait +
            v_has_notify_all_professionals) = 0
            and v_logo_base64 is null
-           and v_banner_base64 is null then
+           and v_banner_base64 is null
+           and v_clear_logo = 0
+           and v_clear_banner = 0 then
             raise_application_error(-20006, 'No se recibieron campos para actualizar.');
         end if;
 
@@ -994,6 +1024,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                     end if;
                     raise_application_error(-20008, 'No fue posible procesar o subir el logo.');
             end;
+        elsif v_clear_logo = 1 then
+            begin
+                pkg_aox_bucket.pr_delete_org_logo(v_org_id);
+                update workspace_setting
+                   set logo_filename  = null,
+                       logo_mime_type = null
+                 where org_id_organization = v_org_id;
+            exception
+                when others then
+                    if sqlcode = -20998 then
+                        raise_application_error(-20008, 'No fue posible eliminar el logo.');
+                    end if;
+                    raise;
+            end;
         end if;
 
         -- 4. Manejo del Banner
@@ -1047,6 +1091,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                         raise;
                     end if;
                     raise_application_error(-20008, 'No fue posible procesar o subir el banner.');
+            end;
+        elsif v_clear_banner = 1 then
+            begin
+                pkg_aox_bucket.pr_delete_org_banner(v_org_id);
+                update workspace_setting
+                   set banner_filename  = null,
+                       banner_mime_type = null
+                 where org_id_organization = v_org_id;
+            exception
+                when others then
+                    if sqlcode = -20998 then
+                        raise_application_error(-20008, 'No fue posible eliminar el banner.');
+                    end if;
+                    raise;
             end;
         end if;
 
