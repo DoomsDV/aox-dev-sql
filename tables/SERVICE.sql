@@ -7,6 +7,7 @@ CREATE TABLE service (
   price               NUMBER                      NULL,
   hide_public_price   NUMBER(1,0)                 DEFAULT 0 NOT NULL,
   hidden_public_price_label VARCHAR2(80)          NULL,
+  image_url           VARCHAR2(1000)              NULL,
   is_active           NUMBER(1,0)                 DEFAULT 1 NOT NULL,
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 )

@@ -124,6 +124,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
                 price,
                 hide_public_price,
                 hidden_public_price_label,
+                image_url,
                 is_active,
                 created_at,
                 requires_deposit,
@@ -147,6 +148,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             v_service_obj.put('price'           , rec.price);
             v_service_obj.put('hide_public_price', NVL(rec.hide_public_price, 0));
             v_service_obj.put('hidden_public_price_label', rec.hidden_public_price_label);
+            IF rec.image_url IS NOT NULL THEN
+                v_service_obj.put('image_url', rec.image_url);
+            ELSE
+                v_service_obj.put('image_url', '');
+            END IF;
             v_service_obj.put('is_active'       , rec.is_active);
             v_service_obj.put('requires_deposit', rec.requires_deposit);
             v_service_obj.put('deposit_type'    , rec.deposit_type);
@@ -198,6 +204,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_requires_deposit  service.requires_deposit%TYPE := 0;
         v_deposit_type      service.deposit_type%TYPE;
         v_deposit_value     service.deposit_value%TYPE;
+        v_img_base64        CLOB;
+        v_img_name          VARCHAR2(255);
+        v_img_mime          VARCHAR2(100);
+        v_img_blob          BLOB;
+        v_image_url         service.image_url%TYPE;
     BEGIN
         -- 1. Validar Token y obtener Organización
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
@@ -226,6 +237,21 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             IF v_json_req.has('requires_deposit') THEN v_requires_deposit := v_json_req.get_number('requires_deposit'); END IF;
             IF v_json_req.has('deposit_type') THEN v_deposit_type := UPPER(TRIM(v_json_req.get_string('deposit_type'))); END IF;
             IF v_json_req.has('deposit_value') THEN v_deposit_value := v_json_req.get_number('deposit_value'); END IF;
+            IF v_json_req.has('image_base64') THEN
+                v_img_base64 := v_json_req.get_clob('image_base64');
+                BEGIN
+                    v_img_name := NVL(TRIM(v_json_req.get_string('image_name')), 'portada.jpg');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_img_name := 'portada.jpg';
+                END;
+                BEGIN
+                    v_img_mime := NVL(TRIM(v_json_req.get_string('image_mime')), 'image/jpeg');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_img_mime := 'image/jpeg';
+                END;
+            END IF;
         EXCEPTION
             WHEN OTHERS THEN
                 RAISE_APPLICATION_ERROR(-20002, 'JSON inválido o malformado.');
@@ -326,6 +352,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         )
         returning id_service into v_new_id;
 
+        IF v_img_base64 IS NOT NULL AND DBMS_LOB.getlength(v_img_base64) > 0 THEN
+            v_img_blob := apex_web_service.clobbase642blob(v_img_base64);
+            pkg_aox_bucket.pr_upload_service_image(
+                pi_blob            => v_img_blob,
+                pi_filename        => v_img_name,
+                pi_mime_type       => v_img_mime,
+                pi_id_organization => v_org_id,
+                pi_id_service      => v_new_id,
+                po_url             => v_image_url
+            );
+        END IF;
+
         commit;
 
         -- 5. Respuesta exitosa 201 Created
@@ -333,6 +371,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_response_json.put('status'    , 'success');
         v_response_json.put('message'   , 'Servicio creado correctamente.');
         v_response_json.put('id_service', v_new_id);
+        IF v_image_url IS NOT NULL THEN
+            v_response_json.put('image_url', v_image_url);
+        END IF;
         po_response_body := v_response_json.to_clob();
 
     exception
@@ -369,6 +410,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_requires_deposit service.requires_deposit%TYPE;
         v_deposit_type     service.deposit_type%TYPE;
         v_deposit_value    service.deposit_value%TYPE;
+        v_image_url        service.image_url%TYPE;
         v_created_at       service.created_at%TYPE;
     begin
         -- 1. Validar Token y obtener Organización
@@ -383,6 +425,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
               price,
               hide_public_price,
               hidden_public_price_label,
+              image_url,
               is_active,
               requires_deposit,
               deposit_type,
@@ -395,6 +438,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
               v_price,
               v_hide_public_price,
               v_hidden_public_price_label,
+              v_image_url,
               v_is_active,
               v_requires_deposit,
               v_deposit_type,
@@ -412,6 +456,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             v_service_obj.put('price'            , v_price);
             v_service_obj.put('hide_public_price', NVL(v_hide_public_price, 0));
             v_service_obj.put('hidden_public_price_label', v_hidden_public_price_label);
+            IF v_image_url IS NOT NULL THEN
+                v_service_obj.put('image_url', v_image_url);
+            ELSE
+                v_service_obj.put('image_url', '');
+            END IF;
             v_service_obj.put('is_active'        , v_is_active);
             v_service_obj.put('requires_deposit' , v_requires_deposit);
             v_service_obj.put('deposit_type'     , v_deposit_type);
@@ -462,6 +511,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_requires_deposit  service.requires_deposit%TYPE;
         v_deposit_type      service.deposit_type%TYPE;
         v_deposit_value     service.deposit_value%TYPE;
+        v_img_base64        CLOB;
+        v_img_name          VARCHAR2(255);
+        v_img_mime          VARCHAR2(100);
+        v_img_blob          BLOB;
+        v_clear_image       NUMBER := 0;
+        v_image_url         service.image_url%TYPE;
     begin
         -- 1. Validar Token y obtener Organización
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
@@ -490,6 +545,38 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             IF v_json_req.has('requires_deposit') THEN v_requires_deposit := v_json_req.get_number('requires_deposit'); END IF;
             IF v_json_req.has('deposit_type') THEN v_deposit_type := UPPER(TRIM(v_json_req.get_string('deposit_type'))); END IF;
             IF v_json_req.has('deposit_value') THEN v_deposit_value := v_json_req.get_number('deposit_value'); END IF;
+            IF v_json_req.has('clear_image') THEN
+                BEGIN
+                    v_clear_image := CASE WHEN NVL(v_json_req.get_number('clear_image'), 0) = 1 THEN 1 ELSE 0 END;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        BEGIN
+                            IF LOWER(TRIM(v_json_req.get_string('clear_image'))) IN ('true', '1') THEN
+                                v_clear_image := 1;
+                            ELSE
+                                v_clear_image := 0;
+                            END IF;
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                v_clear_image := 0;
+                        END;
+                END;
+            END IF;
+            IF v_json_req.has('image_base64') THEN
+                v_img_base64 := v_json_req.get_clob('image_base64');
+                BEGIN
+                    v_img_name := NVL(TRIM(v_json_req.get_string('image_name')), 'portada.jpg');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_img_name := 'portada.jpg';
+                END;
+                BEGIN
+                    v_img_mime := NVL(TRIM(v_json_req.get_string('image_mime')), 'image/jpeg');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_img_mime := 'image/jpeg';
+                END;
+            END IF;
         exception
             when others then
                 raise_application_error(-20002, 'JSON inválido o malformado.');
@@ -589,12 +676,35 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             return;
         end if;
 
+        IF v_img_base64 IS NOT NULL AND DBMS_LOB.getlength(v_img_base64) > 0 THEN
+            v_img_blob := apex_web_service.clobbase642blob(v_img_base64);
+            pkg_aox_bucket.pr_upload_service_image(
+                pi_blob            => v_img_blob,
+                pi_filename        => v_img_name,
+                pi_mime_type       => v_img_mime,
+                pi_id_organization => v_org_id,
+                pi_id_service      => pi_service_id,
+                po_url             => v_image_url
+            );
+        ELSIF v_clear_image = 1 THEN
+            pkg_aox_bucket.pr_clear_service_image(
+                pi_id_organization => v_org_id,
+                pi_id_service      => pi_service_id
+            );
+            v_image_url := NULL;
+        END IF;
+
         commit;
 
         -- 6. Respuesta exitosa
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response_json.put('status'  , 'success');
         v_response_json.put('message' , 'Servicio actualizado correctamente.');
+        IF v_image_url IS NOT NULL THEN
+            v_response_json.put('image_url', v_image_url);
+        ELSIF v_clear_image = 1 THEN
+            v_response_json.put('image_url', '');
+        END IF;
         po_response_body := v_response_json.to_clob();
 
     exception

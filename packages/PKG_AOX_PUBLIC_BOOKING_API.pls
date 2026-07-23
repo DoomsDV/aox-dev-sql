@@ -481,6 +481,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 s.price,
                 s.hide_public_price,
                 s.hidden_public_price_label,
+                s.image_url,
                 s.requires_deposit,
                 s.deposit_type,
                 s.deposit_value,
@@ -500,6 +501,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_srv_obj.put('price'            , rec.price);
             v_srv_obj.put('hide_public_price', NVL(rec.hide_public_price, 0));
             v_srv_obj.put('hidden_price_label', rec.resolved_hidden_price_label);
+            IF rec.image_url IS NOT NULL THEN
+                v_srv_obj.put('image_url', rec.image_url);
+            ELSE
+                v_srv_obj.put('image_url', '');
+            END IF;
             v_srv_obj.put('requires_deposit' , rec.requires_deposit);
             v_srv_obj.put('deposit_type'     , rec.deposit_type);
             v_srv_obj.put('deposit_value'    , rec.deposit_value);
@@ -916,6 +922,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                     s.price,
                     s.hide_public_price,
                     s.hidden_public_price_label,
+                    s.image_url,
                     s.requires_deposit,
                     s.deposit_type,
                     s.deposit_value,
@@ -938,6 +945,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_srv_obj.put('price'            , srv_rec.price);
                 v_srv_obj.put('hide_public_price', NVL(srv_rec.hide_public_price, 0));
                 v_srv_obj.put('hidden_price_label', srv_rec.resolved_hidden_price_label);
+                IF srv_rec.image_url IS NOT NULL THEN
+                    v_srv_obj.put('image_url', srv_rec.image_url);
+                ELSE
+                    v_srv_obj.put('image_url', '');
+                END IF;
                 v_srv_obj.put('requires_deposit' , srv_rec.requires_deposit);
                 v_srv_obj.put('deposit_type'     , srv_rec.deposit_type);
                 v_srv_obj.put('deposit_value'    , srv_rec.deposit_value);

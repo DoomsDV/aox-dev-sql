@@ -57,6 +57,21 @@ CREATE OR REPLACE package pkg_aox_bucket AS
         pi_gallery_id      in org_gallery_image.id_gallery_image%type
     );
 
+    -- Portada de servicio: organizations/{org}/services/{service_id}/{file}
+    procedure pr_upload_service_image(
+        pi_blob            in blob,
+        pi_filename        in varchar2,
+        pi_mime_type       in varchar2,
+        pi_id_organization in organization.id_organization%type,
+        pi_id_service      in service.id_service%type,
+        po_url             out varchar2
+    );
+
+    procedure pr_clear_service_image(
+        pi_id_organization in organization.id_organization%type,
+        pi_id_service      in service.id_service%type
+    );
+
     procedure pr_upload_platform_user_avatar(
         pi_blob              in blob,
         pi_filename          in varchar2,
@@ -131,6 +146,7 @@ CREATE OR REPLACE package body pkg_aox_bucket as
     c_logos_dir         constant varchar2(30) := 'logos/';
     c_banners_dir       constant varchar2(30) := 'banners/';
     c_gallery_dir       constant varchar2(30) := 'gallery/';
+    c_services_dir      constant varchar2(30) := 'services/';
     c_platform_users_dir constant varchar2(30) := 'platform_users/';
     c_appointments_dir  constant varchar2(30) := 'appointments/';
     c_payments_dir      constant varchar2(30) := 'payments/';
@@ -460,7 +476,9 @@ CREATE OR REPLACE package body pkg_aox_bucket as
 
         -- 3. Limpiamos la URL de la base de datos local
         update workspace_setting
-        set logo_url              = null
+        set logo_url              = null,
+            logo_filename         = null,
+            logo_mime_type        = null
         where org_id_organization = pi_id_organization;
 
     end pr_delete_org_logo;
@@ -534,7 +552,9 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         end if;
 
         update workspace_setting
-           set banner_url = null
+           set banner_url = null,
+               banner_filename = null,
+               banner_mime_type = null
          where org_id_organization = pi_id_organization;
     end pr_delete_org_banner;
 
@@ -640,6 +660,114 @@ CREATE OR REPLACE package body pkg_aox_bucket as
          where id_gallery_image = pi_gallery_id
            and org_id_organization = pi_id_organization;
     end pr_delete_org_gallery_image;
+
+    procedure pr_upload_service_image(
+        pi_blob            in blob,
+        pi_filename        in varchar2,
+        pi_mime_type       in varchar2,
+        pi_id_organization in organization.id_organization%type,
+        pi_id_service      in service.id_service%type,
+        po_url             out varchar2
+    ) is
+        v_file_name   varchar2(255);
+        v_response    clob;
+        v_status_code number;
+        v_org_url     varchar2(3000);
+        v_exists      number;
+    begin
+        select count(*)
+          into v_exists
+          from service
+         where id_service = pi_id_service
+           and org_id_organization = pi_id_organization;
+
+        if v_exists = 0 then
+            raise_application_error(-20009, 'Servicio no encontrado.');
+        end if;
+
+        if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
+            raise_application_error(-20002, 'La imagen de portada esta vacia.');
+        end if;
+
+        v_file_name := TO_CHAR(CURRENT_DATE, 'YYYYMMDD_HH24MISS')
+                    || '_svc_'
+                    || fn_safe_file_name(pi_filename);
+        v_org_url := rtrim(g_base_url, '/')
+                  || '/'
+                  || c_organizations_dir
+                  || pi_id_organization
+                  || '/'
+                  || c_services_dir
+                  || pi_id_service
+                  || '/'
+                  || v_file_name;
+
+        apex_web_service.g_request_headers.delete;
+        apex_web_service.g_request_headers(1).name := 'Content-Type';
+        apex_web_service.g_request_headers(1).value := nvl(pi_mime_type, 'image/jpeg');
+
+        v_response := apex_web_service.make_rest_request(
+            p_url                  => v_org_url,
+            p_http_method          => 'PUT',
+            p_credential_static_id => g_credential,
+            p_body_blob            => pi_blob
+        );
+
+        v_status_code := apex_web_service.g_status_code;
+        if v_status_code not between 200 and 299 then
+            raise_application_error(-20001, 'Error al subir imagen de servicio a OCI. HTTP: ' || v_status_code);
+        end if;
+
+        update service
+           set image_url = v_org_url
+         where id_service = pi_id_service
+           and org_id_organization = pi_id_organization;
+
+        po_url := v_org_url;
+    end pr_upload_service_image;
+
+    procedure pr_clear_service_image(
+        pi_id_organization in organization.id_organization%type,
+        pi_id_service      in service.id_service%type
+    ) is
+        v_saved_url   varchar2(4000);
+        v_response    clob;
+        v_status_code number;
+    begin
+        begin
+            select image_url
+              into v_saved_url
+              from service
+             where id_service = pi_id_service
+               and org_id_organization = pi_id_organization;
+        exception
+            when no_data_found then
+                raise_application_error(-20009, 'Servicio no encontrado.');
+        end;
+
+        if v_saved_url is not null then
+            begin
+                apex_web_service.g_request_headers.delete;
+                v_response := apex_web_service.make_rest_request(
+                    p_url                  => v_saved_url,
+                    p_http_method          => 'DELETE',
+                    p_credential_static_id => g_credential
+                );
+                v_status_code := apex_web_service.g_status_code;
+                if v_status_code not in (200, 204, 404) then
+                    null; -- no bloquear clear si OCI falla; igual limpiamos URL
+                end if;
+            exception
+                when others then
+                    null;
+            end;
+        end if;
+
+        update service
+           set image_url = null
+         where id_service = pi_id_service
+           and org_id_organization = pi_id_organization;
+    end pr_clear_service_image;
 
     procedure pr_upload_platform_user_avatar(
         pi_blob             in blob,
