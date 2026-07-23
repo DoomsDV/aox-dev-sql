@@ -160,6 +160,9 @@ PROMPT [41/43] org_subscription_invoice
 PROMPT [41b/43] org_payment_card (Pagopar pago-recurrente / catastro de tarjetas)
 @@tables\ORG_PAYMENT_CARD.sql
 
+PROMPT [41c/43] org_billing_profile (datos fiscales suscripcion Hasel)
+@@tables\ORG_BILLING_PROFILE.sql
+
 PROMPT --- Historial por cita + adjuntos (Fase 4) ---
 PROMPT [42/44] appointment_session_record
 @@tables\APPOINTMENT_SESSION_RECORD.sql
@@ -209,7 +212,7 @@ COMMIT;
 PROMPT --- Seed catalogo de planes / features / storage addons ---
 MERGE INTO ref_plan t
 USING (
-  SELECT 1 AS id_plan, 'BASE'    AS code, 'Base'        AS name,  99000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 0          AS storage_limit_bytes, 1 AS is_active, 1 AS sort_order FROM dual UNION ALL
+  SELECT 1 AS id_plan, 'BASE'    AS code, 'Base'        AS name, 129000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 1073741824 AS storage_limit_bytes, 1 AS is_active, 1 AS sort_order FROM dual UNION ALL
   SELECT 2 AS id_plan, 'PREMIUM' AS code, 'Premium'     AS name, 229000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 5368709120 AS storage_limit_bytes, 1 AS is_active, 2 AS sort_order FROM dual UNION ALL
   SELECT 3 AS id_plan, 'FREE'    AS code, 'Continuidad' AS name,      0 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 0          AS storage_limit_bytes, 1 AS is_active, 0 AS sort_order FROM dual
 ) s
@@ -283,6 +286,7 @@ PROMPT --- FASE 3: Paquetes - nucleo ---
 @@packages\PKG_AOX_SUBSCRIPTION_API.pls
 -- Cobros SIPAP (Fase A): SERVICE_API depende de fn_org_deposits_enabled.
 @@packages\PKG_AOX_PAYMENT_SETTINGS_API.pls
+@@packages\PKG_AOX_BILLING_PROFILE_API.pls
 @@packages\PKG_AOX_PAYMENTS_API.pls
 
 @@packages\PKG_AOX_REFUND_CLAIMS_API.pls

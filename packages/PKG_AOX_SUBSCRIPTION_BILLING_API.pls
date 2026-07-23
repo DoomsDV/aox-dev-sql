@@ -325,6 +325,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_org_name      organization.name%TYPE;
         v_org_email     organization.company_email%TYPE;
         v_org_phone     VARCHAR2(60);
+        v_bill_name     org_billing_profile.billing_name%TYPE;
+        v_bill_doc_type org_billing_profile.billing_doc_type%TYPE;
+        v_bill_doc_number org_billing_profile.billing_doc_number%TYPE;
+        v_bill_email    org_billing_profile.billing_email%TYPE;
         v_comprador     json_object_t := json_object_t();
         v_item          json_object_t := json_object_t();
         v_items         json_array_t  := json_array_t();
@@ -338,16 +342,50 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         pr_get_org_contact(pi_org_id, v_org_name, v_org_email, v_org_phone);
         v_token := pkg_aox_pagopar_api.fn_pagopar_sha1_token(pi_private_key || v_id_pedido || TO_CHAR(pi_amount));
 
-        v_comprador.put('ruc', '');
+        -- Perfil fiscal de suscripcion (si existe); fallback a contacto de organization.
+        BEGIN
+            SELECT /*+ no_parallel */
+                   billing_name,
+                   billing_doc_type,
+                   billing_doc_number,
+                   billing_email
+              INTO v_bill_name,
+                   v_bill_doc_type,
+                   v_bill_doc_number,
+                   v_bill_email
+              FROM org_billing_profile
+             WHERE org_id_organization = pi_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_bill_name := NULL;
+                v_bill_doc_type := NULL;
+                v_bill_doc_number := NULL;
+                v_bill_email := NULL;
+        END;
+
+        IF v_bill_name IS NOT NULL AND LENGTH(TRIM(v_bill_name)) >= 2 THEN
+            v_org_name := TRIM(v_bill_name);
+        END IF;
+        IF v_bill_email IS NOT NULL AND INSTR(v_bill_email, '@') > 1 THEN
+            v_org_email := LOWER(TRIM(v_bill_email));
+        END IF;
+        IF v_bill_doc_type IS NULL OR v_bill_doc_type NOT IN ('CI', 'RUC') THEN
+            v_bill_doc_type := 'CI';
+        END IF;
+        IF v_bill_doc_number IS NULL OR LENGTH(TRIM(v_bill_doc_number)) < 3 THEN
+            v_bill_doc_number := TO_CHAR(pi_org_id);
+        END IF;
+
+        v_comprador.put('ruc', CASE WHEN v_bill_doc_type = 'RUC' THEN TRIM(v_bill_doc_number) ELSE '' END);
         v_comprador.put('email', v_org_email);
         v_comprador.put('ciudad', '1');
         v_comprador.put('nombre', v_org_name);
         v_comprador.put('telefono', v_org_phone);
         v_comprador.put('direccion', '');
-        v_comprador.put('documento', TO_CHAR(pi_org_id));
+        v_comprador.put('documento', TRIM(v_bill_doc_number));
         v_comprador.put('coordenadas', '');
         v_comprador.put('razon_social', v_org_name);
-        v_comprador.put('tipo_documento', 'CI');
+        v_comprador.put('tipo_documento', v_bill_doc_type);
         v_comprador.put('direccion_referencia', '');
 
         v_item.put('ciudad', '1');

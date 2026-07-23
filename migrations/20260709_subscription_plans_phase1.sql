@@ -4,6 +4,7 @@
 -- (estos ultimos son idempotentes: re-ejecutar no duplica).
 --
 -- Constantes de storage:
+--   1 GB  = 1  * 1073741824 = 1073741824 bytes
 --   5 GB  = 5  * 1073741824 = 5368709120 bytes
 --   15 GB = 15 * 1073741824 = 16106127360 bytes
 
@@ -24,7 +25,7 @@ PROMPT === 2. Seed de planes comerciales (BASE, PREMIUM) ===
 
 MERGE INTO ref_plan t
 USING (
-  SELECT 1 AS id_plan, 'BASE'    AS code, 'Base'    AS name,  99000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 0          AS storage_limit_bytes, 1 AS is_active, 1 AS sort_order FROM dual UNION ALL
+  SELECT 1 AS id_plan, 'BASE'    AS code, 'Base'    AS name, 129000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 1073741824 AS storage_limit_bytes, 1 AS is_active, 1 AS sort_order FROM dual UNION ALL
   SELECT 2 AS id_plan, 'PREMIUM' AS code, 'Premium' AS name, 229000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 5368709120 AS storage_limit_bytes, 1 AS is_active, 2 AS sort_order FROM dual
 ) s
 ON (t.id_plan = s.id_plan)
