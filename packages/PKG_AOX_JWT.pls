@@ -238,6 +238,13 @@ CREATE OR REPLACE package body pkg_aox_jwt as
             p_signature_key => v_jwt_secret
         );
 
+        apex_jwt.validate(
+            p_token          => v_decoded_token,
+            p_iss            => nvl(fn_get_parameter('JWT_ISSUER'), 'hasel-api'),
+            p_aud            => nvl(fn_get_parameter('JWT_AUDIENCE'), 'hasel-app'),
+            p_leeway_seconds => nvl(pkg_aox_util.fn_param_number('JWT_VALIDATE_LEEWAY_SEC', 30), 30)
+        );
+
         v_payload_json := json_object_t.parse(v_decoded_token.payload);
 
         v_org_selection := v_payload_json.get_number('org_selection');

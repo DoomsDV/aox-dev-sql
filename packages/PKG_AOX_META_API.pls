@@ -65,6 +65,15 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
         pi_payload IN VARCHAR2
     );
 
+    /**
+     * Verifica X-Hub-Signature-256 (HMAC-SHA256 del body crudo con META_APP_SECRET).
+     * Header esperado: "sha256=<hex>".
+     */
+    FUNCTION fn_verify_webhook_signature (
+        pi_body             IN BLOB,
+        pi_signature_header IN VARCHAR2
+    ) RETURN NUMBER;
+
 END pkg_aox_meta_api;
 /
 
@@ -1232,6 +1241,54 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
 
         COMMIT;
     END pr_process_attendance_timeouts;
+
+    FUNCTION fn_verify_webhook_signature (
+        pi_body             IN BLOB,
+        pi_signature_header IN VARCHAR2
+    ) RETURN NUMBER IS
+        v_secret     VARCHAR2(4000) := fn_get_parameter('META_APP_SECRET');
+        v_header     VARCHAR2(4000) := LOWER(TRIM(pi_signature_header));
+        v_expected   VARCHAR2(128);
+        v_mac        RAW(64);
+        v_len        INTEGER;
+        v_hex        VARCHAR2(128);
+    BEGIN
+        IF v_secret IS NULL OR TRIM(v_secret) IS NULL OR UPPER(TRIM(v_secret)) = 'UNSET' THEN
+            RETURN 0;
+        END IF;
+
+        IF v_header IS NULL OR NOT REGEXP_LIKE(v_header, '^sha256=[0-9a-f]{64}$') THEN
+            RETURN 0;
+        END IF;
+
+        v_expected := SUBSTR(v_header, 8); -- after "sha256="
+
+        IF pi_body IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        v_len := DBMS_LOB.getlength(pi_body);
+        IF v_len IS NULL OR v_len = 0 OR v_len > 32767 THEN
+            RETURN 0;
+        END IF;
+
+        v_mac := DBMS_CRYPTO.mac(
+            src => DBMS_LOB.substr(pi_body, v_len, 1),
+            typ => DBMS_CRYPTO.hmac_sh256,
+            key => UTL_I18N.string_to_raw(v_secret, 'AL32UTF8')
+        );
+
+        v_hex := LOWER(RAWTOHEX(v_mac));
+
+        IF v_hex = v_expected THEN
+            RETURN 1;
+        END IF;
+
+        RETURN 0;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN 0;
+    END fn_verify_webhook_signature;
 
 END pkg_aox_meta_api;
 /

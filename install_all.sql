@@ -19,6 +19,9 @@ PROMPT [4/29] role
 PROMPT [5/29] app_parameter
 @@tables\APP_PARAMETER.sql
 
+PROMPT [5b] api_rate_limit_bucket
+@@tables\API_RATE_LIMIT_BUCKET.sql
+
 PROMPT [6/29] organization
 @@tables\ORGANIZATION.sql
 

@@ -48,6 +48,18 @@ CREATE OR REPLACE PACKAGE pkg_aox_public_booking_api IS
         po_response_body    OUT CLOB
     );
 
+    -- Fechas con al menos 1 slot libre en un rango (plantilla + excepciones + citas)
+    PROCEDURE pr_get_available_dates(
+        pi_pro_id           IN  NUMBER,
+        pi_loc_id           IN  NUMBER,
+        pi_ser_id           IN  NUMBER,
+        pi_from_date        IN  VARCHAR2, -- YYYY-MM-DD
+        pi_to_date          IN  VARCHAR2, -- YYYY-MM-DD
+        pi_exclude_app_id   IN  NUMBER DEFAULT NULL,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB
+    );
+
     -- Crear cita pública (Sin JWT)
     PROCEDURE pr_create_public_app(
         pi_body          IN  CLOB,
@@ -385,6 +397,120 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_response_json.put('message', 'Error al consultar disponibilidad: Verifique el formato de fecha.');
             po_response_body := v_response_json.to_clob();
     END pr_get_available_slots;
+
+    -- API 1b: Fechas del rango con al menos un hueco libre
+    PROCEDURE pr_get_available_dates(
+        pi_pro_id           IN  NUMBER,
+        pi_loc_id           IN  NUMBER,
+        pi_ser_id           IN  NUMBER,
+        pi_from_date        IN  VARCHAR2,
+        pi_to_date          IN  VARCHAR2,
+        pi_exclude_app_id   IN  NUMBER DEFAULT NULL,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB
+    ) IS
+        v_response_json json_object_t := json_object_t();
+        v_dates_arr     json_array_t  := json_array_t();
+        v_from_date     DATE;
+        v_to_date       DATE;
+        v_cursor        DATE;
+        v_has_slot      NUMBER;
+        v_span_days     NUMBER;
+    BEGIN
+        IF pi_pro_id IS NULL OR pi_loc_id IS NULL OR pi_ser_id IS NULL
+           OR pi_from_date IS NULL OR TRIM(pi_from_date) = ''
+           OR pi_to_date IS NULL OR TRIM(pi_to_date) = '' THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'pro_id, loc_id, ser_id, from_date y to_date son obligatorios.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        BEGIN
+            v_from_date := TRUNC(TO_DATE(TRIM(pi_from_date), 'YYYY-MM-DD'));
+            v_to_date   := TRUNC(TO_DATE(TRIM(pi_to_date), 'YYYY-MM-DD'));
+        EXCEPTION
+            WHEN OTHERS THEN
+                po_status_code := pkg_aox_util.c_bad_request_code;
+                v_response_json.put('status', 'error');
+                v_response_json.put('message', 'from_date y to_date deben ser YYYY-MM-DD.');
+                po_response_body := v_response_json.to_clob();
+                RETURN;
+        END;
+
+        IF v_to_date < v_from_date THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'to_date no puede ser anterior a from_date.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        v_span_days := v_to_date - v_from_date;
+        IF v_span_days > 62 THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'El rango máximo es de 62 días.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        v_cursor := v_from_date;
+        WHILE v_cursor <= v_to_date LOOP
+            v_has_slot := 0;
+            BEGIN
+                SELECT /*+ FIRST_ROWS(1) */ 1
+                  INTO v_has_slot
+                  FROM TABLE(fn_get_available_slots_pipe(
+                      pi_pro_id,
+                      pi_loc_id,
+                      pi_ser_id,
+                      v_cursor,
+                      pi_exclude_app_id
+                  ))
+                 WHERE ROWNUM = 1;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_has_slot := 0;
+            END;
+
+            IF v_has_slot = 1 THEN
+                v_dates_arr.append(TO_CHAR(v_cursor, 'YYYY-MM-DD'));
+            END IF;
+
+            v_cursor := v_cursor + 1;
+        END LOOP;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data', v_dates_arr);
+        po_response_body := v_response_json.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'PUBLIC_AVAILABLE_DATES',
+                pi_process_name    => 'PKG_AOX_PUBLIC_BOOKING_API.PR_GET_AVAILABLE_DATES',
+                pi_http_method     => 'GET',
+                pi_endpoint        => '/public/available-dates',
+                pi_status          => 'ERROR',
+                pi_status_code     => po_status_code,
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_request_params  => 'pro_id=' || pi_pro_id
+                    || ';loc_id=' || pi_loc_id
+                    || ';ser_id=' || pi_ser_id
+                    || ';from_date=' || pi_from_date
+                    || ';to_date=' || pi_to_date
+                    || ';exclude_app_id=' || pi_exclude_app_id
+            );
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'Error al consultar fechas disponibles.');
+            po_response_body := v_response_json.to_clob();
+    END pr_get_available_dates;
 
     -- API 2: Obtener Perfil por slug de org + profesional
     PROCEDURE pr_get_profile(
@@ -879,7 +1005,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 p.id_professional,
                 p.org_id_organization,
                 o.name AS organization_name,
-                ws.profile_slug AS organization_slug
+                ws.profile_slug AS organization_slug,
+                ws.logo_url AS organization_logo_url
             FROM org_member m
             JOIN professional p ON p.usr_id_user = m.id_org_member
                                AND p.is_active = 1
@@ -912,6 +1039,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_loc_obj.put('org_id_organization', loc_rec.org_id_organization);
             v_loc_obj.put('organization_name'  , loc_rec.organization_name);
             v_loc_obj.put('organization_slug'  , loc_rec.organization_slug);
+            v_loc_obj.put('organization_logo_url', NVL(loc_rec.organization_logo_url, ''));
             v_loc_obj.put('id_professional'    , loc_rec.id_professional);
 
             FOR srv_rec IN (
@@ -1110,12 +1238,34 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_loc_id     := v_json_req.get_number('loc_id_location');
         v_ser_id     := v_json_req.get_number('ser_id_service');
 
-        -- Gate de suscripción: reserva pública en mantenimiento si la org está en READ_ONLY / vencido.
-        pkg_aox_subscription_api.pr_assert_public_booking_open(v_org_id);
-
         -- Extraer los datos del cliente desde el JSON
         v_cus_phone  := TRIM(v_json_req.get_string('customer_phone'));
         v_cus_name   := TRIM(v_json_req.get_string('customer_name'));
+
+        BEGIN
+            pkg_aox_util.pr_assert_rate_limit(
+                pi_scope        => 'PUBLIC_BOOKING',
+                pi_key          => NVL(NULLIF(REGEXP_REPLACE(NVL(v_cus_phone, ''), '[^0-9]', ''), ''), pkg_aox_util.fn_client_ip),
+                pi_max_attempts => pkg_aox_util.fn_param_number('RATE_LIMIT_PUBLIC_BOOKING_MAX', 20),
+                pi_window_sec   => pkg_aox_util.fn_param_number('RATE_LIMIT_PUBLIC_BOOKING_WINDOW_SEC', 900)
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF SQLCODE = pkg_aox_util.c_sqlcode_rate_limit THEN
+                    po_status_code := pkg_aox_util.c_too_many_requests_code;
+                    pkg_aox_util.pr_build_api_error_response(
+                        pi_status_code   => po_status_code,
+                        pi_api_code      => pkg_aox_util.c_api_code_rate_limited,
+                        pi_message       => REGEXP_REPLACE(SQLERRM, '^ORA-[0-9]+: ', ''),
+                        po_response_body => po_response_body
+                    );
+                    RETURN;
+                END IF;
+                RAISE;
+        END;
+
+        -- Gate de suscripción: reserva pública en mantenimiento si la org está en READ_ONLY / vencido.
+        pkg_aox_subscription_api.pr_assert_public_booking_open(v_org_id);
 
         -- Validar que el cliente haya enviado sus datos
         IF v_cus_phone IS NULL OR v_cus_name IS NULL THEN

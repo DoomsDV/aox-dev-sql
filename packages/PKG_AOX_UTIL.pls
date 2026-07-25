@@ -18,6 +18,7 @@ CREATE OR REPLACE package pkg_aox_util as
     c_forbidden_code                constant number := 403;
     c_not_found_code                constant number := 404;
     c_conflict_code                 constant number := 409;
+    c_too_many_requests_code        constant number := 429;
 
     /** Códigos de error API (JSON field "code") — alineados con bookmate/src/lib/session-auth-messages.ts */
     c_api_code_session_expired      constant varchar2(30) := 'SESSION_EXPIRED';
@@ -27,12 +28,14 @@ CREATE OR REPLACE package pkg_aox_util as
     c_api_code_validation_error     constant varchar2(30) := 'VALIDATION_ERROR';
     c_api_code_not_found            constant varchar2(30) := 'NOT_FOUND';
     c_api_code_conflict             constant varchar2(30) := 'CONFLICT';
+    c_api_code_rate_limited         constant varchar2(30) := 'RATE_LIMITED';
     c_api_code_internal_error       constant varchar2(30) := 'INTERNAL_ERROR';
 
-    /** SQLCODE de aplicación: JWT/sesión (-20001), validación (-20002), permisos (-20011). */
+    /** SQLCODE de aplicación: JWT/sesión (-20001), validación (-20002), permisos (-20011), rate limit (-20029). */
     c_sqlcode_session               constant number := -20001;
     c_sqlcode_validation            constant number := -20002;
     c_sqlcode_forbidden             constant number := -20011;
+    c_sqlcode_rate_limit            constant number := -20029;
 
     function fn_clean_sqlerrm(
         pi_sqlerrm in varchar2 default sqlerrm
@@ -208,6 +211,28 @@ CREATE OR REPLACE package pkg_aox_util as
     FUNCTION fn_get_user_id_from_jwt(
       pi_auth_header IN VARCHAR2
     ) RETURN NUMBER;
+
+    /**
+     * Decodifica JWT (firma HS256) y valida exp/iss/aud vía apex_jwt.validate.
+     * Acepta Authorization "Bearer …" o el token crudo.
+     */
+    FUNCTION fn_decode_validated_jwt_payload(
+        pi_auth_header IN VARCHAR2
+    ) RETURN json_object_t;
+
+    /** IP del cliente CGI (REMOTE_ADDR / X-Forwarded-For). */
+    FUNCTION fn_client_ip RETURN VARCHAR2;
+
+    /**
+     * Rate limit por scope+key en ventana deslizante.
+     * Si se excede, RAISE_APPLICATION_ERROR(c_sqlcode_rate_limit).
+     */
+    PROCEDURE pr_assert_rate_limit(
+        pi_scope         IN VARCHAR2,
+        pi_key           IN VARCHAR2,
+        pi_max_attempts  IN NUMBER,
+        pi_window_sec    IN NUMBER
+    );
 
     -- Encripta un texto usando AES-256
     FUNCTION fn_encrypt_data(
@@ -835,83 +860,168 @@ CREATE OR REPLACE package body pkg_aox_util as
         return lower(rawtohex(v_hash));
     end fn_hash_password;
 
-    FUNCTION fn_get_org_id_from_jwt(pi_auth_header IN VARCHAR2) RETURN NUMBER IS
+    FUNCTION fn_decode_validated_jwt_payload(
+        pi_auth_header IN VARCHAR2
+    ) RETURN json_object_t IS
         v_token         VARCHAR2(32767);
-        v_org_id        NUMBER;
-        v_jwt_secret    RAW(256) := UTL_RAW.CAST_TO_RAW(fn_get_parameter('JWT_TOKEN'));
-
-        -- Variables para manejar la función apex_jwt.decode
+        v_jwt_secret    RAW(256);
         v_decoded_token apex_jwt.t_token;
-        v_payload_json  json_object_t;
+        v_iss           VARCHAR2(200);
+        v_aud           VARCHAR2(200);
+        v_leeway        PLS_INTEGER;
     BEGIN
-        -- 1. Limpiar la palabra "Bearer " de la cabecera
-        v_token := regexp_replace(pi_auth_header, '^Bearer ', '', 1, 1, 'i');
+        v_token := REGEXP_REPLACE(NVL(pi_auth_header, ''), '^Bearer\s+', '', 1, 1, 'i');
+        v_token := TRIM(v_token);
 
-        IF v_token IS NULL OR TRIM(v_token) = '' THEN
+        IF v_token IS NULL OR v_token = '' THEN
             RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Token no proporcionado.');
         END IF;
 
+        v_jwt_secret := UTL_RAW.CAST_TO_RAW(fn_get_parameter('JWT_TOKEN'));
+        IF v_jwt_secret IS NULL THEN
+            RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Configuración JWT incompleta.');
+        END IF;
+
         BEGIN
-            -- 2. Decodificar el token (esto valida la firma con p_signature_key)
             v_decoded_token := apex_jwt.decode(
                 p_value         => v_token,
                 p_signature_key => v_jwt_secret
             );
 
-            -- 3. Parsear el payload (que es un string de JSON) a un objeto manipulable
-            v_payload_json := json_object_t.parse(v_decoded_token.payload);
+            v_iss := NVL(fn_get_parameter('JWT_ISSUER'), 'hasel-api');
+            v_aud := NVL(fn_get_parameter('JWT_AUDIENCE'), 'hasel-app');
+            v_leeway := NVL(fn_param_number('JWT_VALIDATE_LEEWAY_SEC', 30), 30);
 
-            -- 4. Extraer el claim de la organización
-            v_org_id := v_payload_json.get_number('organization_id');
+            apex_jwt.validate(
+                p_token          => v_decoded_token,
+                p_iss            => v_iss,
+                p_aud            => v_aud,
+                p_leeway_seconds => v_leeway
+            );
 
-            IF v_org_id IS NULL THEN
-                RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Falta identificador de organización en el token.');
-            END IF;
-
+            RETURN json_object_t.parse(v_decoded_token.payload);
         EXCEPTION
             WHEN OTHERS THEN
-                -- Si el token fue alterado, la firma es inválida, o falló el parseo
-                RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Token inválido o alterado1.');
+                RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Token inválido o expirado.');
         END;
+    END fn_decode_validated_jwt_payload;
+
+    FUNCTION fn_get_org_id_from_jwt(pi_auth_header IN VARCHAR2) RETURN NUMBER IS
+        v_payload_json json_object_t;
+        v_org_id       NUMBER;
+    BEGIN
+        v_payload_json := fn_decode_validated_jwt_payload(pi_auth_header);
+        v_org_id := v_payload_json.get_number('organization_id');
+
+        IF v_org_id IS NULL THEN
+            RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Falta identificador de organización en el token.');
+        END IF;
 
         RETURN v_org_id;
     END fn_get_org_id_from_jwt;
 
     FUNCTION fn_get_role_id_from_jwt(pi_auth_header IN VARCHAR2) RETURN NUMBER IS
-        v_token         VARCHAR2(32767);
-        v_jwt_secret    RAW(256) := UTL_RAW.CAST_TO_RAW(fn_get_parameter('JWT_TOKEN'));
-        v_decoded_token apex_jwt.t_token;
-        v_payload_json  json_object_t;
-        v_role_id       NUMBER;
+        v_payload_json json_object_t;
+        v_role_id      NUMBER;
     BEGIN
-        v_token := REGEXP_REPLACE(pi_auth_header, '^Bearer ', '', 1, 1, 'i');
-        v_decoded_token := apex_jwt.decode(p_value => v_token, p_signature_key => v_jwt_secret);
-        v_payload_json  := json_object_t.parse(v_decoded_token.payload);
-        v_role_id       := v_payload_json.get_number('role_id');
+        v_payload_json := fn_decode_validated_jwt_payload(pi_auth_header);
+        v_role_id := v_payload_json.get_number('role_id');
 
-        IF v_role_id IS NULL THEN RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Falta rol en el token.'); END IF;
+        IF v_role_id IS NULL THEN
+            RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Falta rol en el token.');
+        END IF;
+
         RETURN v_role_id;
-    EXCEPTION
-        WHEN OTHERS THEN RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Token inválido o expirado2.');
     END fn_get_role_id_from_jwt;
 
     FUNCTION fn_get_user_id_from_jwt(pi_auth_header IN VARCHAR2) RETURN NUMBER IS
-        v_token         VARCHAR2(32767);
-        v_jwt_secret    RAW(256) := UTL_RAW.CAST_TO_RAW(fn_get_parameter('JWT_TOKEN'));
-        v_decoded_token apex_jwt.t_token;
-        v_payload_json  json_object_t;
-        v_user_id       NUMBER;
+        v_payload_json json_object_t;
+        v_user_id      NUMBER;
     BEGIN
-        v_token := REGEXP_REPLACE(pi_auth_header, '^Bearer ', '', 1, 1, 'i');
-        v_decoded_token := apex_jwt.decode(p_value => v_token, p_signature_key => v_jwt_secret);
-        v_payload_json  := json_object_t.parse(v_decoded_token.payload);
-        v_user_id       := v_payload_json.get_number('user_id');
+        v_payload_json := fn_decode_validated_jwt_payload(pi_auth_header);
+        v_user_id := v_payload_json.get_number('user_id');
 
-        IF v_user_id IS NULL THEN RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Falta identificador de usuario en el token.'); END IF;
+        IF v_user_id IS NULL THEN
+            RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Falta identificador de usuario en el token.');
+        END IF;
+
         RETURN v_user_id;
-    EXCEPTION
-        WHEN OTHERS THEN RAISE_APPLICATION_ERROR(c_sqlcode_session, 'Token inválido o expirado.');
     END fn_get_user_id_from_jwt;
+
+    FUNCTION fn_client_ip RETURN VARCHAR2 IS
+        v_fwd VARCHAR2(4000);
+        v_ip  VARCHAR2(200);
+    BEGIN
+        BEGIN
+            v_fwd := TRIM(owa_util.get_cgi_env('HTTP_X_FORWARDED_FOR'));
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_fwd := NULL;
+        END;
+
+        IF v_fwd IS NOT NULL THEN
+            v_ip := TRIM(REGEXP_SUBSTR(v_fwd, '[^,]+'));
+            IF v_ip IS NOT NULL THEN
+                RETURN SUBSTR(v_ip, 1, 200);
+            END IF;
+        END IF;
+
+        BEGIN
+            v_ip := TRIM(owa_util.get_cgi_env('REMOTE_ADDR'));
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_ip := NULL;
+        END;
+
+        RETURN NVL(SUBSTR(v_ip, 1, 200), 'unknown');
+    END fn_client_ip;
+
+    PROCEDURE pr_assert_rate_limit(
+        pi_scope         IN VARCHAR2,
+        pi_key           IN VARCHAR2,
+        pi_max_attempts  IN NUMBER,
+        pi_window_sec    IN NUMBER
+    ) IS
+        v_scope   VARCHAR2(64) := UPPER(TRIM(pi_scope));
+        v_key     VARCHAR2(255) := LOWER(TRIM(pi_key));
+        v_max     NUMBER := NVL(pi_max_attempts, 0);
+        v_window  NUMBER := NVL(pi_window_sec, 0);
+        v_count   NUMBER;
+        v_now     TIMESTAMP WITH TIME ZONE := SYSTIMESTAMP;
+    BEGIN
+        IF v_scope IS NULL OR v_key IS NULL OR v_max <= 0 OR v_window <= 0 THEN
+            RETURN;
+        END IF;
+
+        DELETE FROM api_rate_limit_bucket
+         WHERE scope_code = v_scope
+           AND bucket_key = v_key
+           AND window_started_at < (v_now - NUMTODSINTERVAL(v_window, 'SECOND'));
+
+        BEGIN
+            INSERT INTO api_rate_limit_bucket (
+                scope_code, bucket_key, attempt_count, window_started_at, updated_at
+            ) VALUES (
+                v_scope, v_key, 1, v_now, v_now
+            );
+            v_count := 1;
+        EXCEPTION
+            WHEN DUP_VAL_ON_INDEX THEN
+                UPDATE api_rate_limit_bucket
+                   SET attempt_count = attempt_count + 1,
+                       updated_at = v_now
+                 WHERE scope_code = v_scope
+                   AND bucket_key = v_key
+                RETURNING attempt_count INTO v_count;
+        END;
+
+        IF v_count > v_max THEN
+            RAISE_APPLICATION_ERROR(
+                c_sqlcode_rate_limit,
+                'Demasiados intentos. Esperá unos minutos e intentá de nuevo.'
+            );
+        END IF;
+    END pr_assert_rate_limit;
 
     FUNCTION fn_encrypt_data(pi_text IN VARCHAR2) RETURN VARCHAR2 IS
         -- Obtenemos una clave secreta de 32 caracteres de tu tabla de parámetros
@@ -1328,6 +1438,8 @@ CREATE OR REPLACE package body pkg_aox_util as
             return c_api_code_not_found;
         elsif pi_status_code = c_conflict_code then
             return c_api_code_conflict;
+        elsif pi_status_code = c_too_many_requests_code then
+            return c_api_code_rate_limited;
         elsif pi_status_code = c_bad_request_code
            or pi_status_code = c_invalid_account_type_code then
             return c_api_code_validation_error;
@@ -1347,6 +1459,8 @@ CREATE OR REPLACE package body pkg_aox_util as
             return c_api_code_session_expired;
         elsif pi_sqlcode = c_sqlcode_validation then
             return c_api_code_validation_error;
+        elsif pi_sqlcode = c_sqlcode_rate_limit then
+            return c_api_code_rate_limited;
         end if;
 
         return c_api_code_internal_error;
@@ -1402,6 +1516,12 @@ CREATE OR REPLACE package body pkg_aox_util as
         if pi_sqlcode = c_sqlcode_validation then
             po_status_code := c_bad_request_code;
             po_api_code    := c_api_code_validation_error;
+            return;
+        end if;
+
+        if pi_sqlcode = c_sqlcode_rate_limit then
+            po_status_code := c_too_many_requests_code;
+            po_api_code    := c_api_code_rate_limited;
             return;
         end if;
 
