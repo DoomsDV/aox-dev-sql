@@ -2370,14 +2370,21 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         END IF;
 
         BEGIN
-            SELECT pt.id_transaction, pt.payment_reference, pt.amount
-              INTO v_tx_id, v_expected_ref, v_expected_amt
+            -- Oracle no permite FETCH FIRST ... FOR UPDATE (ORA-02014):
+            -- primero seleccionamos el id y luego bloqueamos la fila por PK.
+            SELECT pt.id_transaction
+              INTO v_tx_id
               FROM payment_transaction pt
              WHERE pt.app_id_appointment = v_app_id
                AND pt.provider = 'sipap'
                AND pt.payment_status = 'PENDING'
              ORDER BY pt.id_transaction DESC
-             FETCH FIRST 1 ROW ONLY
+             FETCH FIRST 1 ROW ONLY;
+
+            SELECT pt.payment_reference, pt.amount
+              INTO v_expected_ref, v_expected_amt
+              FROM payment_transaction pt
+             WHERE pt.id_transaction = v_tx_id
              FOR UPDATE;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
@@ -2517,6 +2524,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                     pi_title          => 'Seña confirmada',
                     pi_body           => 'Se verifico el comprobante SIPAP. Turno confirmado.',
                     pi_process_name   => 'PKG_AOX_PUBLIC_BOOKING_API.PR_UPLOAD_PUBLIC_RECEIPT.FCM_NOTIFY'
+                );
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+
+            -- Enviar template Meta de confirmacion al cliente (la cita quedo CONFIRMADO al
+            -- verificarse la sena). En reservas con sena el WA no se envia al crear el hold,
+            -- recien ahora que el pago fue verificado.
+            BEGIN
+                pkg_aox_meta_api.pr_enqueue_booking_confirmation_wa(
+                    pi_appointment_id => v_app_id
                 );
             EXCEPTION
                 WHEN OTHERS THEN NULL;
