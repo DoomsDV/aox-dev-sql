@@ -35,6 +35,7 @@ Proxy interno: `GET /api/public/user/{slug}`
         "org_id_organization": 1,
         "organization_name": "Clínica Sonrisas",
         "organization_slug": "clinica-sonrisas",
+        "organization_logo_url": "https://.../organizations/1/logo.png",
         "id_professional": 12,
         "services": [
           {

@@ -227,6 +227,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                      WHERE a.cus_id_customer = c.id_customer
                        AND a.org_id_organization = c.org_id_organization
                        AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
+                       AND a.status IN ('CONFIRMADO', 'COMPLETADO')
+                       AND a.start_time < CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP)
                 ) AS appointment_count,
                 (
                     SELECT MAX(a.start_time)
