@@ -36,13 +36,11 @@ functions.http('enviarPush', async (req, res) => {
     // 4. Armar el mensaje para el celular
     const mensaje = {
       token: fcm_token,
-      notification: {
-        title: title || "Nueva Notificación",
-        body: body || ""
-      },
       data: {
+        title: title || 'Nueva notificación',
+        body: body || '',
         url: targetUrl,
-        org_member_id: orgMemberId,
+        org_member_id: orgMemberId, // vacío si la URL no trae org_member_id
       },
       // CONFIGURACIÓN PARA PWA (Navegadores)
       webpush: {

@@ -73,6 +73,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         RETURN v_base || '/panel/dashboard';
     END fn_dashboard_push_url;
 
+    FUNCTION fn_dashboard_push_url(pi_org_member_id IN NUMBER) RETURN VARCHAR2 IS
+        v_base VARCHAR2(500) := RTRIM(NVL(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://hasel.app'), '/');
+    BEGIN
+        IF pi_org_member_id IS NULL OR pi_org_member_id <= 0 THEN
+            RETURN v_base || '/panel/dashboard';
+        END IF;
+        RETURN v_base || '/panel/dashboard?org_member_id=' || pi_org_member_id;
+    END fn_dashboard_push_url;
+
     FUNCTION fn_digest_already_sent(
         pi_org_member_id IN NUMBER,
         pi_local_date    IN VARCHAR2
@@ -468,7 +477,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                 pi_org_member_id => admin_rec.id_org_member,
                 pi_title         => pi_title,
                 pi_body          => pi_body,
-                pi_url           => v_push_url,
+                pi_url           => fn_calendar_push_url(admin_rec.id_org_member),
                 pi_process_name  => pi_process_name || '.ADMIN_FANOUT'
             );
         END LOOP;
@@ -566,7 +575,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         v_today_date     DATE;
         v_admin_role_id  NUMBER := pkg_aox_util.fn_rol('ADMIN');
         v_prof_role_id   NUMBER := pkg_aox_util.fn_rol('PROFESIONAL');
-        v_dashboard_url  VARCHAR2(1000) := fn_dashboard_push_url();
     BEGIN
         v_now_local      := CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP);
         v_hour           := TO_NUMBER(TO_CHAR(v_now_local, 'HH24'));
@@ -627,7 +635,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                             '¡Buen día! Hoy hay un total de ' || admin_rec.total_global ||
                             ' citas en el sistema. Tú tienes ' || admin_rec.mis_citas ||
                             ' bajo tu atención. ¡Buen turno!',
-                        pi_url           => v_dashboard_url,
+                        pi_url           => fn_dashboard_push_url(admin_rec.id_org_member),
                         pi_process_name  => c_process_digest || '.ADMIN_A'
                     );
                     pr_log_digest_sent(
@@ -642,7 +650,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                             '¡Buen día! El sistema registra un total de ' ||
                             admin_rec.total_global ||
                             ' citas programadas para la jornada de hoy.',
-                        pi_url           => v_dashboard_url,
+                        pi_url           => fn_dashboard_push_url(admin_rec.id_org_member),
                         pi_process_name  => c_process_digest || '.ADMIN_B'
                     );
                     pr_log_digest_sent(
@@ -692,7 +700,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                         pi_body          =>
                             '¡Hola, ' || prof_rec.nombre_profesional ||
                             '! Hoy tienes 1 cita programada. Toca aquí para ver el horario y los detalles.',
-                        pi_url           => fn_calendar_push_url(NULL),
+                        pi_url           => fn_calendar_push_url(prof_rec.id_org_member),
                         pi_process_name  => c_process_digest || '.PROF_1'
                     );
                     pr_log_digest_sent(
@@ -706,7 +714,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                             '¡Hola, ' || prof_rec.nombre_profesional ||
                             '! Tienes ' || prof_rec.mis_citas ||
                             ' citas programadas para hoy. Toca aquí para revisar tu calendario.',
-                        pi_url           => fn_calendar_push_url(NULL),
+                        pi_url           => fn_calendar_push_url(prof_rec.id_org_member),
                         pi_process_name  => c_process_digest || '.PROF_N'
                     );
                     pr_log_digest_sent(
