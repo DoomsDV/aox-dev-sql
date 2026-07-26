@@ -220,7 +220,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                 c.id_customer,
                 c.full_name,
                 c.phone_number,
-                c.created_at
+                c.created_at,
+                (
+                    SELECT COUNT(*)
+                      FROM appointment a
+                     WHERE a.cus_id_customer = c.id_customer
+                       AND a.org_id_organization = c.org_id_organization
+                       AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
+                ) AS appointment_count,
+                (
+                    SELECT MAX(a.start_time)
+                      FROM appointment a
+                     WHERE a.cus_id_customer = c.id_customer
+                       AND a.org_id_organization = c.org_id_organization
+                       AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
+                       AND a.status IN ('CONFIRMADO', 'COMPLETADO')
+                       AND a.start_time < CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP)
+                ) AS last_appointment_at
             FROM customer c
             WHERE c.org_id_organization = v_org_id
               AND (v_effective_pro_id IS NULL OR EXISTS (
@@ -240,10 +256,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
             OFFSET v_offset ROWS FETCH NEXT v_limit ROWS ONLY
         ) LOOP
             v_customer_obj := json_object_t();
-            v_customer_obj.put('id_customer' , rec.id_customer);
-            v_customer_obj.put('full_name'   , rec.full_name);
-            v_customer_obj.put('phone_number', rec.phone_number);
-            v_customer_obj.put('created_at'  , TO_CHAR(rec.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
+            v_customer_obj.put('id_customer'       , rec.id_customer);
+            v_customer_obj.put('full_name'         , rec.full_name);
+            v_customer_obj.put('phone_number'      , rec.phone_number);
+            v_customer_obj.put('created_at'        , TO_CHAR(rec.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
+            v_customer_obj.put('appointment_count' , NVL(rec.appointment_count, 0));
+            IF rec.last_appointment_at IS NOT NULL THEN
+                v_customer_obj.put(
+                    'last_appointment_at',
+                    TO_CHAR(rec.last_appointment_at, 'YYYY-MM-DD"T"HH24:MI:SS')
+                );
+            ELSE
+                v_customer_obj.put_null('last_appointment_at');
+            END IF;
 
             v_customers_arr.append(v_customer_obj);
         END LOOP;
