@@ -1,11 +1,11 @@
-PROMPT === Seed plantilla WhatsApp: rechazo comprobante seña SIPAP ===
+PROMPT === Actualizar plantilla WhatsApp: rechazo_comprobante_sena_v2 ===
 
 MERGE INTO app_parameter t
 USING (
     SELECT
         'META_WA_TEMPLATE_PAYMENT_REJECT' AS param_key,
         'rechazo_comprobante_sena_v2' AS param_value,
-        'Plantilla Meta: comercio rechaza comprobante de seña SIPAP (body: cliente, org, fecha/hora, motivo; boton reserva {{token}}).' AS description
+        'Plantilla Meta: comercio rechaza comprobante de seña SIPAP v2 (body: cliente, org, fecha/hora, motivo; boton https://hasel.app/r/{{token}}).' AS description
       FROM dual
 ) s
 ON (t.param_key = s.param_key)

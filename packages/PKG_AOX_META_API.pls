@@ -708,7 +708,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_reason_text := NVL(NULLIF(TRIM(v_reject_reason), ''), 'Sin motivo indicado');
         v_template_name := NVL(
             fn_get_parameter('META_WA_TEMPLATE_PAYMENT_REJECT'),
-            'rechazo_comprobante_sena_v1'
+            'rechazo_comprobante_sena_v2'
         );
 
         IF v_clean_phone IS NULL OR v_template_name IS NULL THEN
