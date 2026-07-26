@@ -571,6 +571,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
             WHEN OTHERS THEN NULL;
         END;
 
+        -- Mismo template de confirmación que OCR MATCH / reserva sin seña.
+        BEGIN
+            pkg_aox_meta_api.pr_enqueue_booking_confirmation_wa(
+                pi_appointment_id => v_app_id
+            );
+        EXCEPTION
+            WHEN OTHERS THEN NULL;
+        END;
+
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response.put('status', 'success');
         v_response.put('message', 'Seña aprobada. Turno confirmado.');
@@ -653,6 +662,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
          WHERE id_transaction = pi_transaction_id;
 
         COMMIT;
+
+        BEGIN
+            pkg_aox_meta_api.pr_enqueue_payment_reject_wa(
+                pi_appointment_id => v_app_id
+            );
+        EXCEPTION
+            WHEN OTHERS THEN NULL;
+        END;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response.put('status', 'success');

@@ -24,6 +24,16 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
         pi_appointment_id IN appointment.id_appointment%TYPE
     );
 
+    -- Encola aviso WA cuando el comercio rechaza el comprobante SIPAP (Cobros).
+    PROCEDURE pr_enqueue_payment_reject_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    );
+
+    -- Envía plantilla META_WA_TEMPLATE_PAYMENT_REJECT (rechazo de comprobante de seña).
+    PROCEDURE pr_send_payment_reject_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    );
+
     -- Envía la plantilla modificacion_reserva_hasel cuando staff reprograma o cambia la reserva.
     PROCEDURE pr_send_booking_modified_wa (
         pi_appointment_id IN appointment.id_appointment%TYPE
@@ -609,6 +619,148 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             END IF;
             RAISE;
     END pr_send_booking_confirmation_wa;
+
+    PROCEDURE pr_enqueue_payment_reject_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    ) IS
+        v_job_name VARCHAR2(30);
+    BEGIN
+        IF pi_appointment_id IS NULL THEN
+            RETURN;
+        END IF;
+
+        v_job_name := 'WA_REJ_' ||
+                      SUBSTR(TO_CHAR(ABS(pi_appointment_id)), 1, 10) ||
+                      '_' ||
+                      TO_CHAR(SYSTIMESTAMP, 'FF6');
+
+        DBMS_SCHEDULER.create_job(
+            job_name   => v_job_name,
+            job_type   => 'PLSQL_BLOCK',
+            job_action => 'BEGIN pkg_aox_meta_api.pr_send_payment_reject_wa(pi_appointment_id => ' ||
+                          TO_CHAR(pi_appointment_id) ||
+                          '); END;',
+            start_date => SYSTIMESTAMP,
+            enabled    => TRUE,
+            auto_drop  => TRUE,
+            comments   => 'Envio async WhatsApp rechazo comprobante SIPAP'
+        );
+    EXCEPTION
+        WHEN OTHERS THEN
+            BEGIN
+                pr_send_payment_reject_wa(pi_appointment_id => pi_appointment_id);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+    END pr_enqueue_payment_reject_wa;
+
+    PROCEDURE pr_send_payment_reject_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    ) IS
+        v_customer_name     customer.full_name%TYPE;
+        v_phone_number      customer.phone_number%TYPE;
+        v_start_time        appointment.start_time%TYPE;
+        v_organization_name organization.name%TYPE;
+        v_public_token      appointment.public_manage_token%TYPE;
+        v_reject_reason     payment_transaction.reject_reason%TYPE;
+        v_clean_phone       VARCHAR2(30);
+        v_reason_text       VARCHAR2(400);
+        v_template_name     VARCHAR2(100);
+        v_payload           CLOB;
+        v_json_initialized  BOOLEAN := FALSE;
+    BEGIN
+        SELECT
+            c.full_name,
+            c.phone_number,
+            a.start_time,
+            o.name,
+            a.public_manage_token
+          INTO
+            v_customer_name,
+            v_phone_number,
+            v_start_time,
+            v_organization_name,
+            v_public_token
+          FROM appointment a
+          JOIN customer c ON c.id_customer = a.cus_id_customer
+          JOIN organization o ON o.id_organization = a.org_id_organization
+         WHERE a.id_appointment = pi_appointment_id;
+
+        BEGIN
+            SELECT reject_reason
+              INTO v_reject_reason
+              FROM (
+                    SELECT /*+ no_parallel */ pt.reject_reason
+                      FROM payment_transaction pt
+                     WHERE pt.app_id_appointment = pi_appointment_id
+                       AND pt.provider = 'sipap'
+                     ORDER BY pt.id_transaction DESC
+                     FETCH FIRST 1 ROW ONLY
+                   );
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_reject_reason := NULL;
+        END;
+
+        v_clean_phone := fn_clean_whatsapp_phone(v_phone_number);
+        v_public_token := fn_ensure_public_token(pi_appointment_id);
+        v_reason_text := NVL(NULLIF(TRIM(v_reject_reason), ''), 'Sin motivo indicado');
+        v_template_name := NVL(
+            fn_get_parameter('META_WA_TEMPLATE_PAYMENT_REJECT'),
+            'rechazo_comprobante_sena_v1'
+        );
+
+        IF v_clean_phone IS NULL OR v_template_name IS NULL THEN
+            RETURN;
+        END IF;
+
+        APEX_JSON.initialize_clob_output;
+        v_json_initialized := TRUE;
+        APEX_JSON.open_object;
+            APEX_JSON.write('messaging_product', 'whatsapp');
+            APEX_JSON.write('to', v_clean_phone);
+            APEX_JSON.write('type', 'template');
+            APEX_JSON.open_object('template');
+                APEX_JSON.write('name', v_template_name);
+                APEX_JSON.open_object('language');
+                    APEX_JSON.write('code', NVL(fn_get_parameter('META_WA_TEMPLATE_LANG'), 'es'));
+                APEX_JSON.close_object;
+                APEX_JSON.open_array('components');
+                    APEX_JSON.open_object;
+                        APEX_JSON.write('type', 'body');
+                        APEX_JSON.open_array('parameters');
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_customer_name); APEX_JSON.close_object;
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_organization_name); APEX_JSON.close_object;
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', TO_CHAR(v_start_time, 'DD-MM-YYYY HH24:MI')); APEX_JSON.close_object;
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_reason_text); APEX_JSON.close_object;
+                        APEX_JSON.close_array;
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_object;
+                        APEX_JSON.write('type', 'button');
+                        APEX_JSON.write('sub_type', 'url');
+                        APEX_JSON.write('index', '0');
+                        APEX_JSON.open_array('parameters');
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', fn_reservation_suffix(v_public_token)); APEX_JSON.close_object;
+                        APEX_JSON.close_array;
+                    APEX_JSON.close_object;
+                APEX_JSON.close_array;
+            APEX_JSON.close_object;
+        APEX_JSON.close_object;
+
+        v_payload := APEX_JSON.get_clob_output;
+        APEX_JSON.free_output;
+        v_json_initialized := FALSE;
+
+        pr_post_whatsapp_message(pi_payload => v_payload);
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF v_json_initialized THEN
+                APEX_JSON.free_output;
+            END IF;
+            RAISE;
+    END pr_send_payment_reject_wa;
 
     PROCEDURE pr_send_booking_modified_wa (
         pi_appointment_id IN appointment.id_appointment%TYPE
