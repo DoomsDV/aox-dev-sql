@@ -292,7 +292,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
              OR (
                     v_filter <> 'refunded'
                 AND NVL(pt.receipt_uploaded_at, pt.created_at) BETWEEN v_from AND v_to
-                AND (
+                    AND (
                         v_filter = 'all'
                      OR (
                             v_filter = 'pending'
@@ -307,6 +307,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                             OR NVL(pt.ocr_status, 'X') = 'MATCH'
                         )
                         AND NVL(a.refund_status, 'NONE') NOT IN ('PENDING', 'SENT', 'AWAITING_ALIAS', 'WAIVED')
+                     )
+                     OR (
+                            v_filter = 'expired'
+                        AND pt.payment_status = 'EXPIRED'
                      )
                 )
              )
@@ -374,6 +378,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                                 OR NVL(pt.ocr_status, 'X') = 'MATCH'
                             )
                             AND NVL(a.refund_status, 'NONE') NOT IN ('PENDING', 'SENT', 'AWAITING_ALIAS', 'WAIVED')
+                         )
+                         OR (
+                                v_filter = 'expired'
+                            AND pt.payment_status = 'EXPIRED'
                          )
                     )
                  )
@@ -760,6 +768,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
            AND claim_status = 'OPEN';
 
         COMMIT;
+
+        -- Aviso al cliente: el comercio marcó el reembolso como enviado.
+        BEGIN
+            pkg_aox_meta_api.pr_enqueue_refund_sent_wa(
+                pi_appointment_id => v_app_id
+            );
+        EXCEPTION
+            WHEN OTHERS THEN NULL;
+        END;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response.put('status', 'success');

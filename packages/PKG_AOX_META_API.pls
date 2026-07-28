@@ -49,6 +49,16 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
         pi_appointment_id IN appointment.id_appointment%TYPE
     );
 
+    -- Encola WA cuando el comercio marca el reembolso como enviado (Cobros).
+    PROCEDURE pr_enqueue_refund_sent_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    );
+
+    -- Envía plantilla META_WA_TEMPLATE_REFUND_SENT (reembolso_enviado_v1).
+    PROCEDURE pr_send_refund_sent_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    );
+
     -- Envía la plantilla confirmar_asistencia_reserva_v2 para reservas próximas.
     PROCEDURE pr_send_attendance_request_wa (
         pi_appointment_id IN appointment.id_appointment%TYPE
@@ -1019,6 +1029,136 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             END IF;
             RAISE;
     END pr_send_refund_alias_wa;
+
+    PROCEDURE pr_enqueue_refund_sent_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    ) IS
+        v_job_name VARCHAR2(30);
+    BEGIN
+        IF pi_appointment_id IS NULL THEN
+            RETURN;
+        END IF;
+
+        v_job_name := 'WA_RS_' ||
+                      SUBSTR(TO_CHAR(ABS(pi_appointment_id)), 1, 10) ||
+                      '_' ||
+                      TO_CHAR(SYSTIMESTAMP, 'FF6');
+
+        DBMS_SCHEDULER.create_job(
+            job_name   => v_job_name,
+            job_type   => 'PLSQL_BLOCK',
+            job_action => 'BEGIN pkg_aox_meta_api.pr_send_refund_sent_wa(pi_appointment_id => ' ||
+                          TO_CHAR(pi_appointment_id) ||
+                          '); END;',
+            start_date => SYSTIMESTAMP,
+            enabled    => TRUE,
+            auto_drop  => TRUE,
+            comments   => 'Envio async WhatsApp reembolso marcado como enviado'
+        );
+    EXCEPTION
+        WHEN OTHERS THEN
+            BEGIN
+                pr_send_refund_sent_wa(pi_appointment_id => pi_appointment_id);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+    END pr_enqueue_refund_sent_wa;
+
+    PROCEDURE pr_send_refund_sent_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    ) IS
+        v_customer_name     customer.full_name%TYPE;
+        v_phone_number      customer.phone_number%TYPE;
+        v_start_time        appointment.start_time%TYPE;
+        v_organization_name organization.name%TYPE;
+        v_refund_amount     appointment.refund_amount%TYPE;
+        v_public_token      appointment.public_manage_token%TYPE;
+        v_clean_phone       VARCHAR2(30);
+        v_amount_text       VARCHAR2(80);
+        v_payload           CLOB;
+        v_json_initialized  BOOLEAN := FALSE;
+        v_template_name     VARCHAR2(100);
+    BEGIN
+        SELECT
+            c.full_name,
+            c.phone_number,
+            a.start_time,
+            o.name,
+            a.refund_amount,
+            a.public_manage_token
+          INTO
+            v_customer_name,
+            v_phone_number,
+            v_start_time,
+            v_organization_name,
+            v_refund_amount,
+            v_public_token
+          FROM appointment a
+          JOIN customer c ON c.id_customer = a.cus_id_customer
+          JOIN organization o ON o.id_organization = a.org_id_organization
+         WHERE a.id_appointment = pi_appointment_id;
+
+        v_clean_phone := fn_clean_whatsapp_phone(v_phone_number);
+        v_public_token := fn_ensure_public_token(pi_appointment_id);
+        v_template_name := NVL(
+            fn_get_parameter('META_WA_TEMPLATE_REFUND_SENT'),
+            'reembolso_enviado_v1'
+        );
+
+        IF v_clean_phone IS NULL OR v_public_token IS NULL OR v_template_name IS NULL THEN
+            RETURN;
+        END IF;
+
+        -- Body Meta: {{1}} cliente, {{2}} negocio, {{3}} monto, {{4}} fecha/hora
+        v_amount_text := 'Gs. ' || TRIM(TO_CHAR(NVL(v_refund_amount, 0), 'FM999G999G999'));
+
+        APEX_JSON.initialize_clob_output;
+        v_json_initialized := TRUE;
+        APEX_JSON.open_object;
+            APEX_JSON.write('messaging_product', 'whatsapp');
+            APEX_JSON.write('to', v_clean_phone);
+            APEX_JSON.write('type', 'template');
+            APEX_JSON.open_object('template');
+                APEX_JSON.write('name', v_template_name);
+                APEX_JSON.open_object('language');
+                    APEX_JSON.write('code', NVL(fn_get_parameter('META_WA_TEMPLATE_LANG'), 'es'));
+                APEX_JSON.close_object;
+                APEX_JSON.open_array('components');
+                    APEX_JSON.open_object;
+                        APEX_JSON.write('type', 'body');
+                        APEX_JSON.open_array('parameters');
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_customer_name); APEX_JSON.close_object;
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_organization_name); APEX_JSON.close_object;
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_amount_text); APEX_JSON.close_object;
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', TO_CHAR(v_start_time, 'DD-MM-YYYY HH24:MI')); APEX_JSON.close_object;
+                        APEX_JSON.close_array;
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_object;
+                        APEX_JSON.write('type', 'button');
+                        APEX_JSON.write('sub_type', 'url');
+                        APEX_JSON.write('index', '0');
+                        APEX_JSON.open_array('parameters');
+                            APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', fn_reservation_suffix(v_public_token)); APEX_JSON.close_object;
+                        APEX_JSON.close_array;
+                    APEX_JSON.close_object;
+                APEX_JSON.close_array;
+            APEX_JSON.close_object;
+        APEX_JSON.close_object;
+
+        v_payload := APEX_JSON.get_clob_output;
+        APEX_JSON.free_output;
+        v_json_initialized := FALSE;
+
+        pr_post_whatsapp_message(pi_payload => v_payload);
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF v_json_initialized THEN
+                APEX_JSON.free_output;
+            END IF;
+            RAISE;
+    END pr_send_refund_sent_wa;
 
     PROCEDURE pr_send_attendance_request_wa (
         pi_appointment_id IN appointment.id_appointment%TYPE
