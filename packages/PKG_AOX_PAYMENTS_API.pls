@@ -152,30 +152,33 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
     END pr_resolve_date_range;
 
     FUNCTION fn_build_item(
-        pi_tx_id           IN NUMBER,
-        pi_app_id          IN NUMBER,
-        pi_start_time      IN TIMESTAMP WITH TIME ZONE,
-        pi_customer_name   IN VARCHAR2,
-        pi_service_name    IN VARCHAR2,
-        pi_amount          IN NUMBER,
-        pi_currency        IN VARCHAR2,
-        pi_payment_status  IN VARCHAR2,
-        pi_ocr_status      IN VARCHAR2,
-        pi_payment_ref     IN VARCHAR2,
-        pi_receipt_url     IN VARCHAR2,
-        pi_ocr_reference   IN VARCHAR2,
-        pi_ocr_amount      IN NUMBER,
-        pi_ocr_confidence  IN NUMBER,
-        pi_receipt_at      IN TIMESTAMP WITH TIME ZONE,
-        pi_created_at      IN TIMESTAMP WITH TIME ZONE,
-        pi_reject_reason   IN VARCHAR2,
-        pi_refund_status   IN VARCHAR2 DEFAULT NULL,
-        pi_refund_amount   IN NUMBER DEFAULT NULL,
-        pi_refund_alias    IN VARCHAR2 DEFAULT NULL
+        pi_tx_id             IN NUMBER,
+        pi_app_id            IN NUMBER,
+        pi_start_time        IN TIMESTAMP WITH TIME ZONE,
+        pi_customer_name     IN VARCHAR2,
+        pi_service_name      IN VARCHAR2,
+        pi_professional_name IN VARCHAR2,
+        pi_location_name     IN VARCHAR2,
+        pi_amount            IN NUMBER,
+        pi_currency          IN VARCHAR2,
+        pi_payment_status    IN VARCHAR2,
+        pi_ocr_status        IN VARCHAR2,
+        pi_payment_ref       IN VARCHAR2,
+        pi_receipt_url       IN VARCHAR2,
+        pi_ocr_reference     IN VARCHAR2,
+        pi_ocr_amount        IN NUMBER,
+        pi_ocr_confidence    IN NUMBER,
+        pi_receipt_at        IN TIMESTAMP WITH TIME ZONE,
+        pi_created_at        IN TIMESTAMP WITH TIME ZONE,
+        pi_reject_reason     IN VARCHAR2,
+        pi_refund_status     IN VARCHAR2 DEFAULT NULL,
+        pi_refund_amount     IN NUMBER DEFAULT NULL,
+        pi_refund_alias      IN VARCHAR2 DEFAULT NULL
     ) RETURN json_object_t IS
         v_obj json_object_t := json_object_t();
         v_ui_status VARCHAR2(30);
         v_refund_st VARCHAR2(20) := UPPER(TRIM(NVL(pi_refund_status, 'NONE')));
+        v_start_wall VARCHAR2(32);
     BEGIN
         IF v_refund_st = 'PENDING' THEN
             v_ui_status := 'refund_pending';
@@ -193,11 +196,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
             v_ui_status := 'other';
         END IF;
 
+        -- Hora de pared local (Asunción), sin Z — mismo contrato que appointment API
+        IF pi_start_time IS NOT NULL THEN
+            v_start_wall := TO_CHAR(CAST(pi_start_time AS TIMESTAMP), 'YYYY-MM-DD"T"HH24:MI:SS');
+        END IF;
+
         v_obj.put('id_transaction', pi_tx_id);
         v_obj.put('id_appointment', pi_app_id);
-        v_obj.put('start_time', fn_iso_ts(pi_start_time));
+        v_obj.put('start_time', v_start_wall);
         v_obj.put('customer_name', pi_customer_name);
         v_obj.put('service_name', pi_service_name);
+        v_obj.put('professional_name', pi_professional_name);
+        v_obj.put('location_name', pi_location_name);
         v_obj.put('amount', pi_amount);
         v_obj.put('currency', NVL(pi_currency, 'PYG'));
         v_obj.put('payment_status', pi_payment_status);
@@ -323,6 +333,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                    a.start_time,
                    c.full_name AS customer_name,
                    s.name AS service_name,
+                   NVL(p.display_name, TRIM(u.first_name || ' ' || u.last_name)) AS professional_name,
+                   l.name AS location_name,
                    CASE
                        WHEN v_filter = 'refunded' AND a.refund_amount IS NOT NULL
                        THEN a.refund_amount
@@ -352,6 +364,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
               JOIN appointment a ON a.id_appointment = pt.app_id_appointment
               JOIN customer c ON c.id_customer = a.cus_id_customer
               JOIN service s ON s.id_service = a.ser_id_service
+              JOIN professional p ON p.id_professional = a.pro_id_professional
+              JOIN app_user u ON u.id_user = p.usr_id_user
+              JOIN location l ON l.id_location = a.loc_id_location
              WHERE pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
                AND (
@@ -398,6 +413,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                     rec.start_time,
                     rec.customer_name,
                     rec.service_name,
+                    rec.professional_name,
+                    rec.location_name,
                     rec.amount,
                     rec.currency,
                     rec.payment_status,
