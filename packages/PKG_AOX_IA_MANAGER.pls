@@ -56,6 +56,19 @@ CREATE OR REPLACE PACKAGE pkg_aox_ia_manager IS
         pi_org_id        IN NUMBER   DEFAULT NULL
     ) RETURN CLOB;
 
+    -- Escaneo de agenda manuscrita: visión multimodal → array de borradores de cita.
+    -- Sube la imagen al bucket y pasa la URL pública al modelo (gpt-4o).
+    -- pi_target_date: YYYY-MM-DD aplicado a filas sin fecha propia (opcional).
+    FUNCTION fn_process_agenda_image(
+        pi_org_id         IN NUMBER,
+        pi_role_id        IN NUMBER,
+        pi_prof_id        IN NUMBER,
+        pi_image_base64   IN CLOB,
+        pi_mime_type      IN VARCHAR2 DEFAULT 'image/jpeg',
+        pi_target_date    IN VARCHAR2 DEFAULT NULL,
+        pi_user_id        IN NUMBER DEFAULT NULL
+    ) RETURN CLOB;
+
 END pkg_aox_ia_manager;
 /
 
@@ -2646,6 +2659,200 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
         v_result.put('draft', v_draft);
         RETURN v_result.to_clob();
     END fn_process_voice_appointment_draft;
+
+    FUNCTION fn_agenda_scan_system_prompt RETURN CLOB IS
+    BEGIN
+        RETURN q'[
+            Eres un asistente que digitaliza una pagina de agenda manuscrita de una clinica o negocio de servicios en Paraguay.
+            Lee la imagen y extrae TODAS las citas/turnos que aparezcan, una por renglon.
+            Responde SOLO JSON valido, sin markdown ni texto adicional.
+
+            FORMATO DE SALIDA (objeto raiz):
+            {"appointments":[{...}, {...}]}
+
+            CAMPOS POR CITA:
+            - raw_text: el renglon tal cual lo leiste (para que el usuario compare).
+            - customer_name: nombre del cliente en Title Case. Si la letra es dudosa, tu mejor lectura.
+            - customer_phone: solo si aparece; 9 digitos locales sin +595. Nunca lo inventes.
+            - service_name: servicio/nota si aparece (ej. Corte, Masaje, Color). Si no, null.
+            - professional_name: solo si el renglon indica el profesional. Normalmente null.
+            - location_name: solo si aparece. Normalmente null.
+            - fecha: YYYY-MM-DD si el renglon o encabezado indica una fecha. Si no hay fecha, usa target_date del contexto. Si tampoco hay, null.
+            - hora: HH:mm en formato 24 horas. Convierte "2pm" -> "14:00", "8 y 30" -> "08:30".
+            - confidence: "high" si la letra es clara, "medium" si dudas de algun dato, "low" si el renglon es muy confuso.
+
+            REGLAS:
+            - NO inventes IDs numericos ni datos que no esten en la imagen.
+            - No incluyas encabezados, totales ni lineas que no sean citas.
+            - Si un renglon esta tachado o ilegible por completo, omitelo.
+            - Extrae nombres textuales; el backend resolvera las entidades contra el catalogo del negocio.
+            - Usa el catalog del contexto (services/professionals/locations) para alinear nombres cuando sea evidente.
+            - Devuelve el array vacio si no hay ninguna cita legible.
+        ]';
+    END fn_agenda_scan_system_prompt;
+
+    FUNCTION fn_process_agenda_image(
+        pi_org_id         IN NUMBER,
+        pi_role_id        IN NUMBER,
+        pi_prof_id        IN NUMBER,
+        pi_image_base64   IN CLOB,
+        pi_mime_type      IN VARCHAR2 DEFAULT 'image/jpeg',
+        pi_target_date    IN VARCHAR2 DEFAULT NULL,
+        pi_user_id        IN NUMBER DEFAULT NULL
+    ) RETURN CLOB IS
+        v_blob          BLOB;
+        v_url           VARCHAR2(1000);
+        v_object_key    VARCHAR2(500);
+        v_system        CLOB;
+        v_user_obj      json_object_t := json_object_t();
+        v_user_prompt   CLOB;
+        v_raw           CLOB;
+        v_clean         CLOB;
+        v_root          json_object_t;
+        v_rows          json_array_t;
+        v_row           json_object_t;
+        v_resolved      json_object_t;
+        v_sanitized     json_object_t;
+        v_trace         json_array_t;
+        v_out_rows      json_array_t := json_array_t();
+        v_result        json_object_t := json_object_t();
+        v_catalog_json  CLOB;
+        v_timezone      VARCHAR2(64) := pkg_aox_util.fn_app_timezone;
+        v_current_dt    VARCHAR2(64);
+        v_current_date  VARCHAR2(10);
+        v_current_day   VARCHAR2(30);
+        v_fecha         VARCHAR2(10);
+        v_hora          VARCHAR2(5);
+        v_start_iso     VARCHAR2(64);
+        v_start_ts      TIMESTAMP WITH TIME ZONE;
+        v_confidence    VARCHAR2(20);
+    BEGIN
+        IF pi_image_base64 IS NULL OR DBMS_LOB.GETLENGTH(pi_image_base64) = 0 THEN
+            RAISE_APPLICATION_ERROR(-20002, 'Debes enviar una imagen de la agenda.');
+        END IF;
+
+        -- 1. base64 -> BLOB -> bucket (URL corta para el modelo)
+        v_blob := apex_web_service.clobbase642blob(pi_image_base64);
+        pkg_aox_bucket.pr_upload_agenda_scan(
+            pi_blob       => v_blob,
+            pi_filename   => 'agenda',
+            pi_mime_type  => pi_mime_type,
+            pi_org_id     => pi_org_id,
+            po_url        => v_url,
+            po_object_key => v_object_key
+        );
+
+        -- 2. Contexto para el modelo (catalogo + fecha actual + fecha objetivo)
+        v_system := fn_agenda_scan_system_prompt;
+
+        v_current_dt := TO_CHAR(SYSTIMESTAMP AT TIME ZONE v_timezone, 'YYYY-MM-DD"T"HH24:MI:SS.FF9TZH:TZM', 'NLS_DATE_LANGUAGE=ENGLISH');
+        v_current_date := TO_CHAR(SYSTIMESTAMP AT TIME ZONE v_timezone, 'YYYY-MM-DD', 'NLS_DATE_LANGUAGE=ENGLISH');
+        v_current_day := TRIM(TO_CHAR(SYSTIMESTAMP AT TIME ZONE v_timezone, 'DAY', 'NLS_DATE_LANGUAGE=SPANISH'));
+
+        v_user_obj.put('current_datetime', v_current_dt);
+        v_user_obj.put('current_date', v_current_date);
+        v_user_obj.put('current_weekday', v_current_day);
+        v_user_obj.put('timezone', v_timezone);
+        IF pi_target_date IS NOT NULL AND TRIM(pi_target_date) IS NOT NULL THEN
+            v_user_obj.put('target_date', TRIM(pi_target_date));
+        END IF;
+
+        v_catalog_json := fn_build_appointment_catalog_json(pi_org_id, pi_role_id, pi_prof_id);
+        IF v_catalog_json IS NOT NULL AND LENGTH(TRIM(v_catalog_json)) > 2 THEN
+            v_user_obj.put('catalog', json_object_t.parse(v_catalog_json));
+        END IF;
+        v_user_prompt := v_user_obj.to_clob();
+
+        -- 3. Vision multimodal
+        v_raw := fn_call_azure_openai_vision(
+            pi_system_prompt => v_system,
+            pi_user_text     => v_user_prompt,
+            pi_image_url     => v_url,
+            pi_max_tokens    => 3000,
+            pi_temperature   => 0.1
+        );
+
+        IF v_raw IS NULL OR TRIM(v_raw) IS NULL THEN
+            v_result.put('appointments', v_out_rows);
+            RETURN v_result.to_clob();
+        END IF;
+
+        -- 4. Limpiar fences y parsear
+        v_clean := REPLACE(TRIM(v_raw), CHR(13), '');
+        v_clean := REGEXP_REPLACE(v_clean, '^\s*```(?:json)?\s*', '', 1, 0, 'i');
+        v_clean := REGEXP_REPLACE(v_clean, '\s*```\s*$', '');
+        v_clean := TRIM(v_clean);
+
+        BEGIN
+            IF v_clean LIKE '[%' THEN
+                v_rows := json_array_t.parse(v_clean);
+            ELSE
+                v_root := json_object_t.parse(v_clean);
+                IF v_root.has('appointments') THEN
+                    v_rows := TREAT(v_root.get('appointments') AS json_array_t);
+                ELSE
+                    v_rows := json_array_t();
+                END IF;
+            END IF;
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_rows := json_array_t();
+        END;
+
+        -- 5. Por fila: componer start_time, resolver entidades, sanitizar
+        FOR i IN 0 .. NVL(v_rows.get_size, 0) - 1 LOOP
+            BEGIN
+                v_row := TREAT(v_rows.get(i) AS json_object_t);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_row := NULL;
+            END;
+
+            IF v_row IS NOT NULL THEN
+                -- Componer start_time desde fecha/hora si el modelo no lo entrego ya en ISO
+                IF NOT v_row.has('start_time') OR fn_json_opt_string(v_row, 'start_time') IS NULL THEN
+                    v_fecha := COALESCE(fn_json_opt_string(v_row, 'fecha'), TRIM(pi_target_date));
+                    v_hora  := fn_json_opt_string(v_row, 'hora');
+                    IF v_fecha IS NOT NULL AND v_hora IS NOT NULL THEN
+                        BEGIN
+                            v_start_ts := FROM_TZ(
+                                TO_TIMESTAMP(v_fecha || ' ' || v_hora || ':00', 'YYYY-MM-DD HH24:MI:SS'),
+                                v_timezone
+                            );
+                            v_start_iso := TO_CHAR(v_start_ts, 'YYYY-MM-DD"T"HH24:MI:SS.FF9TZH:TZM', 'NLS_DATE_LANGUAGE=ENGLISH');
+                            v_row.put('start_time', v_start_iso);
+                        EXCEPTION
+                            WHEN OTHERS THEN NULL;
+                        END;
+                    END IF;
+                END IF;
+
+                v_trace := json_array_t();
+                v_resolved := fn_resolve_appointment_draft_entities(
+                    v_row, pi_org_id, pi_role_id, pi_prof_id, v_trace
+                );
+                v_sanitized := fn_sanitize_appointment_draft(
+                    v_resolved, pi_org_id, pi_role_id, pi_prof_id
+                );
+
+                -- Confianza por fila para el borde en UI: min(lectura del modelo, sanitize)
+                v_confidence := fn_json_opt_string(v_sanitized, 'confidence');
+                IF fn_json_opt_string(v_row, 'confidence') = 'low' THEN
+                    v_confidence := 'low';
+                END IF;
+                v_sanitized.put('row_confidence', NVL(v_confidence, 'medium'));
+
+                IF fn_json_opt_string(v_row, 'raw_text') IS NOT NULL THEN
+                    v_sanitized.put('raw_text', fn_json_opt_string(v_row, 'raw_text'));
+                END IF;
+
+                v_out_rows.append(v_sanitized);
+            END IF;
+        END LOOP;
+
+        v_result.put('appointments', v_out_rows);
+        RETURN v_result.to_clob();
+    END fn_process_agenda_image;
 
 END pkg_aox_ia_manager;
 /

@@ -114,6 +114,17 @@ CREATE OR REPLACE package pkg_aox_bucket AS
         po_object_key    out varchar2
     );
 
+    -- Escaneo de agenda (IA visión): imagen temporal para el modelo multimodal.
+    -- organizations/{org_id}/agenda-scans/{yyyy}/{mm}/{uid}.{ext}
+    procedure pr_upload_agenda_scan(
+        pi_blob          in blob,
+        pi_filename      in varchar2,
+        pi_mime_type     in varchar2,
+        pi_org_id        in organization.id_organization%type,
+        po_url           out varchar2,
+        po_object_key    out varchar2
+    );
+
     -- KB global ATC (sin org): platform/atc-kb/{document_id}/{filename}
     procedure pr_upload_atc_kb_document(
         pi_blob         in blob,
@@ -1092,6 +1103,82 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         po_url := v_url;
         po_object_key := v_object_key;
     end pr_upload_payment_receipt;
+
+    procedure pr_upload_agenda_scan(
+        pi_blob          in blob,
+        pi_filename      in varchar2,
+        pi_mime_type     in varchar2,
+        pi_org_id        in organization.id_organization%type,
+        po_url           out varchar2,
+        po_object_key    out varchar2
+    ) is
+        v_ext          varchar2(20);
+        v_safe_name    varchar2(255);
+        v_yyyy         varchar2(4);
+        v_mm           varchar2(2);
+        v_uid          varchar2(60);
+        v_object_key   varchar2(500);
+        v_url          varchar2(1000);
+        v_response     clob;
+        v_status_code  number;
+        v_mime         varchar2(150);
+    begin
+        if nvl(pi_org_id, 0) <= 0 then
+            raise_application_error(-20002, 'Organizacion invalida para escaneo de agenda.');
+        end if;
+
+        if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
+            raise_application_error(-20002, 'La imagen de agenda esta vacia.');
+        end if;
+
+        v_mime := lower(nvl(trim(pi_mime_type), 'application/octet-stream'));
+        v_safe_name := fn_safe_file_name(nvl(pi_filename, 'agenda'));
+
+        if v_mime in ('image/jpeg', 'image/jpg') or lower(v_safe_name) like '%.jpg' or lower(v_safe_name) like '%.jpeg' then
+            v_ext := 'jpg';
+            v_mime := 'image/jpeg';
+        elsif v_mime = 'image/png' or lower(v_safe_name) like '%.png' then
+            v_ext := 'png';
+            v_mime := 'image/png';
+        elsif v_mime = 'image/webp' or lower(v_safe_name) like '%.webp' then
+            v_ext := 'webp';
+            v_mime := 'image/webp';
+        else
+            v_ext := 'jpg';
+            v_mime := 'image/jpeg';
+        end if;
+
+        v_yyyy := to_char(current_timestamp, 'YYYY');
+        v_mm   := to_char(current_timestamp, 'MM');
+        v_uid  := to_char(systimestamp, 'YYYYMMDDHH24MISSFF3') || '_' || lower(rawtohex(sys_guid()));
+
+        v_object_key := c_organizations_dir || pi_org_id
+            || '/agenda-scans/' || v_yyyy
+            || '/' || v_mm
+            || '/' || v_uid || '.' || v_ext;
+
+        v_url := rtrim(g_base_url, '/') || '/' || v_object_key;
+
+        apex_web_service.g_request_headers.delete;
+        apex_web_service.g_request_headers(1).name := 'Content-Type';
+        apex_web_service.g_request_headers(1).value := v_mime;
+
+        v_response := apex_web_service.make_rest_request(
+            p_url                  => v_url,
+            p_http_method          => 'PUT',
+            p_credential_static_id => g_credential,
+            p_body_blob            => pi_blob
+        );
+
+        v_status_code := apex_web_service.g_status_code;
+
+        if v_status_code not between 200 and 299 then
+            raise_application_error(-20001, 'Error al subir la imagen de agenda a OCI. Codigo HTTP: ' || v_status_code);
+        end if;
+
+        po_url := v_url;
+        po_object_key := v_object_key;
+    end pr_upload_agenda_scan;
 
     procedure pr_upload_atc_kb_document(
         pi_blob         in blob,

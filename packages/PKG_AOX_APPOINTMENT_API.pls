@@ -549,34 +549,65 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 RAISE_APPLICATION_ERROR(-20006, 'El nombre del cliente es obligatorio.');
             END IF;
 
-            IF NVL(v_cust_phone, '') = '' THEN
-                RAISE_APPLICATION_ERROR(-20006, 'El teléfono del cliente es obligatorio.');
+            IF NVL(v_cust_phone, '') <> '' THEN
+                -- Flujo estandar: upsert por telefono (clave unica por org).
+                BEGIN
+                    SELECT id_customer
+                      INTO v_cus_id
+                      FROM customer
+                    WHERE phone_number        = v_cust_phone
+                      AND org_id_organization = v_org_id;
+
+                    UPDATE customer
+                      SET full_name   = v_cust_name
+                    WHERE id_customer = v_cus_id;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        INSERT INTO customer (
+                            org_id_organization,
+                            full_name,
+                            phone_number
+                        )
+                        VALUES (
+                            v_org_id,
+                            v_cust_name,
+                            v_cust_phone
+                        )
+                        RETURNING id_customer INTO v_cus_id;
+                END;
+            ELSE
+                -- Sin telefono (ej. carga masiva desde escaneo de agenda manuscrita):
+                -- enlazar por nombre exacto si hay UNO solo; si no, crear con telefono NULL.
+                DECLARE
+                    v_name_matches NUMBER := 0;
+                BEGIN
+                    SELECT COUNT(*)
+                      INTO v_name_matches
+                      FROM customer
+                     WHERE org_id_organization = v_org_id
+                       AND UPPER(TRIM(full_name)) = UPPER(TRIM(v_cust_name));
+
+                    IF v_name_matches = 1 THEN
+                        SELECT id_customer
+                          INTO v_cus_id
+                          FROM customer
+                         WHERE org_id_organization = v_org_id
+                           AND UPPER(TRIM(full_name)) = UPPER(TRIM(v_cust_name));
+                    ELSE
+                        INSERT INTO customer (
+                            org_id_organization,
+                            full_name,
+                            phone_number
+                        )
+                        VALUES (
+                            v_org_id,
+                            v_cust_name,
+                            NULL
+                        )
+                        RETURNING id_customer INTO v_cus_id;
+                    END IF;
+                END;
             END IF;
-
-            BEGIN
-                SELECT id_customer
-                  INTO v_cus_id
-                  FROM customer
-                WHERE phone_number        = v_cust_phone
-                  AND org_id_organization = v_org_id;
-
-                UPDATE customer
-                  SET full_name   = v_cust_name
-                WHERE id_customer = v_cus_id;
-            EXCEPTION
-                WHEN NO_DATA_FOUND THEN
-                    INSERT INTO customer (
-                        org_id_organization,
-                        full_name,
-                        phone_number
-                    )
-                    VALUES (
-                        v_org_id,
-                        v_cust_name,
-                        v_cust_phone
-                    )
-                    RETURNING id_customer INTO v_cus_id;
-            END;
         END IF;
 
         -- Lock del profesional para evitar doble booking concurrente

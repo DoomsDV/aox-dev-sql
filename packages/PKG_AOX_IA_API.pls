@@ -14,6 +14,13 @@ CREATE OR REPLACE PACKAGE pkg_aox_ia_api IS
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
+
+    PROCEDURE pr_parse_agenda_image(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
 END pkg_aox_ia_api;
 /
 
@@ -257,6 +264,115 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_api IS
                 po_response_body => po_response_body
             );
     END pr_parse_voice_appointment_draft;
+
+    PROCEDURE pr_parse_agenda_image(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_user_id       NUMBER;
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_prof_id       NUMBER;
+        v_image_base64  CLOB;
+        v_mime_type     VARCHAR2(100);
+        v_target_date   VARCHAR2(10);
+        v_ai_response   CLOB;
+        v_response_json json_object_t := json_object_t();
+        v_data_obj      json_object_t := json_object_t();
+        v_api_code      VARCHAR2(30);
+        v_error_message VARCHAR2(4000);
+    BEGIN
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+
+        IF NVL(v_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+        END IF;
+
+        -- Mismo gate que recepcion por voz: feature del plan + estado con escritura.
+        pkg_aox_subscription_api.pr_assert_org_has_feature(v_org_id, 'VOICE_RECEPTION');
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
+        BEGIN
+            SELECT id_professional INTO v_prof_id
+            FROM professional
+            WHERE usr_id_user = v_user_id AND org_id_organization = v_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_prof_id := -1;
+        END;
+
+        IF pi_body IS NULL OR DBMS_LOB.GETLENGTH(pi_body) = 0 THEN
+            RAISE_APPLICATION_ERROR(-20002, 'Debes enviar una imagen de la agenda.');
+        END IF;
+
+        SELECT JSON_VALUE(pi_body, '$.image_base64' RETURNING CLOB)
+        INTO v_image_base64
+        FROM dual;
+        v_mime_type   := NVL(TRIM(JSON_VALUE(pi_body, '$.mime_type')), 'image/jpeg');
+        v_target_date := TRIM(JSON_VALUE(pi_body, '$.target_date'));
+
+        IF v_image_base64 IS NULL OR DBMS_LOB.GETLENGTH(v_image_base64) = 0 THEN
+            RAISE_APPLICATION_ERROR(-20002, 'Debes enviar una imagen de la agenda.');
+        END IF;
+
+        v_ai_response := pkg_aox_ia_manager.fn_process_agenda_image(
+            pi_org_id       => v_org_id,
+            pi_role_id      => v_role_id,
+            pi_prof_id      => v_prof_id,
+            pi_image_base64 => v_image_base64,
+            pi_mime_type    => v_mime_type,
+            pi_target_date  => v_target_date,
+            pi_user_id      => v_user_id
+        );
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_data_obj := json_object_t.parse(v_ai_response);
+        v_response_json.put('data', v_data_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_resolve_api_error(SQLCODE, SQLERRM, po_status_code, v_api_code, v_error_message);
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'IA_AGENDA_IMAGE_DRAFT',
+                pi_process_name    => 'PKG_AOX_IA_API.PR_PARSE_AGENDA_IMAGE',
+                pi_http_method     => 'POST',
+                pi_endpoint        => '/ai/appointments/image-draft',
+                pi_org_id          => v_org_id,
+                pi_user_id         => v_user_id,
+                pi_status          => 'ERROR',
+                pi_status_code     => po_status_code,
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE
+            );
+            pkg_aox_util.pr_log_ai(
+                pi_process_name    => 'PKG_AOX_IA_API.PR_PARSE_AGENDA_IMAGE',
+                pi_org_id          => v_org_id,
+                pi_user_id         => v_user_id,
+                pi_role_id         => v_role_id,
+                pi_pro_id          => v_prof_id,
+                pi_status          => 'ERROR',
+                pi_status_code     => po_status_code,
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_response_body   => v_ai_response
+            );
+            pkg_aox_util.pr_build_api_error_response(
+                pi_status_code   => po_status_code,
+                pi_api_code      => pkg_aox_util.fn_resolve_api_code(po_status_code, SQLCODE, SQLERRM),
+                pi_message       => v_error_message,
+                po_response_body => po_response_body
+            );
+    END pr_parse_agenda_image;
 
 END pkg_aox_ia_api;
 /
