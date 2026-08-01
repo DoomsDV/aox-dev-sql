@@ -102,6 +102,64 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
         RETURN GREATEST(1, LEAST(20, TRUNC(v_top_k)));
     END fn_vector_top_k;
 
+    -- Oracle REGEXP no soporta (?:...). Limpia ``` / ```json y recorta al JSON.
+    FUNCTION fn_strip_markdown_json(pi_text IN CLOB) RETURN CLOB IS
+        v_clean     CLOB;
+        v_vc        VARCHAR2(32767);
+        v_first_obj NUMBER;
+        v_first_arr NUMBER;
+        v_start     NUMBER;
+        v_end       NUMBER;
+        v_close_ch  VARCHAR2(1);
+        v_len       INTEGER;
+    BEGIN
+        IF pi_text IS NULL OR DBMS_LOB.GETLENGTH(pi_text) = 0 THEN
+            RETURN pi_text;
+        END IF;
+
+        v_clean := REPLACE(TRIM(pi_text), CHR(13), '');
+        -- Apertura: ```json / ```JSON / ```
+        v_clean := REGEXP_REPLACE(v_clean, '^\s*```[A-Za-z0-9_-]*[[:space:]]*', '', 1, 1, 'i');
+        -- Cierre: ```
+        v_clean := REGEXP_REPLACE(v_clean, '[[:space:]]*```\s*$', '', 1, 1);
+        v_clean := TRIM(v_clean);
+
+        IF v_clean IS NULL OR DBMS_LOB.GETLENGTH(v_clean) = 0 THEN
+            RETURN v_clean;
+        END IF;
+
+        -- Si queda texto alrededor, recortar del primer {/[ al último }/]
+        IF v_clean LIKE '{%' OR v_clean LIKE '[%' THEN
+            RETURN v_clean;
+        END IF;
+
+        v_len := DBMS_LOB.GETLENGTH(v_clean);
+        IF v_len > 32767 THEN
+            RETURN v_clean; -- demasiado grande para recorte VARCHAR2; ya sin fences
+        END IF;
+
+        v_vc := DBMS_LOB.SUBSTR(v_clean, v_len, 1);
+        v_first_obj := INSTR(v_vc, '{');
+        v_first_arr := INSTR(v_vc, '[');
+
+        IF v_first_obj > 0 AND (v_first_arr = 0 OR v_first_obj < v_first_arr) THEN
+            v_start := v_first_obj;
+            v_close_ch := '}';
+        ELSIF v_first_arr > 0 THEN
+            v_start := v_first_arr;
+            v_close_ch := ']';
+        ELSE
+            RETURN v_clean;
+        END IF;
+
+        v_end := INSTR(v_vc, v_close_ch, -1);
+        IF v_start > 0 AND v_end >= v_start THEN
+            RETURN TRIM(SUBSTR(v_vc, v_start, v_end - v_start + 1));
+        END IF;
+
+        RETURN v_clean;
+    END fn_strip_markdown_json;
+
     PROCEDURE pr_append_resolution_trace(
         pio_trace            IN OUT NOCOPY json_array_t,
         pi_field             IN VARCHAR2,
@@ -1209,9 +1267,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
             RETURN fn_fallback_summaries(pi_role_id);
         END IF;
 
-        v_ai_text := REPLACE(TRIM(v_ai_text), CHR(13), '');
-        v_ai_text := REGEXP_REPLACE(v_ai_text, '^\s*```(?:json)?\s*', '', 1, 0, 'i');
-        v_ai_text := REGEXP_REPLACE(v_ai_text, '\s*```\s*$', '');
+        v_ai_text := fn_strip_markdown_json(v_ai_text);
 
         BEGIN
             SELECT
@@ -1551,12 +1607,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
         END;
 
         -- Limpiar fences markdown si el modelo las agrega.
-        v_clean := TRIM(v_raw);
-        IF v_clean IS NOT NULL THEN
-            v_clean := REGEXP_REPLACE(v_clean, '^\s*```(?:json)?\s*', '', 1, 1, 'i');
-            v_clean := REGEXP_REPLACE(v_clean, '\s*```\s*$', '', 1, 1);
-            v_clean := TRIM(v_clean);
-        END IF;
+        v_clean := fn_strip_markdown_json(v_raw);
 
         BEGIN
             v_parsed := json_object_t.parse(v_clean);
@@ -2577,9 +2628,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
             RAISE_APPLICATION_ERROR(-20005, 'La IA no devolvio un borrador.');
         END IF;
 
-        v_ai_clean := REPLACE(TRIM(v_ai_text), CHR(13), '');
-        v_ai_clean := REGEXP_REPLACE(v_ai_clean, '^\s*```(?:json)?\s*', '', 1, 0, 'i');
-        v_ai_clean := REGEXP_REPLACE(v_ai_clean, '\s*```\s*$', '');
+        v_ai_clean := fn_strip_markdown_json(v_ai_text);
 
         v_draft_raw      := json_object_t.parse(v_ai_clean);
         v_draft_resolved := fn_resolve_appointment_draft_entities(
@@ -2665,7 +2714,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
         RETURN q'[
             Eres un asistente que digitaliza una pagina de agenda manuscrita de una clinica o negocio de servicios en Paraguay.
             Lee la imagen y extrae TODAS las citas/turnos que aparezcan, una por renglon.
-            Responde SOLO JSON valido, sin markdown ni texto adicional.
+            Responde SOLO JSON valido, sin markdown, sin fences ```, sin texto adicional.
 
             FORMATO DE SALIDA (objeto raiz):
             {"appointments":[{...}, {...}]}
@@ -2733,14 +2782,30 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
 
         -- 1. base64 -> BLOB -> bucket (URL corta para el modelo)
         v_blob := apex_web_service.clobbase642blob(pi_image_base64);
-        pkg_aox_bucket.pr_upload_agenda_scan(
-            pi_blob       => v_blob,
-            pi_filename   => 'agenda',
-            pi_mime_type  => pi_mime_type,
-            pi_org_id     => pi_org_id,
-            po_url        => v_url,
-            po_object_key => v_object_key
-        );
+
+        -- Corregir mime si el cliente manda PNG/WEBP pero el archivo es JPEG (muy comun en moviles).
+        DECLARE
+            v_magic RAW(8);
+            v_mime  VARCHAR2(100) := NVL(TRIM(pi_mime_type), 'image/jpeg');
+        BEGIN
+            v_magic := DBMS_LOB.SUBSTR(v_blob, 8, 1);
+            IF UTL_RAW.SUBSTR(v_magic, 1, 3) = HEXTORAW('FFD8FF') THEN
+                v_mime := 'image/jpeg';
+            ELSIF UTL_RAW.SUBSTR(v_magic, 1, 8) = HEXTORAW('89504E470D0A1A0A') THEN
+                v_mime := 'image/png';
+            ELSIF UTL_RAW.CAST_TO_VARCHAR2(UTL_RAW.SUBSTR(v_magic, 1, 4)) = 'RIFF' THEN
+                v_mime := 'image/webp';
+            END IF;
+
+            pkg_aox_bucket.pr_upload_agenda_scan(
+                pi_blob       => v_blob,
+                pi_filename   => 'agenda',
+                pi_mime_type  => v_mime,
+                pi_org_id     => pi_org_id,
+                po_url        => v_url,
+                po_object_key => v_object_key
+            );
+        END;
 
         -- 2. Contexto para el modelo (catalogo + fecha actual + fecha objetivo)
         v_system := fn_agenda_scan_system_prompt;
@@ -2777,11 +2842,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
             RETURN v_result.to_clob();
         END IF;
 
-        -- 4. Limpiar fences y parsear
-        v_clean := REPLACE(TRIM(v_raw), CHR(13), '');
-        v_clean := REGEXP_REPLACE(v_clean, '^\s*```(?:json)?\s*', '', 1, 0, 'i');
-        v_clean := REGEXP_REPLACE(v_clean, '\s*```\s*$', '');
-        v_clean := TRIM(v_clean);
+        -- 4. Limpiar fences y parsear (Oracle no soporta (?:) en REGEXP)
+        v_clean := fn_strip_markdown_json(v_raw);
 
         BEGIN
             IF v_clean LIKE '[%' THEN
@@ -2796,6 +2858,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
             END IF;
         EXCEPTION
             WHEN OTHERS THEN
+                pkg_aox_util.pr_log_ai(
+                    pi_process_name    => 'PKG_AOX_IA_MANAGER.FN_PROCESS_AGENDA_IMAGE',
+                    pi_org_id          => pi_org_id,
+                    pi_user_id         => pi_user_id,
+                    pi_role_id         => pi_role_id,
+                    pi_pro_id          => pi_prof_id,
+                    pi_status          => 'ERROR',
+                    pi_status_code     => 502,
+                    pi_error_code      => SQLCODE,
+                    pi_error_message   => 'No se pudo parsear la respuesta de vision: ' || SQLERRM,
+                    pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                    pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                    pi_response_body   => v_raw
+                );
                 v_rows := json_array_t();
         END;
 

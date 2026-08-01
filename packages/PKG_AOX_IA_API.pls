@@ -309,11 +309,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_api IS
             RAISE_APPLICATION_ERROR(-20002, 'Debes enviar una imagen de la agenda.');
         END IF;
 
-        SELECT JSON_VALUE(pi_body, '$.image_base64' RETURNING CLOB)
-        INTO v_image_base64
-        FROM dual;
-        v_mime_type   := NVL(TRIM(JSON_VALUE(pi_body, '$.mime_type')), 'image/jpeg');
-        v_target_date := TRIM(JSON_VALUE(pi_body, '$.target_date'));
+        -- get_clob es fiable con base64 grandes; JSON_VALUE puede truncar/fallar.
+        DECLARE
+            v_req json_object_t := json_object_t.parse(pi_body);
+        BEGIN
+            IF v_req.has('image_base64') THEN
+                v_image_base64 := v_req.get_clob('image_base64');
+            END IF;
+            v_mime_type   := NVL(TRIM(v_req.get_string('mime_type')), 'image/jpeg');
+            IF v_req.has('target_date') THEN
+                v_target_date := TRIM(v_req.get_string('target_date'));
+            END IF;
+        END;
 
         IF v_image_base64 IS NULL OR DBMS_LOB.GETLENGTH(v_image_base64) = 0 THEN
             RAISE_APPLICATION_ERROR(-20002, 'Debes enviar una imagen de la agenda.');

@@ -32,6 +32,8 @@ BEGIN
         p_pattern     => 'appointments/image-draft'
     );
 
+    -- Mismo patrón que voice-draft / receipt OCR: :body_text (CLOB).
+    -- CONVERTTOCLOB(:body) provoca ORDS 555 con JSON grande (imagen base64).
     ORDS.define_handler(
         p_module_name => 'ai',
         p_pattern     => 'appointments/image-draft',
@@ -41,36 +43,19 @@ BEGIN
 DECLARE
     v_status_code   NUMBER;
     v_response_body CLOB;
-    v_body_clob     CLOB;
-    v_dest_offset   INTEGER := 1;
-    v_src_offset    INTEGER := 1;
-    v_lang_context  INTEGER := DBMS_LOB.DEFAULT_LANG_CTX;
-    v_warning       INTEGER;
 BEGIN
-    IF :body IS NOT NULL THEN
-        DBMS_LOB.CREATETEMPORARY(v_body_clob, TRUE);
-        DBMS_LOB.CONVERTTOCLOB(
-            dest_lob     => v_body_clob,
-            src_blob     => :body,
-            amount       => DBMS_LOB.LOBMAXSIZE,
-            dest_offset  => v_dest_offset,
-            src_offset   => v_src_offset,
-            blob_csid    => DBMS_LOB.DEFAULT_CSID,
-            lang_context => v_lang_context,
-            warning      => v_warning
-        );
-    END IF;
-
     pkg_aox_ia_api.pr_parse_agenda_image(
-        pi_auth_header   => owa_util.get_cgi_env('HTTP_AUTHORIZATION'),
-        pi_body          => v_body_clob,
+        pi_auth_header   => NVL(owa_util.get_cgi_env('AUTHORIZATION'), owa_util.get_cgi_env('HTTP_AUTHORIZATION')),
+        pi_body          => :body_text,
         po_status_code   => v_status_code,
         po_response_body => v_response_body
     );
 
     :status_code := v_status_code;
     owa_util.mime_header('application/json', TRUE);
-    htp.prn(v_response_body);
+    IF v_response_body IS NOT NULL THEN
+        htp.prn(v_response_body);
+    END IF;
 END;
         ]'
     );
