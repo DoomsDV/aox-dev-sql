@@ -277,6 +277,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             WHEN NO_DATA_FOUND THEN RETURN;
         END;
 
+        -- 0. Cierre de sucursal full-day: corte temprano.
+        IF pkg_aox_util.fn_is_location_closed_full_day(pi_loc_id, v_target_trunc) = 1 THEN
+            RETURN;
+        END IF;
+
         v_exception_type := pkg_aox_util.fn_get_schedule_exception_type(pi_pro_id, v_target_trunc);
 
         IF v_exception_type = 'BLOCKED' THEN
@@ -325,6 +330,28 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                       AND status             != 'CANCELADO'
                       AND (pi_exclude_app_id IS NULL OR id_appointment <> pi_exclude_app_id)
                       AND (v_current_slot < end_time AND v_slot_end > start_time);
+
+                    -- Filtrar cierres parciales de la sucursal.
+                    IF v_overlap_count = 0 THEN
+                        DECLARE
+                            v_partial_hit   NUMBER;
+                            v_slot_start_hm VARCHAR2(5) := TO_CHAR(v_current_slot, 'HH24:MI');
+                            v_slot_end_hm   VARCHAR2(5) := TO_CHAR(v_slot_end,     'HH24:MI');
+                        BEGIN
+                            SELECT COUNT(*)
+                              INTO v_partial_hit
+                              FROM location_closure c
+                             WHERE c.loc_id_location = pi_loc_id
+                               AND c.is_full_day     = 0
+                               AND v_target_trunc BETWEEN c.start_date AND c.end_date
+                               AND v_slot_start_hm < c.end_time
+                               AND v_slot_end_hm   > c.start_time
+                               AND ROWNUM = 1;
+                            IF v_partial_hit > 0 THEN
+                                v_overlap_count := 1;
+                            END IF;
+                        END;
+                    END IF;
 
                     IF v_overlap_count = 0 THEN
                         PIPE ROW(t_slot_rec(TO_CHAR(v_current_slot, 'HH24:MI')));

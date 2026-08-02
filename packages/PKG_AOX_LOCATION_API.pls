@@ -177,6 +177,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             v_loc_obj.put('is_active', rec.is_active);
             v_loc_obj.put('created_at', TO_CHAR(rec.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
 
+            DECLARE
+                v_closure_name VARCHAR2(120);
+            BEGIN
+                v_closure_name := pkg_aox_util.fn_get_current_closure_name(rec.id_location);
+                IF v_closure_name IS NULL THEN
+                    v_loc_obj.put_null('current_closure_name');
+                ELSE
+                    v_loc_obj.put('current_closure_name', v_closure_name);
+                END IF;
+            END;
+
             v_locs_arr.append(v_loc_obj);
         END LOOP;
 
@@ -248,6 +259,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             v_loc_obj.put('longitude', rec.longitude);
             v_loc_obj.put('is_active', rec.is_active);
             v_loc_obj.put('created_at', TO_CHAR(rec.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
+
+            DECLARE
+                v_closure_name VARCHAR2(120);
+            BEGIN
+                v_closure_name := pkg_aox_util.fn_get_current_closure_name(rec.id_location);
+                IF v_closure_name IS NULL THEN
+                    v_loc_obj.put_null('current_closure_name');
+                ELSE
+                    v_loc_obj.put('current_closure_name', v_closure_name);
+                END IF;
+            END;
 
             po_status_code := pkg_aox_util.c_success_ok_code;
             v_response_json.put('status', 'success');

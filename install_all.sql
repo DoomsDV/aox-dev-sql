@@ -61,6 +61,9 @@ PROMPT [16/31] professional_schedule_exception
 PROMPT [17/31] professional_schedule_exception_slot
 @@tables\PROFESSIONAL_SCHEDULE_EXCEPTION_SLOT.sql
 
+PROMPT [17b/31] location_closure
+@@tables\LOCATION_CLOSURE.sql
+
 PROMPT [18/31] appointment
 @@tables\APPOINTMENT.sql
 
@@ -308,6 +311,7 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 @@packages\PKG_AOX_SPECIALTY_API.pls
 @@packages\PKG_AOX_SERVICE_API.pls
 @@packages\PKG_AOX_LOCATION_API.pls
+@@packages\PKG_AOX_LOCATION_CLOSURE_API.pls
 @@packages\PKG_AOX_SCHEDULE_API.pls
 @@packages\PKG_AOX_SCHEDULE_EXCEPTION_API.pls
 @@packages\PKG_AOX_CUSTOMER_API.pls

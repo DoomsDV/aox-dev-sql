@@ -145,7 +145,25 @@ CREATE OR REPLACE package pkg_aox_util as
     ) return varchar2;
 
     /**
-     * Motivo de desalineacion: DAY_BLOCKED, TIME_OUTSIDE_SCHEDULE, WRONG_LOCATION.
+     * Cierre vigente de una sucursal en una fecha.
+     * Retorna 1 si hay un cierre FULL DAY que cubre la fecha (no puede reservarse).
+     * Retorna 0 si no hay cierre full-day (aunque pueda haber cierre parcial: eso se filtra a nivel slot).
+     */
+    function fn_is_location_closed_full_day (
+        pi_loc_id      in number,
+        pi_target_date in date
+    ) return number;
+
+    /**
+     * Nombre del cierre vigente hoy para una sucursal (o NULL si no hay).
+     * Usado por LOCATION list para pintar badge "CERRADA (Feriado)".
+     */
+    function fn_get_current_closure_name (
+        pi_loc_id in number
+    ) return varchar2;
+
+    /**
+     * Motivo de desalineacion: LOCATION_CLOSED, DAY_BLOCKED, TIME_OUTSIDE_SCHEDULE, WRONG_LOCATION.
      * NULL si la cita esta alineada con plantilla o excepcion OVERRIDE.
      */
     function fn_get_appointment_schedule_misaligned_reason (
@@ -540,6 +558,55 @@ CREATE OR REPLACE package body pkg_aox_util as
             return null;
     end fn_get_schedule_exception_type;
 
+    function fn_is_location_closed_full_day (
+        pi_loc_id      in number,
+        pi_target_date in date
+    ) return number is
+        v_count number;
+        v_target date := trunc(pi_target_date);
+    begin
+        if pi_loc_id is null or pi_target_date is null then
+            return 0;
+        end if;
+
+        select count(*)
+          into v_count
+          from location_closure c
+         where c.loc_id_location = pi_loc_id
+           and c.is_full_day     = 1
+           and v_target between c.start_date and c.end_date
+           and rownum = 1;
+
+        return case when v_count > 0 then 1 else 0 end;
+    end fn_is_location_closed_full_day;
+
+    function fn_get_current_closure_name (
+        pi_loc_id in number
+    ) return varchar2 is
+        v_name    location_closure.name%type;
+        v_today   date := trunc(cast(current_timestamp at time zone fn_app_timezone as date));
+        v_now_hm  varchar2(5) := to_char(cast(current_timestamp at time zone fn_app_timezone as date), 'HH24:MI');
+    begin
+        if pi_loc_id is null then
+            return null;
+        end if;
+
+        select c.name
+          into v_name
+          from location_closure c
+         where c.loc_id_location = pi_loc_id
+           and v_today between c.start_date and c.end_date
+           and (
+                 c.is_full_day = 1
+                 or (v_now_hm >= c.start_time and v_now_hm < c.end_time)
+               )
+           and rownum = 1;
+        return v_name;
+    exception
+        when no_data_found then
+            return null;
+    end fn_get_current_closure_name;
+
     function fn_get_appointment_schedule_misaligned_reason (
         pi_pro_id      in number,
         pi_start_time  in timestamp,
@@ -557,6 +624,28 @@ CREATE OR REPLACE package body pkg_aox_util as
         v_target_date := trunc(pi_start_time);
         v_app_start := to_char(pi_start_time, 'HH24:MI');
         v_app_end := to_char(pi_end_time, 'HH24:MI');
+
+        -- Precedencia: cierre de sucursal siempre gana.
+        if fn_is_location_closed_full_day(pi_loc_id, v_target_date) = 1 then
+            return 'LOCATION_CLOSED';
+        end if;
+
+        declare
+            v_partial_hit number;
+        begin
+            select count(*)
+              into v_partial_hit
+              from location_closure c
+             where c.loc_id_location = pi_loc_id
+               and c.is_full_day     = 0
+               and v_target_date between c.start_date and c.end_date
+               and v_app_start < c.end_time
+               and v_app_end   > c.start_time
+               and rownum = 1;
+            if v_partial_hit > 0 then
+                return 'LOCATION_CLOSED';
+            end if;
+        end;
 
         v_exception_type := fn_get_schedule_exception_type(pi_pro_id, v_target_date);
 
@@ -788,6 +877,11 @@ CREATE OR REPLACE package body pkg_aox_util as
             when no_data_found then return; -- El profesional no realiza este servicio
         end;
 
+        -- 0. Cierre de sucursal full-day: corte temprano.
+        if fn_is_location_closed_full_day(pi_loc_id, v_target_trunc) = 1 then
+            return;
+        end if;
+
         v_exception_type := fn_get_schedule_exception_type(pi_pro_id, v_target_trunc);
 
         if v_exception_type = 'BLOCKED' then
@@ -835,6 +929,29 @@ CREATE OR REPLACE package body pkg_aox_util as
                         (v_slot_end     >  start_time and v_slot_end     <= end_time) or
                         (v_current_slot <= start_time and v_slot_end     >= end_time)
                   );
+
+                -- 4b. Colisiones con cierres parciales de la sucursal.
+                if v_overlap_count = 0 then
+                    declare
+                        v_partial_hit number;
+                        v_slot_start_hm varchar2(5) := to_char(v_current_slot, 'HH24:MI');
+                        v_slot_end_hm   varchar2(5) := to_char(v_slot_end,     'HH24:MI');
+                    begin
+                        select count(*)
+                          into v_partial_hit
+                          from location_closure c
+                         where c.loc_id_location = pi_loc_id
+                           and c.is_full_day     = 0
+                           and v_target_trunc between c.start_date and c.end_date
+                           and v_slot_start_hm < c.end_time
+                           and v_slot_end_hm   > c.start_time
+                           and rownum = 1;
+
+                        if v_partial_hit > 0 then
+                            v_overlap_count := 1;
+                        end if;
+                    end;
+                end if;
 
                 -- Si no hay cruce de horarios, el bloque está disponible
                 if v_overlap_count = 0 then
