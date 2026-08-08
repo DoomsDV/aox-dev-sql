@@ -259,8 +259,8 @@ COMMIT;
 
 MERGE INTO ref_storage_addon t
 USING (
-  SELECT 1 AS id_storage_addon, 'STORAGE_5GB'  AS code, '+5 GB de almacenamiento'  AS name, 5368709120  AS extra_bytes, 30000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 1 AS is_active, 1 AS sort_order FROM dual UNION ALL
-  SELECT 2 AS id_storage_addon, 'STORAGE_15GB' AS code, '+15 GB de almacenamiento' AS name, 16106127360 AS extra_bytes, 70000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 1 AS is_active, 2 AS sort_order FROM dual
+  SELECT 1 AS id_storage_addon, 'STORAGE_5GB'  AS code, '+5 GB de almacenamiento'  AS name, 5368709120  AS extra_bytes, 15000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 1 AS is_active, 1 AS sort_order FROM dual UNION ALL
+  SELECT 2 AS id_storage_addon, 'STORAGE_15GB' AS code, '+15 GB de almacenamiento' AS name, 16106127360 AS extra_bytes, 35000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 1 AS is_active, 2 AS sort_order FROM dual
 ) s
 ON (t.id_storage_addon = s.id_storage_addon)
 WHEN MATCHED THEN UPDATE SET

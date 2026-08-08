@@ -35,8 +35,8 @@ Registro reproducible: `migrations/20260710_subscription_billing_ords.sql`
       "storage_used_bytes": 0, "storage_limit_bytes": 5368709120,
       "supports_storage_addons": 1, "billing_configured": 1,
       "plan_monthly_amount": 229000,
-      "addons_monthly_amount": 30000,
-      "monthly_total": 259000,
+      "addons_monthly_amount": 15000,
+      "monthly_total": 244000,
       "days_remaining_in_period": 12,
       "period_days": 31,
       "account_balance": 15000,
@@ -44,16 +44,16 @@ Registro reproducible: `migrations/20260710_subscription_billing_ords.sql`
       "pending_plan_name": "Base",
       "pending_plan_change_at": "2026-08-15T...",
       "active_storage_addons": [{
-        "code": "STORAGE_5GB", "quantity": 1, "line_total": 30000,
+        "code": "STORAGE_5GB", "quantity": 1, "line_total": 15000,
         "cancel_credit_amount": 11613, "cancelable": 1
       }]
     },
     "plans": [
       { "code": "PREMIUM", "price_amount": 229000, "checkout_price_amount": 229000,
-        "monthly_total": 259000, "features": ["..."], "is_current": 1 }
+        "monthly_total": 244000, "features": ["..."], "is_current": 1 }
     ],
     "storage_addons": [
-      { "code": "STORAGE_5GB", "extra_bytes": 5368709120, "price_amount": 30000,
+      { "code": "STORAGE_5GB", "extra_bytes": 5368709120, "price_amount": 15000,
         "prorate_amount": 11613, "days_remaining": 12, "period_days": 31 }
     ]
   }
