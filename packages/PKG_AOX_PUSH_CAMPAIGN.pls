@@ -49,8 +49,21 @@ CREATE OR REPLACE PACKAGE pkg_aox_push_campaign IS
     /** Envio inmediato (drop job si habia). */
     PROCEDURE pr_send_now(pi_campaign_id IN NUMBER);
 
-    /** Ejecutado por DBMS_SCHEDULER o pr_send_now. */
+    /**
+     * Ejecutado por DBMS_SCHEDULER o pr_send_now.
+     * Patron Transactional Outbox: solo resuelve destinatarios/tokens y encola
+     * push_campaign_delivery en status PENDING (rapido, sin HTTP a FCM).
+     * El envio real lo hace pr_dispatch_campaign_deliveries.
+     */
     PROCEDURE pr_execute_campaign(pi_campaign_id IN NUMBER);
+
+    /**
+     * Worker de despacho: dequeue de push_campaign_delivery (status PENDING)
+     * con FOR UPDATE SKIP LOCKED, llama pkg_aox_fcm_api.pr_send_push por token,
+     * y finaliza el status de la campana cuando ya no quedan filas pendientes.
+     * Pensado para DBMS_SCHEDULER cada ~30s.
+     */
+    PROCEDURE pr_dispatch_campaign_deliveries(pi_batch_size IN NUMBER DEFAULT 100);
 
 END pkg_aox_push_campaign;
 /
@@ -561,17 +574,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
         pr_execute_campaign(pi_campaign_id);
     END pr_send_now;
 
+    -- Patron Transactional Outbox: resuelve destinatarios/tokens y encola en
+    -- push_campaign_delivery (status PENDING), SIN llamar a FCM aqui. El envio
+    -- real (HTTP) lo hace pr_dispatch_campaign_deliveries de forma asincronica.
     PROCEDURE pr_execute_campaign(pi_campaign_id IN NUMBER) IS
         v_camp         push_campaign%ROWTYPE;
         v_title        VARCHAR2(500);
         v_body         VARCHAR2(4000);
         v_url          VARCHAR2(1000);
-        v_ok_count     PLS_INTEGER := 0;
-        v_fail_count   PLS_INTEGER := 0;
+        v_queued_count PLS_INTEGER := 0;
         v_base_url     VARCHAR2(500);
         v_audience     VARCHAR2(20);
         v_role_id      NUMBER;
-        v_token        VARCHAR2(1000);
         v_err_msg      VARCHAR2(4000);
         PRAGMA AUTONOMOUS_TRANSACTION;
     BEGIN
@@ -683,69 +697,29 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
                   FROM user_fcm_devices f
                  WHERE f.platform_user_id = rec.id_platform_user
             ) LOOP
-                v_token := device.fcm_token;
-                BEGIN
-                    pkg_aox_fcm_api.pr_send_push(
-                        pi_token => v_token,
-                        pi_title => v_title,
-                        pi_body  => v_body,
-                        pi_url   => v_url
-                    );
-
-                    INSERT INTO push_campaign_delivery (
-                        id_campaign, platform_user_id, fcm_token,
-                        resolved_title, resolved_body, status, sent_at
-                    ) VALUES (
-                        pi_campaign_id,
-                        rec.id_platform_user,
-                        v_token,
-                        v_title,
-                        v_body,
-                        'SENT',
-                        CURRENT_TIMESTAMP
-                    );
-                    v_ok_count := v_ok_count + 1;
-                EXCEPTION
-                    WHEN OTHERS THEN
-                        v_err_msg := SUBSTR(SQLERRM, 1, 4000);
-                        INSERT INTO push_campaign_delivery (
-                            id_campaign, platform_user_id, fcm_token,
-                            resolved_title, resolved_body, status, error_message, sent_at
-                        ) VALUES (
-                            pi_campaign_id,
-                            rec.id_platform_user,
-                            v_token,
-                            v_title,
-                            v_body,
-                            'FAILED',
-                            v_err_msg,
-                            CURRENT_TIMESTAMP
-                        );
-                        v_fail_count := v_fail_count + 1;
-                END;
+                INSERT INTO push_campaign_delivery (
+                    id_campaign, platform_user_id, fcm_token,
+                    resolved_title, resolved_body, resolved_url, status
+                ) VALUES (
+                    pi_campaign_id,
+                    rec.id_platform_user,
+                    device.fcm_token,
+                    v_title,
+                    v_body,
+                    v_url,
+                    'PENDING'
+                );
+                v_queued_count := v_queued_count + 1;
             END LOOP;
         END LOOP;
 
-        IF v_ok_count = 0 THEN
+        -- Sin destinatarios con token: no hay nada que un worker pueda despachar
+        -- despues, asi que se resuelve el estado final de una vez (igual que antes).
+        IF v_queued_count = 0 THEN
             UPDATE push_campaign
                SET status        = 'ERROR',
-                   error_message = CASE
-                       WHEN v_fail_count = 0 THEN 'Sin destinatarios con token FCM.'
-                       ELSE 'Todos los envios fallaron (' || v_fail_count || ').'
-                   END,
+                   error_message = 'Sin destinatarios con token FCM.',
                    updated_at    = CURRENT_TIMESTAMP
-             WHERE id_campaign = pi_campaign_id;
-        ELSE
-            UPDATE push_campaign
-               SET status     = 'SENT',
-                   sent_at    = CURRENT_TIMESTAMP,
-                   error_message = CASE
-                       WHEN v_fail_count > 0 THEN
-                           'Enviado con fallos parciales: ok=' || v_ok_count ||
-                           ', fail=' || v_fail_count
-                       ELSE NULL
-                   END,
-                   updated_at = CURRENT_TIMESTAMP
              WHERE id_campaign = pi_campaign_id;
         END IF;
 
@@ -767,6 +741,143 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
             END;
             RAISE;
     END pr_execute_campaign;
+
+    -- Finaliza el status de la campana (SENT/ERROR) una vez que ya no quedan
+    -- deliveries PENDING. Idempotente: no hace nada si la campana no esta SENDING.
+    PROCEDURE pr_finalize_campaign_if_done(pi_campaign_id IN NUMBER) IS
+        v_status  push_campaign.status%TYPE;
+        v_pending PLS_INTEGER;
+        v_sent    PLS_INTEGER;
+        v_failed  PLS_INTEGER;
+    BEGIN
+        SELECT status
+          INTO v_status
+          FROM push_campaign
+         WHERE id_campaign = pi_campaign_id
+         FOR UPDATE;
+
+        IF v_status <> 'SENDING' THEN
+            RETURN;
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_pending
+          FROM push_campaign_delivery
+         WHERE id_campaign = pi_campaign_id
+           AND status = 'PENDING';
+
+        IF v_pending > 0 THEN
+            RETURN;
+        END IF;
+
+        SELECT
+            COUNT(CASE WHEN status = 'SENT' THEN 1 END),
+            COUNT(CASE WHEN status = 'FAILED' THEN 1 END)
+        INTO v_sent, v_failed
+        FROM push_campaign_delivery
+        WHERE id_campaign = pi_campaign_id;
+
+        IF v_sent = 0 THEN
+            UPDATE push_campaign
+               SET status        = 'ERROR',
+                   error_message = CASE
+                       WHEN v_failed = 0 THEN 'Sin destinatarios con token FCM.'
+                       ELSE 'Todos los envios fallaron (' || v_failed || ').'
+                   END,
+                   updated_at    = CURRENT_TIMESTAMP
+             WHERE id_campaign = pi_campaign_id;
+        ELSE
+            UPDATE push_campaign
+               SET status        = 'SENT',
+                   sent_at       = CURRENT_TIMESTAMP,
+                   error_message = CASE
+                       WHEN v_failed > 0 THEN
+                           'Enviado con fallos parciales: ok=' || v_sent ||
+                           ', fail=' || v_failed
+                       ELSE NULL
+                   END,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id_campaign = pi_campaign_id;
+        END IF;
+
+        COMMIT;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            NULL;
+    END pr_finalize_campaign_if_done;
+
+    PROCEDURE pr_dispatch_campaign_deliveries(pi_batch_size IN NUMBER DEFAULT 100) IS
+        TYPE t_campaign_id_tab IS TABLE OF push_campaign.id_campaign%TYPE;
+        TYPE t_delivery_id_tab IS TABLE OF push_campaign_delivery.id_delivery%TYPE;
+        v_touched_campaigns t_campaign_id_tab := t_campaign_id_tab();
+        v_ids               t_delivery_id_tab;
+        v_campaign_id       push_campaign_delivery.id_campaign%TYPE;
+        v_token             push_campaign_delivery.fcm_token%TYPE;
+        v_title             push_campaign_delivery.resolved_title%TYPE;
+        v_body              push_campaign_delivery.resolved_body%TYPE;
+        v_url               push_campaign_delivery.resolved_url%TYPE;
+        v_err_msg           VARCHAR2(4000);
+
+        PROCEDURE pr_track_campaign(pi_campaign_id IN NUMBER) IS
+        BEGIN
+            FOR i IN 1 .. v_touched_campaigns.COUNT LOOP
+                IF v_touched_campaigns(i) = pi_campaign_id THEN
+                    RETURN;
+                END IF;
+            END LOOP;
+            v_touched_campaigns.EXTEND;
+            v_touched_campaigns(v_touched_campaigns.COUNT) := pi_campaign_id;
+        END pr_track_campaign;
+    BEGIN
+        -- Lock del batch con SKIP LOCKED. BULK COLLECT cierra el cursor de
+        -- inmediato: hacer COMMIT dentro de un FOR-loop atado a un cursor
+        -- FOR UPDATE abierto rompe el fetch implicito (ORA-01002), por eso se
+        -- resuelven los IDs primero y se procesa cada uno por separado.
+        -- ROWNUM sin ORDER BY (FETCH FIRST/ORDER BY + FOR UPDATE disparan
+        -- ORA-02014 -- Oracle no permite FOR UPDATE sobre una vista ordenada).
+        SELECT id_delivery
+          BULK COLLECT INTO v_ids
+          FROM push_campaign_delivery
+         WHERE status = 'PENDING'
+           AND ROWNUM <= NVL(pi_batch_size, 100)
+         FOR UPDATE SKIP LOCKED;
+
+        FOR i IN 1 .. v_ids.COUNT LOOP
+            SELECT id_campaign, fcm_token, resolved_title, resolved_body, resolved_url
+              INTO v_campaign_id, v_token, v_title, v_body, v_url
+              FROM push_campaign_delivery
+             WHERE id_delivery = v_ids(i);
+
+            BEGIN
+                pkg_aox_fcm_api.pr_send_push(
+                    pi_token => v_token,
+                    pi_title => v_title,
+                    pi_body  => v_body,
+                    pi_url   => v_url
+                );
+
+                UPDATE push_campaign_delivery
+                   SET status  = 'SENT',
+                       sent_at = CURRENT_TIMESTAMP
+                 WHERE id_delivery = v_ids(i);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_err_msg := SUBSTR(SQLERRM, 1, 4000);
+                    UPDATE push_campaign_delivery
+                       SET status        = 'FAILED',
+                           error_message = v_err_msg,
+                           sent_at       = CURRENT_TIMESTAMP
+                     WHERE id_delivery = v_ids(i);
+            END;
+            COMMIT;
+
+            pr_track_campaign(v_campaign_id);
+        END LOOP;
+
+        FOR i IN 1 .. v_touched_campaigns.COUNT LOOP
+            pr_finalize_campaign_if_done(v_touched_campaigns(i));
+        END LOOP;
+    END pr_dispatch_campaign_deliveries;
 
 END pkg_aox_push_campaign;
 /

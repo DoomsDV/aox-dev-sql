@@ -30,7 +30,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_vector_search IS
     PROCEDURE pr_sync_all_orgs_embeddings;
 
     /**
-     * Punto de entrada para triggers DML.
+     * Punto de entrada para triggers DML (uso directo/manual, sin outbox).
      * No propaga errores de Azure para no bloquear altas/ediciones.
      */
     PROCEDURE pr_on_entity_embedding_changed(
@@ -38,6 +38,28 @@ CREATE OR REPLACE PACKAGE pkg_aox_vector_search IS
         pi_entity_type IN VARCHAR2,
         pi_entity_id   IN NUMBER,
         pi_deleted     IN BOOLEAN DEFAULT FALSE
+    );
+
+    /**
+     * Patron Transactional Outbox: punto de entrada real de los triggers DML.
+     * Solo hace un INSERT rapido (sin red) en embedding_sync_outbox; nunca llama
+     * a Azure OpenAI ni mantiene el row lock del trigger. Best-effort: un error
+     * aqui jamas debe bloquear el INSERT/UPDATE/DELETE que lo dispara.
+     */
+    PROCEDURE pr_enqueue_embedding_sync(
+        pi_org_id      IN NUMBER,
+        pi_entity_type IN VARCHAR2,
+        pi_entity_id   IN NUMBER,
+        pi_deleted     IN BOOLEAN DEFAULT FALSE
+    );
+
+    /**
+     * Worker de la cola: dequeue de embedding_sync_outbox con FOR UPDATE SKIP LOCKED
+     * (soporta multiples ejecuciones concurrentes del job sin duplicar trabajo).
+     * Pensado para DBMS_SCHEDULER cada ~30-60s.
+     */
+    PROCEDURE pr_process_embedding_outbox(
+        pi_batch_size IN NUMBER DEFAULT 50
     );
 
     /**
@@ -412,6 +434,110 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_vector_search IS
                 pi_parameters      => v_params.to_clob()
             );
     END pr_on_entity_embedding_changed;
+
+    PROCEDURE pr_enqueue_embedding_sync(
+        pi_org_id      IN NUMBER,
+        pi_entity_type IN VARCHAR2,
+        pi_entity_id   IN NUMBER,
+        pi_deleted     IN BOOLEAN DEFAULT FALSE
+    ) IS
+    BEGIN
+        IF NVL(pi_org_id, 0) <= 0 OR NVL(pi_entity_id, 0) <= 0 THEN
+            RETURN;
+        END IF;
+
+        INSERT INTO embedding_sync_outbox (
+            org_id_organization, entity_type, entity_id, action
+        ) VALUES (
+            pi_org_id,
+            UPPER(TRIM(pi_entity_type)),
+            pi_entity_id,
+            CASE WHEN pi_deleted THEN 'DELETE' ELSE 'SYNC' END
+        );
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Best-effort: jamas debe bloquear el DML del trigger que la invoca.
+            -- El job nocturno pr_sync_all_orgs_embeddings actua como red de seguridad.
+            NULL;
+    END pr_enqueue_embedding_sync;
+
+    PROCEDURE pr_process_embedding_outbox(
+        pi_batch_size IN NUMBER DEFAULT 50
+    ) IS
+        TYPE t_id_tab IS TABLE OF embedding_sync_outbox.id_outbox%TYPE;
+        v_ids        t_id_tab;
+        v_org_id     embedding_sync_outbox.org_id_organization%TYPE;
+        v_entity_typ embedding_sync_outbox.entity_type%TYPE;
+        v_entity_id  embedding_sync_outbox.entity_id%TYPE;
+        v_action     embedding_sync_outbox.action%TYPE;
+        v_params     json_object_t;
+        v_err_msg    VARCHAR2(4000);
+    BEGIN
+        -- Lock del batch con SKIP LOCKED (soporta ejecuciones concurrentes del job
+        -- sin duplicar trabajo). BULK COLLECT cierra el cursor de inmediato: hacer
+        -- COMMIT dentro de un FOR-loop atado a un cursor FOR UPDATE abierto rompe
+        -- el fetch implicito (ORA-01002), por eso se resuelven los IDs primero y
+        -- se procesa cada uno por separado, sin cursor vivo de por medio.
+        -- Nota: ROWNUM sin ORDER BY (FETCH FIRST/ORDER BY + FOR UPDATE disparan
+        -- ORA-02014 -- Oracle no permite FOR UPDATE sobre una vista ordenada).
+        SELECT id_outbox
+          BULK COLLECT INTO v_ids
+          FROM embedding_sync_outbox
+         WHERE status = 'PENDING'
+           AND ROWNUM <= NVL(pi_batch_size, 50)
+         FOR UPDATE SKIP LOCKED;
+
+        FOR i IN 1 .. v_ids.COUNT LOOP
+            BEGIN
+                SELECT org_id_organization, entity_type, entity_id, action
+                  INTO v_org_id, v_entity_typ, v_entity_id, v_action
+                  FROM embedding_sync_outbox
+                 WHERE id_outbox = v_ids(i);
+
+                UPDATE embedding_sync_outbox
+                   SET status = 'PROCESSING'
+                 WHERE id_outbox = v_ids(i);
+                COMMIT;
+
+                IF v_action = 'DELETE' THEN
+                    pr_delete_entity_embedding(v_org_id, v_entity_typ, v_entity_id);
+                ELSE
+                    pr_sync_entity_embedding(v_org_id, v_entity_typ, v_entity_id);
+                END IF;
+
+                UPDATE embedding_sync_outbox
+                   SET status       = 'DONE',
+                       processed_at = CURRENT_TIMESTAMP
+                 WHERE id_outbox = v_ids(i);
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_err_msg := SUBSTR(SQLERRM, 1, 4000);
+                    v_params := json_object_t();
+                    v_params.put('entity_type', v_entity_typ);
+                    v_params.put('entity_id', v_entity_id);
+                    v_params.put('action', v_action);
+                    pkg_aox_util.pr_log_ai(
+                        pi_process_name    => 'PKG_AOX_VECTOR_SEARCH.PR_PROCESS_EMBEDDING_OUTBOX',
+                        pi_org_id          => v_org_id,
+                        pi_status          => 'ERROR',
+                        pi_error_code      => SQLCODE,
+                        pi_error_message   => v_err_msg,
+                        pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                        pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                        pi_parameters      => v_params.to_clob()
+                    );
+
+                    UPDATE embedding_sync_outbox
+                       SET status        = 'FAILED',
+                           attempts      = attempts + 1,
+                           error_message = v_err_msg,
+                           processed_at  = CURRENT_TIMESTAMP
+                     WHERE id_outbox = v_ids(i);
+                    COMMIT;
+            END;
+        END LOOP;
+    END pr_process_embedding_outbox;
 
     FUNCTION fn_search_top_k(
         pi_org_id      IN NUMBER,

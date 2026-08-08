@@ -130,6 +130,9 @@ PROMPT [35/36] aox_fcm_log
 PROMPT [36/36] org_entity_embedding
 @@tables\ORG_ENTITY_EMBEDDING.sql
 
+PROMPT [36b/36] embedding_sync_outbox (Fase 2: outbox transaccional triggers embeddings)
+@@tables\EMBEDDING_SYNC_OUTBOX.sql
+
 PROMPT --- Campanas push admin (Hasel_admn) ---
 PROMPT [35b] push_var_catalog
 @@tables\PUSH_VAR_CATALOG.sql

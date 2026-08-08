@@ -1,18 +1,18 @@
-PROMPT === Triggers: sync embeddings en entidades de org ===
+PROMPT === Triggers: sync embeddings en entidades de org (patron Transactional Outbox) ===
 
 CREATE OR REPLACE TRIGGER trg_customer_vector_embedding
 AFTER INSERT OR UPDATE OF full_name, phone_number OR DELETE ON customer
 FOR EACH ROW
 BEGIN
     IF DELETING THEN
-        pkg_aox_vector_search.pr_on_entity_embedding_changed(
+        pkg_aox_vector_search.pr_enqueue_embedding_sync(
             pi_org_id      => :OLD.org_id_organization,
             pi_entity_type => pkg_aox_vector_search.c_entity_customer,
             pi_entity_id   => :OLD.id_customer,
             pi_deleted     => TRUE
         );
     ELSE
-        pkg_aox_vector_search.pr_on_entity_embedding_changed(
+        pkg_aox_vector_search.pr_enqueue_embedding_sync(
             pi_org_id      => :NEW.org_id_organization,
             pi_entity_type => pkg_aox_vector_search.c_entity_customer,
             pi_entity_id   => :NEW.id_customer,
@@ -27,14 +27,14 @@ AFTER INSERT OR UPDATE OF display_name, spe_id_specialty, is_active, usr_id_user
 FOR EACH ROW
 BEGIN
     IF DELETING THEN
-        pkg_aox_vector_search.pr_on_entity_embedding_changed(
+        pkg_aox_vector_search.pr_enqueue_embedding_sync(
             pi_org_id      => :OLD.org_id_organization,
             pi_entity_type => pkg_aox_vector_search.c_entity_professional,
             pi_entity_id   => :OLD.id_professional,
             pi_deleted     => TRUE
         );
     ELSE
-        pkg_aox_vector_search.pr_on_entity_embedding_changed(
+        pkg_aox_vector_search.pr_enqueue_embedding_sync(
             pi_org_id      => :NEW.org_id_organization,
             pi_entity_type => pkg_aox_vector_search.c_entity_professional,
             pi_entity_id   => :NEW.id_professional,
@@ -49,14 +49,14 @@ AFTER INSERT OR UPDATE OF name, duration_minutes, is_active OR DELETE ON service
 FOR EACH ROW
 BEGIN
     IF DELETING THEN
-        pkg_aox_vector_search.pr_on_entity_embedding_changed(
+        pkg_aox_vector_search.pr_enqueue_embedding_sync(
             pi_org_id      => :OLD.org_id_organization,
             pi_entity_type => pkg_aox_vector_search.c_entity_service,
             pi_entity_id   => :OLD.id_service,
             pi_deleted     => TRUE
         );
     ELSE
-        pkg_aox_vector_search.pr_on_entity_embedding_changed(
+        pkg_aox_vector_search.pr_enqueue_embedding_sync(
             pi_org_id      => :NEW.org_id_organization,
             pi_entity_type => pkg_aox_vector_search.c_entity_service,
             pi_entity_id   => :NEW.id_service,
@@ -71,14 +71,14 @@ AFTER INSERT OR UPDATE OF name, address, is_active OR DELETE ON location
 FOR EACH ROW
 BEGIN
     IF DELETING THEN
-        pkg_aox_vector_search.pr_on_entity_embedding_changed(
+        pkg_aox_vector_search.pr_enqueue_embedding_sync(
             pi_org_id      => :OLD.org_id_organization,
             pi_entity_type => pkg_aox_vector_search.c_entity_location,
             pi_entity_id   => :OLD.id_location,
             pi_deleted     => TRUE
         );
     ELSE
-        pkg_aox_vector_search.pr_on_entity_embedding_changed(
+        pkg_aox_vector_search.pr_enqueue_embedding_sync(
             pi_org_id      => :NEW.org_id_organization,
             pi_entity_type => pkg_aox_vector_search.c_entity_location,
             pi_entity_id   => :NEW.id_location,

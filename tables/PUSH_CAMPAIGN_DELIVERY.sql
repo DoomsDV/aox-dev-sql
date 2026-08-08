@@ -6,6 +6,7 @@ CREATE TABLE push_campaign_delivery (
   fcm_token        VARCHAR2(1000)              NULL,
   resolved_title   VARCHAR2(500)               NULL,
   resolved_body    VARCHAR2(4000)              NULL,
+  resolved_url     VARCHAR2(1000)              NULL,
   status           VARCHAR2(20)                DEFAULT 'PENDING' NOT NULL,
   error_message    VARCHAR2(4000)              NULL,
   sent_at          TIMESTAMP(6) WITH TIME ZONE NULL,

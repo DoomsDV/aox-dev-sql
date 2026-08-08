@@ -113,23 +113,27 @@ Profesionales usan **`professional.display_name`** (identidad por org).
 
 Permitir HTTPS hacia el host Azure OpenAI (mismo que chat/Whisper).
 
-## Fase 2 — Reindex automático
+## Fase 2 — Reindex automático (patrón Transactional Outbox)
 
 | Artefacto | Descripción |
 |-----------|-------------|
+| `tables/EMBEDDING_SYNC_OUTBOX.sql` | Outbox: cola `PENDING/PROCESSING/DONE/FAILED` |
 | `triggers/TRG_VECTOR_EMBEDDING_SYNC.sql` | Triggers en `customer`, `professional`, `service`, `location` |
-| `migrations/20260615_vector_embedding_auto_sync.sql` | Triggers + job nocturno |
-| Job `HASEL_SYNC_ORG_EMBEDDINGS` | Diario 03:00 → `pr_sync_all_orgs_embeddings` |
+| `migrations/20260615_vector_embedding_auto_sync.sql` | Triggers + job nocturno (version inicial, sincronica) |
+| `migrations/20260808_transactional_outbox_phase2.sql` | Outbox + worker + job cada ~30s (Fase 2 del plan de correccion N+1) |
+| Job `HASEL_SYNC_ORG_EMBEDDINGS` | Diario 03:00 → `pr_sync_all_orgs_embeddings` (red de seguridad) |
+| Job `HASEL_PROCESS_EMBEDDING_OUTBOX` | Cada ~30s → `pr_process_embedding_outbox` (dequeue `FOR UPDATE SKIP LOCKED`) |
 
 Despliegue:
 
 ```sql
 @migrations/20260615_vector_embedding_auto_sync.sql
+@migrations/20260808_transactional_outbox_phase2.sql
 ```
 
-### Triggers (tiempo real)
+### Triggers (tiempo real, sin llamadas HTTP)
 
-Tras INSERT/UPDATE de columnas relevantes o DELETE, llaman a `pr_on_entity_embedding_changed`. Los errores de Azure **no bloquean** el DML (se ignoran en el trigger).
+Tras INSERT/UPDATE de columnas relevantes o DELETE, los triggers llaman a `pr_enqueue_embedding_sync`, que solo hace un `INSERT` en `embedding_sync_outbox` (rapido, sin red, misma transaccion del DML). **No** llaman a Azure OpenAI directamente ni mantienen el row lock durante una llamada HTTP — eso lo resuelve el worker de forma asincronica. Un error en el `INSERT` (best-effort) tampoco bloquea el DML.
 
 | Tabla | Columnas observadas |
 |-------|---------------------|
@@ -137,6 +141,12 @@ Tras INSERT/UPDATE de columnas relevantes o DELETE, llaman a `pr_on_entity_embed
 | `professional` | `display_name`, `spe_id_specialty`, `is_active`, `usr_id_user` |
 | `service` | `name`, `duration_minutes`, `is_active` |
 | `location` | `name`, `address`, `is_active` |
+
+### Worker de la cola (`pr_process_embedding_outbox`)
+
+Job `HASEL_PROCESS_EMBEDDING_OUTBOX` (cada ~30s): dequeue de `embedding_sync_outbox` en status `PENDING` con `FOR UPDATE SKIP LOCKED` (soporta ejecuciones concurrentes sin duplicar trabajo), llama a `pr_sync_entity_embedding`/`pr_delete_entity_embedding` (aqui si ocurre la llamada HTTP a Azure), y marca `DONE` o `FAILED` con `commit` por fila. Las filas `FAILED` no se reintentan automaticamente; el job nocturno `HASEL_SYNC_ORG_EMBEDDINGS` actua como red de seguridad para cualquier drift.
+
+`pr_on_entity_embedding_changed` se mantiene en el paquete para uso manual/interno (ya no es el punto de entrada de los triggers).
 
 ### Job nocturno (red de seguridad)
 
@@ -151,7 +161,9 @@ SELECT trigger_name, table_name, status
 
 SELECT job_name, enabled, state, next_run_date
   FROM user_scheduler_jobs
- WHERE job_name = 'HASEL_SYNC_ORG_EMBEDDINGS';
+ WHERE job_name IN ('HASEL_SYNC_ORG_EMBEDDINGS', 'HASEL_PROCESS_EMBEDDING_OUTBOX');
+
+SELECT status, COUNT(*) FROM embedding_sync_outbox GROUP BY status;
 ```
 
 Ejecución manual del job:
