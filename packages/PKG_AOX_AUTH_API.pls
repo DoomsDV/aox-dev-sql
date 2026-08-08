@@ -898,6 +898,30 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
                 raise;
         end;
 
+        -- Segundo control de rate limit, por IP: cubre credential stuffing distribuido
+        -- (rotación de usuario/email desde una misma IP), complementa el control por identificador.
+        begin
+            pkg_aox_util.pr_assert_rate_limit(
+                pi_scope        => 'AUTH_LOGIN_IP',
+                pi_key          => pkg_aox_util.fn_client_ip,
+                pi_max_attempts => pkg_aox_util.fn_param_number('RATE_LIMIT_LOGIN_IP_MAX', 30),
+                pi_window_sec   => pkg_aox_util.fn_param_number('RATE_LIMIT_LOGIN_IP_WINDOW_SEC', 900)
+            );
+        exception
+            when others then
+                if sqlcode = pkg_aox_util.c_sqlcode_rate_limit then
+                    po_status_code := pkg_aox_util.c_too_many_requests_code;
+                    pkg_aox_util.pr_build_api_error_response(
+                        pi_status_code   => po_status_code,
+                        pi_api_code      => pkg_aox_util.c_api_code_rate_limited,
+                        pi_message       => regexp_replace(sqlerrm, '^ORA-[0-9]+: ', ''),
+                        po_response_body => po_response_body
+                    );
+                    return;
+                end if;
+                raise;
+        end;
+
         begin
             select
                 pu.id_platform_user,
@@ -1664,6 +1688,29 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
                 pi_key          => lower(trim(v_email)),
                 pi_max_attempts => pkg_aox_util.fn_param_number('RATE_LIMIT_FORGOT_MAX', 5),
                 pi_window_sec   => pkg_aox_util.fn_param_number('RATE_LIMIT_FORGOT_WINDOW_SEC', 900)
+            );
+        exception
+            when others then
+                if sqlcode = pkg_aox_util.c_sqlcode_rate_limit then
+                    po_status_code := pkg_aox_util.c_too_many_requests_code;
+                    pkg_aox_util.pr_build_api_error_response(
+                        pi_status_code   => po_status_code,
+                        pi_api_code      => pkg_aox_util.c_api_code_rate_limited,
+                        pi_message       => regexp_replace(sqlerrm, '^ORA-[0-9]+: ', ''),
+                        po_response_body => po_response_body
+                    );
+                    return;
+                end if;
+                raise;
+        end;
+
+        -- Segundo control de rate limit, por IP: mismo criterio que en pr_login_auth.
+        begin
+            pkg_aox_util.pr_assert_rate_limit(
+                pi_scope        => 'AUTH_FORGOT_IP',
+                pi_key          => pkg_aox_util.fn_client_ip,
+                pi_max_attempts => pkg_aox_util.fn_param_number('RATE_LIMIT_LOGIN_IP_MAX', 30),
+                pi_window_sec   => pkg_aox_util.fn_param_number('RATE_LIMIT_LOGIN_IP_WINDOW_SEC', 900)
             );
         exception
             when others then
