@@ -356,10 +356,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                    a.refund_alias,
                    a.refund_alias_submitted_at,
                    NVL(a.refund_requested_at, NVL(pt.receipt_uploaded_at, pt.created_at)) AS sort_ts,
-                   (SELECT COUNT(*)
-                      FROM org_refund_claim c
-                     WHERE c.app_id_appointment = a.id_appointment
-                       AND c.claim_status = 'OPEN') AS open_claims
+                   NVL(claim_agg.open_claims, 0) AS open_claims
               FROM payment_transaction pt
               JOIN appointment a ON a.id_appointment = pt.app_id_appointment
               JOIN customer c ON c.id_customer = a.cus_id_customer
@@ -367,6 +364,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
               JOIN professional p ON p.id_professional = a.pro_id_professional
               JOIN app_user u ON u.id_user = p.usr_id_user
               JOIN location l ON l.id_location = a.loc_id_location
+              LEFT JOIN (
+                  SELECT orc.app_id_appointment,
+                         COUNT(*) AS open_claims
+                    FROM org_refund_claim orc
+                   WHERE orc.claim_status = 'OPEN'
+                   GROUP BY orc.app_id_appointment
+              ) claim_agg ON claim_agg.app_id_appointment = a.id_appointment
              WHERE pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
                AND (

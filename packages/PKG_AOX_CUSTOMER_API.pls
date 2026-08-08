@@ -221,25 +221,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                 c.full_name,
                 c.phone_number,
                 c.created_at,
-                (
-                    SELECT COUNT(*)
-                      FROM appointment a
-                     WHERE a.cus_id_customer = c.id_customer
-                       AND a.org_id_organization = c.org_id_organization
-                       AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
-                       AND a.status IN ('CONFIRMADO', 'COMPLETADO')
-                       AND a.start_time < CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP)
-                ) AS appointment_count,
-                (
-                    SELECT MAX(a.start_time)
-                      FROM appointment a
-                     WHERE a.cus_id_customer = c.id_customer
-                       AND a.org_id_organization = c.org_id_organization
-                       AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
-                       AND a.status IN ('CONFIRMADO', 'COMPLETADO')
-                       AND a.start_time < CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP)
-                ) AS last_appointment_at
+                NVL(agg.appointment_count, 0) AS appointment_count,
+                agg.last_appointment_at
             FROM customer c
+            LEFT JOIN (
+                SELECT a.cus_id_customer,
+                       a.org_id_organization,
+                       COUNT(*) AS appointment_count,
+                       MAX(a.start_time) AS last_appointment_at
+                  FROM appointment a
+                 WHERE a.org_id_organization = v_org_id
+                   AND a.status IN ('CONFIRMADO', 'COMPLETADO')
+                   AND a.start_time < CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP)
+                   AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
+                 GROUP BY a.cus_id_customer, a.org_id_organization
+            ) agg
+              ON agg.cus_id_customer = c.id_customer
+             AND agg.org_id_organization = c.org_id_organization
             WHERE c.org_id_organization = v_org_id
               AND (v_effective_pro_id IS NULL OR EXISTS (
                     SELECT 1
