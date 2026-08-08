@@ -197,7 +197,8 @@ CREATE OR REPLACE package pkg_aox_util as
     /** Minutos entre slots publicos segun workspace (default 30). */
     function fn_get_org_booking_slot_minutes (
         pi_org_id in number
-    ) return number;
+    ) return number
+    result_cache;
 
     /** Horas antes del turno para enviar recordatorio (default 24). */
     function fn_get_org_reminder_hours (
@@ -1417,7 +1418,8 @@ CREATE OR REPLACE package body pkg_aox_util as
 
     function fn_get_org_booking_slot_minutes (
         pi_org_id in number
-    ) return number is
+    ) return number
+    result_cache is
         v_minutes number;
     begin
         if nvl(pi_org_id, 0) <= 0 then

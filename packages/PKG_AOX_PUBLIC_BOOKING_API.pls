@@ -239,18 +239,34 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         pi_target_date      IN DATE,
         pi_exclude_app_id   IN NUMBER DEFAULT NULL
     ) RETURN t_slot_tab PIPELINED IS
+        -- Rangos de citas del pro ese día (precargados en memoria, fuera del loop de slots).
+        TYPE t_time_range IS RECORD (
+            start_time appointment.start_time%TYPE,
+            end_time   appointment.end_time%TYPE
+        );
+        TYPE t_time_range_tab IS TABLE OF t_time_range;
+
+        -- Cierres parciales de la sucursal ese día (formato HH24:MI, igual que location_closure).
+        TYPE t_closure_range IS RECORD (
+            start_hm location_closure.start_time%TYPE,
+            end_hm   location_closure.end_time%TYPE
+        );
+        TYPE t_closure_range_tab IS TABLE OF t_closure_range;
+
         v_day_of_week       NUMBER;
         v_service_duration  NUMBER;
         v_work_start        TIMESTAMP;
         v_work_end          TIMESTAMP;
         v_current_slot      TIMESTAMP;
         v_slot_end          TIMESTAMP;
-        v_overlap_count     NUMBER;
+        v_has_overlap       BOOLEAN;
         v_step_minutes      NUMBER;
         v_org_id            NUMBER;
         v_now               TIMESTAMP := CURRENT_TIMESTAMP;
         v_exception_type    VARCHAR2(20);
         v_target_trunc      DATE := TRUNC(pi_target_date);
+        v_appointments      t_time_range_tab;
+        v_partial_closures  t_closure_range_tab;
     BEGIN
         BEGIN
             SELECT p.org_id_organization
@@ -290,6 +306,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
 
         v_day_of_week := v_target_trunc - TRUNC(v_target_trunc, 'IW') + 1;
 
+        -- Precarga set-based (1 query cada una, no por slot candidato): citas vigentes
+        -- del profesional ese día y cierres parciales de la sucursal ese día.
+        SELECT start_time, end_time
+          BULK COLLECT INTO v_appointments
+          FROM appointment
+         WHERE pro_id_professional = pi_pro_id
+           AND TRUNC(start_time)   = v_target_trunc
+           AND status             != 'CANCELADO'
+           AND (pi_exclude_app_id IS NULL OR id_appointment <> pi_exclude_app_id);
+
+        SELECT start_time, end_time
+          BULK COLLECT INTO v_partial_closures
+          FROM location_closure
+         WHERE loc_id_location = pi_loc_id
+           AND is_full_day     = 0
+           AND v_target_trunc BETWEEN start_date AND end_date;
+
         -- 2. Bloques: excepcion OVERRIDE o plantilla semanal
         FOR rec IN (
             SELECT s.start_time, s.end_time
@@ -319,41 +352,33 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 -- AJUSTE DE ORO 2: No ofrecer turnos en el pasado si es hoy
                 IF v_current_slot > v_now OR TRUNC(pi_target_date) > TRUNC(v_now) THEN
 
-                    -- AJUSTE DE ORO 1: Validación simplificada
-                    SELECT
-                      COUNT(*)
-                    INTO
-                      v_overlap_count
-                    FROM appointment
-                    WHERE pro_id_professional = pi_pro_id
-                      AND TRUNC(start_time)   = TRUNC(pi_target_date)
-                      AND status             != 'CANCELADO'
-                      AND (pi_exclude_app_id IS NULL OR id_appointment <> pi_exclude_app_id)
-                      AND (v_current_slot < end_time AND v_slot_end > start_time);
+                    -- AJUSTE DE ORO 1: chequeo de solapamiento en memoria (sin ir a la base por slot)
+                    v_has_overlap := FALSE;
+                    FOR i IN 1 .. v_appointments.COUNT LOOP
+                        IF v_current_slot < v_appointments(i).end_time
+                           AND v_slot_end   > v_appointments(i).start_time THEN
+                            v_has_overlap := TRUE;
+                            EXIT;
+                        END IF;
+                    END LOOP;
 
-                    -- Filtrar cierres parciales de la sucursal.
-                    IF v_overlap_count = 0 THEN
+                    -- Filtrar cierres parciales de la sucursal (en memoria).
+                    IF NOT v_has_overlap THEN
                         DECLARE
-                            v_partial_hit   NUMBER;
                             v_slot_start_hm VARCHAR2(5) := TO_CHAR(v_current_slot, 'HH24:MI');
                             v_slot_end_hm   VARCHAR2(5) := TO_CHAR(v_slot_end,     'HH24:MI');
                         BEGIN
-                            SELECT COUNT(*)
-                              INTO v_partial_hit
-                              FROM location_closure c
-                             WHERE c.loc_id_location = pi_loc_id
-                               AND c.is_full_day     = 0
-                               AND v_target_trunc BETWEEN c.start_date AND c.end_date
-                               AND v_slot_start_hm < c.end_time
-                               AND v_slot_end_hm   > c.start_time
-                               AND ROWNUM = 1;
-                            IF v_partial_hit > 0 THEN
-                                v_overlap_count := 1;
-                            END IF;
+                            FOR i IN 1 .. v_partial_closures.COUNT LOOP
+                                IF v_slot_start_hm < v_partial_closures(i).end_hm
+                                   AND v_slot_end_hm > v_partial_closures(i).start_hm THEN
+                                    v_has_overlap := TRUE;
+                                    EXIT;
+                                END IF;
+                            END LOOP;
                         END;
                     END IF;
 
-                    IF v_overlap_count = 0 THEN
+                    IF NOT v_has_overlap THEN
                         PIPE ROW(t_slot_rec(TO_CHAR(v_current_slot, 'HH24:MI')));
                     END IF;
 
