@@ -20,8 +20,8 @@ CREATE OR REPLACE PACKAGE pkg_aox_location_closure_api IS
         po_response_body OUT CLOB
     );
 
-    -- Crear cierre para una sucursal (opcion apply_all_locations para replicar).
-    -- Si pi_location_id es NULL, se exige apply_all_locations = 1.
+    -- Crear cierre: una sucursal, location_ids[], o apply_all_locations=1 (todas activas).
+    -- Si pi_location_id es NULL sin location_ids, se exige apply_all_locations = 1.
     PROCEDURE pr_create_closure(
         pi_auth_header   IN  VARCHAR2,
         pi_location_id   IN  NUMBER,
@@ -136,7 +136,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
                 c.is_full_day,
                 c.start_time,
                 c.end_time,
-                c.closure_group_id
+                c.closure_group_id,
+                CASE
+                    WHEN c.closure_group_id IS NULL THEN 1
+                    ELSE (
+                        SELECT COUNT(*)
+                          FROM location_closure g
+                         WHERE g.org_id_organization = c.org_id_organization
+                           AND g.closure_group_id = c.closure_group_id
+                    )
+                END AS location_count
             FROM location_closure c
             WHERE c.org_id_organization = v_org_id
               AND c.loc_id_location     = pi_location_id
@@ -153,6 +162,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
             v_item.put('is_full_day', rec.is_full_day);
             v_item.put('start_time', rec.start_time);
             v_item.put('end_time',   rec.end_time);
+            v_item.put('location_count', rec.location_count);
             IF rec.closure_group_id IS NULL THEN
                 v_item.put_null('closure_group_id');
                 v_item.put('scope', 'LOCATION');
@@ -281,6 +291,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         v_group_id       RAW(16);
         v_inserted_ids   json_array_t := json_array_t();
         v_new_id         NUMBER;
+        v_loc_ids_arr    json_array_t;
+        v_loc_id         NUMBER;
+        v_loc_count      NUMBER := 0;
+        v_seen           json_object_t := json_object_t();
+        v_key            VARCHAR2(40);
+        v_active_count   NUMBER;
     BEGIN
         pr_assert_manager(pi_auth_header);
         v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
@@ -339,11 +355,84 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
             RAISE_APPLICATION_ERROR(-20002, 'apply_all_locations debe ser 0 o 1.');
         END IF;
 
-        IF v_apply_all = 0 AND pi_location_id IS NULL THEN
-            RAISE_APPLICATION_ERROR(-20002, 'Debés indicar una sucursal o marcar "Aplicar a todas".');
-        END IF;
+        -- location_ids[] opcional (subset de sucursales)
+        IF v_apply_all = 0 AND v_json_req.has('location_ids') AND v_json_req.get('location_ids').is_array THEN
+            v_loc_ids_arr := TREAT(v_json_req.get('location_ids') AS json_array_t);
+            FOR i IN 0 .. v_loc_ids_arr.get_size() - 1 LOOP
+                BEGIN
+                    v_loc_id := v_loc_ids_arr.get_number(i);
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        RAISE_APPLICATION_ERROR(-20002, 'location_ids contiene un valor inválido.');
+                END;
+                IF v_loc_id IS NULL OR v_loc_id <= 0 THEN
+                    CONTINUE;
+                END IF;
+                v_key := TO_CHAR(v_loc_id);
+                IF v_seen.has(v_key) THEN
+                    CONTINUE;
+                END IF;
+                v_seen.put(v_key, 1);
 
-        IF v_apply_all = 0 THEN
+                pr_assert_location_in_org(v_loc_id, v_org_id);
+                SELECT COUNT(*)
+                  INTO v_active_count
+                  FROM location
+                 WHERE id_location = v_loc_id
+                   AND org_id_organization = v_org_id
+                   AND is_active = 1;
+                IF v_active_count = 0 THEN
+                    RAISE_APPLICATION_ERROR(-20002, 'La sucursal ' || v_loc_id || ' no está activa.');
+                END IF;
+
+                v_loc_count := v_loc_count + 1;
+            END LOOP;
+
+            IF v_loc_count = 0 THEN
+                RAISE_APPLICATION_ERROR(-20002, 'Seleccioná al menos una sucursal.');
+            END IF;
+
+            IF v_loc_count > 1 THEN
+                v_group_id := SYS_GUID();
+            END IF;
+
+            FOR i IN 0 .. v_loc_ids_arr.get_size() - 1 LOOP
+                BEGIN
+                    v_loc_id := v_loc_ids_arr.get_number(i);
+                EXCEPTION
+                    WHEN OTHERS THEN CONTINUE;
+                END;
+                IF v_loc_id IS NULL OR v_loc_id <= 0 THEN
+                    CONTINUE;
+                END IF;
+                -- Insertar una sola vez por id (ya dedupeado en v_seen; re-validamos con flag)
+                v_key := TO_CHAR(v_loc_id);
+                IF NOT v_seen.has(v_key) THEN
+                    CONTINUE;
+                END IF;
+                -- Marcar como insertado para no duplicar
+                IF v_seen.get_number(v_key) = 2 THEN
+                    CONTINUE;
+                END IF;
+                v_seen.put(v_key, 2);
+
+                INSERT INTO location_closure (
+                    org_id_organization, loc_id_location, name,
+                    start_date, end_date, is_full_day, start_time, end_time,
+                    closure_group_id, created_by
+                ) VALUES (
+                    v_org_id, v_loc_id, v_name,
+                    v_start_date, v_end_date, v_is_full_day, v_start_time, v_end_time,
+                    v_group_id, v_user_id
+                ) RETURNING id_location_closure INTO v_new_id;
+
+                v_inserted_ids.append(v_new_id);
+            END LOOP;
+
+        ELSIF v_apply_all = 0 THEN
+            IF pi_location_id IS NULL THEN
+                RAISE_APPLICATION_ERROR(-20002, 'Debés indicar una sucursal, location_ids o marcar "Aplicar a todas".');
+            END IF;
             pr_assert_location_in_org(pi_location_id, v_org_id);
             INSERT INTO location_closure (
                 org_id_organization, loc_id_location, name,
@@ -478,3 +567,4 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
 
 END pkg_aox_location_closure_api;
 /
+

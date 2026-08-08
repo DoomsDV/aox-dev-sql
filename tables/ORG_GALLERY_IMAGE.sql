@@ -5,6 +5,7 @@ CREATE TABLE org_gallery_image (
   image_url           VARCHAR2(1000)              NOT NULL,
   filename            VARCHAR2(255)               NULL,
   mime_type           VARCHAR2(150)               NULL,
+  size_bytes          NUMBER                      DEFAULT 0 NOT NULL,
   sort_order          NUMBER                      DEFAULT 1 NOT NULL,
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 )

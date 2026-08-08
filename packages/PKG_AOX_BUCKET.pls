@@ -142,6 +142,11 @@ CREATE OR REPLACE package pkg_aox_bucket AS
     function fn_download_atc_kb_document(
         pi_storage_url in varchar2
     ) return blob;
+
+    /** Recalcula storage_used_bytes (logo/banner/galeria/pros/servicios/historial/comprobantes). */
+    procedure pr_recalculate_org_storage(
+        pi_org_id in organization.id_organization%type
+    );
 end;
 /
 
@@ -219,6 +224,79 @@ CREATE OR REPLACE package body pkg_aox_bucket as
             || pi_file_name;
     end fn_build_org_asset_url;
 
+    function fn_remote_object_bytes(pi_url in varchar2) return number is
+        v_blob blob;
+    begin
+        if pi_url is null then
+            return 0;
+        end if;
+
+        apex_web_service.g_request_headers.delete;
+        begin
+            v_blob := apex_web_service.make_rest_request_b(
+                p_url                  => pi_url,
+                p_http_method          => 'GET',
+                p_credential_static_id => g_credential
+            );
+        exception
+            when others then
+                return 0;
+        end;
+
+        if apex_web_service.g_status_code not between 200 and 299 then
+            return 0;
+        end if;
+
+        return nvl(dbms_lob.getlength(v_blob), 0);
+    end fn_remote_object_bytes;
+
+    procedure pr_adjust_storage_used(
+        pi_org_id     in organization.id_organization%type,
+        pi_delta_bytes in number
+    ) is
+    begin
+        if nvl(pi_org_id, 0) <= 0 or nvl(pi_delta_bytes, 0) = 0 then
+            return;
+        end if;
+
+        update org_subscription
+           set storage_used_bytes = greatest(nvl(storage_used_bytes, 0) + pi_delta_bytes, 0),
+               updated_at         = current_timestamp
+         where org_id_organization = pi_org_id;
+    end pr_adjust_storage_used;
+
+    procedure pr_assert_storage_room(
+        pi_org_id      in organization.id_organization%type,
+        pi_needed_bytes in number
+    ) is
+        v_used_bytes  number;
+        v_limit_bytes number;
+    begin
+        if nvl(pi_needed_bytes, 0) <= 0 then
+            return;
+        end if;
+
+        v_limit_bytes := pkg_aox_subscription_api.fn_get_storage_limit_bytes(pi_org_id);
+
+        begin
+            select nvl(storage_used_bytes, 0)
+              into v_used_bytes
+              from org_subscription
+             where org_id_organization = pi_org_id;
+        exception
+            when no_data_found then
+                v_used_bytes := 0;
+        end;
+
+        if v_used_bytes + pi_needed_bytes > v_limit_bytes then
+            raise_application_error(
+                pkg_aox_util.c_sqlcode_forbidden,
+                'Superaste el limite de almacenamiento de tu plan. ' ||
+                'Liberá espacio o contratá un paquete de storage adicional.'
+            );
+        end if;
+    end pr_assert_storage_room;
+
     -- NUEVA VERSIÓN: Implementación directa con BLOB
     procedure pr_upload_profile_image(
         pi_blob            in blob,
@@ -231,9 +309,17 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         v_id_organization  organization.id_organization%type;
         v_response         clob;
         v_status_code      number;
+        v_size_bytes       number;
     begin
         v_id_organization := fn_get_professional_org_id(pi_id_professional, pi_id_organization);
+
+        if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
+            raise_application_error(-20002, 'La imagen de perfil esta vacia.');
+        end if;
+
+        v_size_bytes := dbms_lob.getlength(pi_blob);
         pr_delete_profile_image(pi_id_professional);
+        pr_assert_storage_room(v_id_organization, v_size_bytes);
 
         -- Limpiamos fotos anteriores en la BD
         delete from professional_image
@@ -272,8 +358,11 @@ CREATE OR REPLACE package body pkg_aox_bucket as
 
         -- Actualizamos la tabla principal
         UPDATE professional
-        SET profile_image_url = g_url
+        SET profile_image_url = g_url,
+            profile_image_size_bytes = v_size_bytes
         WHERE id_professional = pi_id_professional;
+
+        pr_adjust_storage_used(v_id_organization, v_size_bytes);
     end;
 
     procedure pr_upload_profile_image(
@@ -356,13 +445,17 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         pi_id_professional in professional_image.pro_id_professional%type
     ) is
         v_saved_url     varchar2(4000);
+        v_size_bytes    number := 0;
+        v_org_id        number;
         v_response      clob;
         v_status_code   number;
     begin
         -- 1. Buscamos la URL completa que ya está guardada en la tabla principal
         begin
-            select profile_image_url
-            into v_saved_url
+            select profile_image_url,
+                   nvl(profile_image_size_bytes, 0),
+                   org_id_organization
+            into v_saved_url, v_size_bytes, v_org_id
             from professional
             where id_professional = pi_id_professional;
         exception
@@ -372,6 +465,10 @@ CREATE OR REPLACE package body pkg_aox_bucket as
 
         -- 2. Si tiene una URL asignada, disparamos el DELETE directo a OCI
         if v_saved_url is not null then
+            if v_size_bytes <= 0 then
+                v_size_bytes := fn_remote_object_bytes(v_saved_url);
+            end if;
+
             -- Limpiamos headers por las dudas
             apex_web_service.g_request_headers.delete;
 
@@ -389,6 +486,8 @@ CREATE OR REPLACE package body pkg_aox_bucket as
             if v_status_code not in (200, 204, 404) then
                 raise_application_error(-20998, 'Código HTTP al eliminar en OCI: ' || v_status_code);
             end if;
+
+            pr_adjust_storage_used(v_org_id, -v_size_bytes);
         end if;
 
         -- 3. Limpiamos las tablas locales
@@ -397,7 +496,8 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         where pro_id_professional = pi_id_professional;
 
         update professional
-        set profile_image_url = null
+        set profile_image_url = null,
+            profile_image_size_bytes = 0
         where id_professional = pi_id_professional;
 
         commit;
@@ -413,9 +513,16 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         v_response      clob;
         v_status_code   number;
         v_org_url       varchar2(3000);
+        v_size_bytes    number;
     begin
-        -- 1. Borramos el logo anterior si es que existe en OCI
+        if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
+            raise_application_error(-20002, 'El logo esta vacio.');
+        end if;
+
+        v_size_bytes := dbms_lob.getlength(pi_blob);
+        -- Liberar logo anterior antes de validar espacio para el nuevo.
         pr_delete_org_logo(pi_id_organization);
+        pr_assert_storage_room(pi_id_organization, v_size_bytes);
 
         -- 2. Armamos nombre único
         v_file_name := TO_CHAR(CURRENT_DATE, 'YYYYMMDD_HH24MISS') || '_logo_' || fn_safe_file_name(pi_filename);
@@ -444,9 +551,11 @@ CREATE OR REPLACE package body pkg_aox_bucket as
 
         -- 6. Actualizamos directamente el logo en la tabla organization
         UPDATE workspace_setting
-        SET logo_url          = v_org_url
+        SET logo_url          = v_org_url,
+            logo_size_bytes   = v_size_bytes
         WHERE org_id_organization = pi_id_organization;
 
+        pr_adjust_storage_used(pi_id_organization, v_size_bytes);
     end pr_upload_org_logo;
 
     -- 2. PROCEDIMIENTO PARA BORRAR LOGO
@@ -454,13 +563,14 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         pi_id_organization in organization.id_organization%type
     ) is
         v_saved_url     varchar2(4000);
+        v_size_bytes    number := 0;
         v_response      clob;
         v_status_code   number;
     begin
         -- 1. Buscamos la URL directa en la base de datos
         begin
-            select logo_url
-            into v_saved_url
+            select logo_url, nvl(logo_size_bytes, 0)
+            into v_saved_url, v_size_bytes
             from workspace_setting
             where org_id_organization = pi_id_organization;
         exception
@@ -469,6 +579,10 @@ CREATE OR REPLACE package body pkg_aox_bucket as
 
         -- 2. Si la clínica ya tenía un logo, lo borramos del bucket
         if v_saved_url is not null then
+            if v_size_bytes <= 0 then
+                v_size_bytes := fn_remote_object_bytes(v_saved_url);
+            end if;
+
             apex_web_service.g_request_headers.delete;
 
             v_response := apex_web_service.make_rest_request(
@@ -483,13 +597,16 @@ CREATE OR REPLACE package body pkg_aox_bucket as
             if v_status_code not in (200, 204, 404) then
                 raise_application_error(-20998, 'Código HTTP al eliminar logo en OCI: ' || v_status_code);
             end if;
+
+            pr_adjust_storage_used(pi_id_organization, -v_size_bytes);
         end if;
 
         -- 3. Limpiamos la URL de la base de datos local
         update workspace_setting
         set logo_url              = null,
             logo_filename         = null,
-            logo_mime_type        = null
+            logo_mime_type        = null,
+            logo_size_bytes       = 0
         where org_id_organization = pi_id_organization;
 
     end pr_delete_org_logo;
@@ -504,8 +621,15 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         v_response    clob;
         v_status_code number;
         v_org_url     varchar2(3000);
+        v_size_bytes  number;
     begin
+        if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
+            raise_application_error(-20002, 'El banner esta vacio.');
+        end if;
+
+        v_size_bytes := dbms_lob.getlength(pi_blob);
         pr_delete_org_banner(pi_id_organization);
+        pr_assert_storage_room(pi_id_organization, v_size_bytes);
 
         v_file_name := TO_CHAR(CURRENT_DATE, 'YYYYMMDD_HH24MISS') || '_banner_' || fn_safe_file_name(pi_filename);
         v_org_url := fn_build_org_asset_url(pi_id_organization, c_banners_dir, v_file_name);
@@ -522,26 +646,29 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         );
 
         v_status_code := apex_web_service.g_status_code;
-
         if v_status_code not between 200 and 299 then
             raise_application_error(-20001, 'Error al subir banner de la empresa a OCI. HTTP: ' || v_status_code);
         end if;
 
         update workspace_setting
-           set banner_url = v_org_url
+           set banner_url = v_org_url,
+               banner_size_bytes = v_size_bytes
          where org_id_organization = pi_id_organization;
+
+        pr_adjust_storage_used(pi_id_organization, v_size_bytes);
     end pr_upload_org_banner;
 
     procedure pr_delete_org_banner(
         pi_id_organization in organization.id_organization%type
     ) is
         v_saved_url   varchar2(4000);
+        v_size_bytes  number := 0;
         v_response    clob;
         v_status_code number;
     begin
         begin
-            select banner_url
-              into v_saved_url
+            select banner_url, nvl(banner_size_bytes, 0)
+              into v_saved_url, v_size_bytes
               from workspace_setting
              where org_id_organization = pi_id_organization;
         exception
@@ -550,6 +677,10 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         end;
 
         if v_saved_url is not null then
+            if v_size_bytes <= 0 then
+                v_size_bytes := fn_remote_object_bytes(v_saved_url);
+            end if;
+
             apex_web_service.g_request_headers.delete;
             v_response := apex_web_service.make_rest_request(
                 p_url                  => v_saved_url,
@@ -560,12 +691,15 @@ CREATE OR REPLACE package body pkg_aox_bucket as
             if v_status_code not in (200, 204, 404) then
                 raise_application_error(-20998, 'Codigo HTTP al eliminar banner en OCI: ' || v_status_code);
             end if;
+
+            pr_adjust_storage_used(pi_id_organization, -v_size_bytes);
         end if;
 
         update workspace_setting
            set banner_url = null,
                banner_filename = null,
-               banner_mime_type = null
+               banner_mime_type = null,
+               banner_size_bytes = 0
          where org_id_organization = pi_id_organization;
     end pr_delete_org_banner;
 
@@ -584,7 +718,15 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         v_org_url     varchar2(3000);
         v_sort_order  number;
         v_count       number;
+        v_size_bytes  number;
     begin
+        if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
+            raise_application_error(-20002, 'La imagen de galeria esta vacia.');
+        end if;
+
+        v_size_bytes := dbms_lob.getlength(pi_blob);
+        pr_assert_storage_room(pi_id_organization, v_size_bytes);
+
         select count(*)
           into v_count
           from org_gallery_image
@@ -622,16 +764,19 @@ CREATE OR REPLACE package body pkg_aox_bucket as
             image_url,
             filename,
             mime_type,
-            sort_order
+            sort_order,
+            size_bytes
         ) values (
             pi_id_organization,
             v_org_url,
             nvl(pi_filename, v_file_name),
             pi_mime_type,
-            v_sort_order
+            v_sort_order,
+            v_size_bytes
         )
         returning id_gallery_image into po_gallery_id;
 
+        pr_adjust_storage_used(pi_id_organization, v_size_bytes);
         po_url := v_org_url;
     end pr_upload_org_gallery_image;
 
@@ -640,12 +785,13 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         pi_gallery_id      in org_gallery_image.id_gallery_image%type
     ) is
         v_saved_url   varchar2(4000);
+        v_size_bytes  number := 0;
         v_response    clob;
         v_status_code number;
     begin
         begin
-            select image_url
-              into v_saved_url
+            select image_url, nvl(size_bytes, 0)
+              into v_saved_url, v_size_bytes
               from org_gallery_image
              where id_gallery_image = pi_gallery_id
                and org_id_organization = pi_id_organization;
@@ -655,6 +801,10 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         end;
 
         if v_saved_url is not null then
+            if v_size_bytes <= 0 then
+                v_size_bytes := fn_remote_object_bytes(v_saved_url);
+            end if;
+
             apex_web_service.g_request_headers.delete;
             v_response := apex_web_service.make_rest_request(
                 p_url                  => v_saved_url,
@@ -665,6 +815,8 @@ CREATE OR REPLACE package body pkg_aox_bucket as
             if v_status_code not in (200, 204, 404) then
                 raise_application_error(-20998, 'Codigo HTTP al eliminar imagen de galeria en OCI: ' || v_status_code);
             end if;
+
+            pr_adjust_storage_used(pi_id_organization, -v_size_bytes);
         end if;
 
         delete from org_gallery_image
@@ -685,6 +837,7 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         v_status_code number;
         v_org_url     varchar2(3000);
         v_exists      number;
+        v_size_bytes  number;
     begin
         select count(*)
           into v_exists
@@ -699,6 +852,12 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
             raise_application_error(-20002, 'La imagen de portada esta vacia.');
         end if;
+
+        v_size_bytes := dbms_lob.getlength(pi_blob);
+
+        -- Liberamos la portada anterior antes de validar espacio para la nueva.
+        pr_clear_service_image(pi_id_organization, pi_id_service);
+        pr_assert_storage_room(pi_id_organization, v_size_bytes);
 
         v_file_name := TO_CHAR(CURRENT_DATE, 'YYYYMMDD_HH24MISS')
                     || '_svc_'
@@ -730,10 +889,12 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         end if;
 
         update service
-           set image_url = v_org_url
+           set image_url = v_org_url,
+               image_size_bytes = v_size_bytes
          where id_service = pi_id_service
            and org_id_organization = pi_id_organization;
 
+        pr_adjust_storage_used(pi_id_organization, v_size_bytes);
         po_url := v_org_url;
     end pr_upload_service_image;
 
@@ -742,12 +903,13 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         pi_id_service      in service.id_service%type
     ) is
         v_saved_url   varchar2(4000);
+        v_size_bytes  number := 0;
         v_response    clob;
         v_status_code number;
     begin
         begin
-            select image_url
-              into v_saved_url
+            select image_url, nvl(image_size_bytes, 0)
+              into v_saved_url, v_size_bytes
               from service
              where id_service = pi_id_service
                and org_id_organization = pi_id_organization;
@@ -757,6 +919,10 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         end;
 
         if v_saved_url is not null then
+            if v_size_bytes <= 0 then
+                v_size_bytes := fn_remote_object_bytes(v_saved_url);
+            end if;
+
             begin
                 apex_web_service.g_request_headers.delete;
                 v_response := apex_web_service.make_rest_request(
@@ -772,10 +938,13 @@ CREATE OR REPLACE package body pkg_aox_bucket as
                 when others then
                     null;
             end;
+
+            pr_adjust_storage_used(pi_id_organization, -v_size_bytes);
         end if;
 
         update service
-           set image_url = null
+           set image_url = null,
+               image_size_bytes = 0
          where id_service = pi_id_service
            and org_id_organization = pi_id_organization;
     end pr_clear_service_image;
@@ -1040,6 +1209,9 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         v_response     clob;
         v_status_code  number;
         v_mime         varchar2(150);
+        v_size_bytes   number;
+        v_old_size     number := 0;
+        v_old_url      varchar2(1000);
     begin
         if nvl(pi_org_id, 0) <= 0 or nvl(pi_customer_id, 0) <= 0 or nvl(pi_receipt_id, 0) <= 0 then
             raise_application_error(-20002, 'Parametros de comprobante invalidos.');
@@ -1048,6 +1220,29 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
             raise_application_error(-20002, 'El comprobante esta vacio.');
         end if;
+
+        v_size_bytes := dbms_lob.getlength(pi_blob);
+
+        begin
+            select receipt_url, nvl(receipt_size_bytes, 0)
+              into v_old_url, v_old_size
+              from payment_transaction
+             where id_transaction = pi_receipt_id
+               and org_id_organization = pi_org_id;
+        exception
+            when no_data_found then
+                v_old_url := null;
+                v_old_size := 0;
+        end;
+
+        if v_old_url is not null then
+            if v_old_size <= 0 then
+                v_old_size := fn_remote_object_bytes(v_old_url);
+            end if;
+            pr_adjust_storage_used(pi_org_id, -v_old_size);
+        end if;
+
+        pr_assert_storage_room(pi_org_id, v_size_bytes);
 
         v_mime := lower(nvl(trim(pi_mime_type), 'application/octet-stream'));
         v_safe_name := fn_safe_file_name(nvl(pi_filename, 'comprobante'));
@@ -1097,8 +1292,18 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         v_status_code := apex_web_service.g_status_code;
 
         if v_status_code not between 200 and 299 then
+            if v_old_url is not null and v_old_size > 0 then
+                pr_adjust_storage_used(pi_org_id, v_old_size);
+            end if;
             raise_application_error(-20001, 'Error al subir el comprobante a OCI. Codigo HTTP: ' || v_status_code);
         end if;
+
+        update payment_transaction
+           set receipt_size_bytes = v_size_bytes
+         where id_transaction = pi_receipt_id
+           and org_id_organization = pi_org_id;
+
+        pr_adjust_storage_used(pi_org_id, v_size_bytes);
 
         po_url := v_url;
         po_object_key := v_object_key;
@@ -1288,6 +1493,131 @@ CREATE OR REPLACE package body pkg_aox_bucket as
 
         return v_blob;
     end fn_download_atc_kb_document;
+
+    procedure pr_recalculate_org_storage(
+        pi_org_id in organization.id_organization%type
+    ) is
+        v_total number := 0;
+        v_size  number;
+        v_url   varchar2(4000);
+    begin
+        -- Adjuntos de citas (ya tienen size_bytes).
+        select nvl(sum(nvl(size_bytes, 0)), 0)
+          into v_size
+          from appointment_attachment
+         where org_id_organization = pi_org_id;
+        v_total := v_total + v_size;
+
+        -- Logo / banner
+        begin
+            select logo_url, nvl(logo_size_bytes, 0)
+              into v_url, v_size
+              from workspace_setting
+             where org_id_organization = pi_org_id;
+
+            if v_url is not null then
+                if v_size <= 0 then
+                    v_size := fn_remote_object_bytes(v_url);
+                    update workspace_setting
+                       set logo_size_bytes = v_size
+                     where org_id_organization = pi_org_id;
+                end if;
+                v_total := v_total + nvl(v_size, 0);
+            end if;
+
+            select banner_url, nvl(banner_size_bytes, 0)
+              into v_url, v_size
+              from workspace_setting
+             where org_id_organization = pi_org_id;
+
+            if v_url is not null then
+                if v_size <= 0 then
+                    v_size := fn_remote_object_bytes(v_url);
+                    update workspace_setting
+                       set banner_size_bytes = v_size
+                     where org_id_organization = pi_org_id;
+                end if;
+                v_total := v_total + nvl(v_size, 0);
+            end if;
+        exception
+            when no_data_found then
+                null;
+        end;
+
+        -- Galeria
+        for rec in (
+            select id_gallery_image, image_url, nvl(size_bytes, 0) as size_bytes
+              from org_gallery_image
+             where org_id_organization = pi_org_id
+        ) loop
+            v_size := rec.size_bytes;
+            if v_size <= 0 and rec.image_url is not null then
+                v_size := fn_remote_object_bytes(rec.image_url);
+                update org_gallery_image
+                   set size_bytes = v_size
+                 where id_gallery_image = rec.id_gallery_image;
+            end if;
+            v_total := v_total + nvl(v_size, 0);
+        end loop;
+
+        -- Fotos de profesionales
+        for rec in (
+            select id_professional, profile_image_url, nvl(profile_image_size_bytes, 0) as size_bytes
+              from professional
+             where org_id_organization = pi_org_id
+               and profile_image_url is not null
+        ) loop
+            v_size := rec.size_bytes;
+            if v_size <= 0 then
+                v_size := fn_remote_object_bytes(rec.profile_image_url);
+                update professional
+                   set profile_image_size_bytes = v_size
+                 where id_professional = rec.id_professional;
+            end if;
+            v_total := v_total + nvl(v_size, 0);
+        end loop;
+
+        -- Portadas de servicios
+        for rec in (
+            select id_service, image_url, nvl(image_size_bytes, 0) as size_bytes
+              from service
+             where org_id_organization = pi_org_id
+               and image_url is not null
+        ) loop
+            v_size := rec.size_bytes;
+            if v_size <= 0 then
+                v_size := fn_remote_object_bytes(rec.image_url);
+                update service
+                   set image_size_bytes = v_size
+                 where id_service = rec.id_service;
+            end if;
+            v_total := v_total + nvl(v_size, 0);
+        end loop;
+
+        -- Comprobantes SIPAP (imagen/PDF)
+        for rec in (
+            select id_transaction, receipt_url, nvl(receipt_size_bytes, 0) as size_bytes
+              from payment_transaction
+             where org_id_organization = pi_org_id
+               and receipt_url is not null
+        ) loop
+            v_size := rec.size_bytes;
+            if v_size <= 0 then
+                v_size := fn_remote_object_bytes(rec.receipt_url);
+                update payment_transaction
+                   set receipt_size_bytes = v_size
+                 where id_transaction = rec.id_transaction;
+            end if;
+            v_total := v_total + nvl(v_size, 0);
+        end loop;
+
+        update org_subscription
+           set storage_used_bytes = v_total,
+               updated_at         = current_timestamp
+         where org_id_organization = pi_org_id;
+
+        commit;
+    end pr_recalculate_org_storage;
 
 end;
 /

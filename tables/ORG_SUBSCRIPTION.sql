@@ -105,7 +105,7 @@ COMMENT ON TABLE org_subscription IS 'Suscripcion vigente por organizacion (1:1)
 COMMENT ON COLUMN org_subscription.status IS 'TRIAL, ACTIVE, PAST_DUE (3d gracia), READ_ONLY (vencido), CANCELED, FOUNDER (early adopter).';
 COMMENT ON COLUMN org_subscription.billing_exempt IS 'Si es 1, la organizacion no se factura. Fundadores usan is_founder=1 con 50% permanente en checkout (no exencion total).';
 COMMENT ON COLUMN org_subscription.storage_limit_bytes IS 'Limite total = storage del plan + addons activos (Base 1 GB, Premium 5 GB).';
-COMMENT ON COLUMN org_subscription.storage_used_bytes IS 'Bytes ocupados por adjuntos. Se congela en downgrade a Base.';
+COMMENT ON COLUMN org_subscription.storage_used_bytes IS 'Bytes ocupados por assets de la org (logo, banner, galeria, fotos de profesionales/servicios, comprobantes SIPAP e historial de citas). Se congela en downgrade a Base.';
 COMMENT ON COLUMN org_subscription.grace_ends_at IS 'Fin de los 3 dias de gracia en PAST_DUE; luego pasa a READ_ONLY.';
 COMMENT ON COLUMN org_subscription.auto_renew IS 'Si es 1, el job de facturacion cobra automaticamente con la tarjeta catastrada al vencer el periodo.';
 COMMENT ON COLUMN org_subscription.last_charge_at IS 'Ultimo intento de debito recurrente disparado por el job / activacion.';

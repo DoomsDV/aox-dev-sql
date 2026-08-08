@@ -23,6 +23,7 @@ CREATE TABLE payment_transaction (
   receipt_object_key    VARCHAR2(500)               NULL,
   receipt_url           VARCHAR2(1000)              NULL,
   receipt_mime_type     VARCHAR2(150)               NULL,
+  receipt_size_bytes    NUMBER                      DEFAULT 0 NOT NULL,
   receipt_uploaded_at   TIMESTAMP(6) WITH TIME ZONE NULL,
   ocr_raw_json          CLOB                        NULL,
   ocr_reference         VARCHAR2(64)                NULL,
@@ -70,6 +71,10 @@ COMMENT ON COLUMN payment_transaction.receipt_object_key IS
 
 COMMENT ON COLUMN payment_transaction.receipt_url IS
   'URL del comprobante (pruebas: bucket publico). En prod usar PAR/proxy.';
+/
+
+COMMENT ON COLUMN payment_transaction.receipt_size_bytes IS
+  'Tamano del comprobante SIPAP (imagen/PDF) en bytes; suma a storage_used_bytes de la org.';
 /
 
 COMMENT ON COLUMN payment_transaction.ocr_status IS

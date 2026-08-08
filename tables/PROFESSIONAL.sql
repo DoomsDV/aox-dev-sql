@@ -5,6 +5,7 @@ CREATE TABLE professional (
   usr_id_user         NUMBER                      NOT NULL,
   profile_slug        VARCHAR2(100)               NULL,
   profile_image_url   VARCHAR2(255)               NULL,
+  profile_image_size_bytes NUMBER                 DEFAULT 0 NOT NULL,
   is_active           NUMBER(1,0)                 DEFAULT 1 NOT NULL,
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   spe_id_specialty    NUMBER                      NULL,
