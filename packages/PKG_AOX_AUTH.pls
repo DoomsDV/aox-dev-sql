@@ -41,16 +41,25 @@ CREATE OR REPLACE package body pkg_aox_auth as
     ) return boolean is
         v_stored_hash   varchar2(255);
         v_is_active     number;
+        v_password_salt       varchar2(64);
+        v_password_algo       varchar2(30);
+        v_password_iterations number;
     begin
         -- 1. Recuperación de credenciales y estado de cuenta
         -- Se utiliza UPPER para garantizar que el login sea insensible a mayúsculas/minúsculas.
         begin
             select
                 pu.password_hash,
-                pu.is_active
+                pu.is_active,
+                pu.password_salt,
+                pu.password_algo,
+                pu.password_iterations
             into
                 v_stored_hash,
-                v_is_active
+                v_is_active,
+                v_password_salt,
+                v_password_algo,
+                v_password_iterations
             from platform_user pu
             where pu.apex_user_name = upper(p_username);
         exception
@@ -64,15 +73,16 @@ CREATE OR REPLACE package body pkg_aox_auth as
             return false;
         end if;
 
-        -- 3. Validación de integridad de la contraseña
-        -- Se genera un hash de la contraseña recibida y se compara con el hash almacenado.
-        if v_stored_hash = pkg_aox_util.fn_hash_password(p_password) then
-            -- Autenticación exitosa.
-            return true;
-        else
-            -- Contraseña incorrecta.
-            return false;
-        end if;
+        -- 3. Validación de integridad de la contraseña. Soporta ambos algoritmos
+        -- (SHA256_LEGACY y PBKDF2_HMAC_SHA256_V1); la migración al nuevo algoritmo
+        -- ocurre en el login de la API (PKG_AOX_AUTH_API.pr_login_auth), no aquí.
+        return pkg_aox_util.fn_verify_password(
+            pi_password    => p_password,
+            pi_stored_hash => v_stored_hash,
+            pi_salt        => v_password_salt,
+            pi_algo        => v_password_algo,
+            pi_iterations  => v_password_iterations
+        );
 
     exception
         when others then

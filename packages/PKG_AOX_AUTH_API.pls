@@ -562,6 +562,8 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         v_org_slug          varchar2(200);
         v_verification_code varchar2(6);
         v_email_sent        number := 0;
+        v_password_salt     platform_user.password_salt%type;
+        v_password_iterations platform_user.password_iterations%type;
     begin
         -- Parsear el JSON entrante
         if pi_body is null or dbms_lob.getlength(pi_body) = 0 then
@@ -655,17 +657,27 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         end;
 
         -- Identidad global + membresía ADMIN (id_org_member = antiguo id_user para JWT/FKs)
+        -- Usuarios nuevos van directo a PBKDF2_HMAC_SHA256_V1 (sin pasar por SHA256_LEGACY).
+        v_password_salt       := pkg_aox_util.fn_generate_password_salt;
+        v_password_iterations := pkg_aox_util.fn_param_number('PASSWORD_HASH_ITERATIONS', 100000);
+
         insert into platform_user (
             apex_user_name,
             email,
             password_hash,
+            password_salt,
+            password_algo,
+            password_iterations,
             first_name,
             last_name,
             is_active
         ) values (
             upper(trim(v_email)),
             lower(trim(v_email)),
-            pkg_aox_util.fn_hash_password(v_password),
+            pkg_aox_util.fn_hash_password_v2(v_password, v_password_salt, v_password_iterations),
+            v_password_salt,
+            pkg_aox_util.c_password_algo_v1,
+            v_password_iterations,
             trim(v_first_name),
             trim(v_last_name),
             0
@@ -854,6 +866,11 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         v_pu_active          platform_user.is_active%type;
         v_failed_attempts    platform_user.failed_login_attempts%type;
         v_locked_until       platform_user.locked_until%type;
+        v_password_salt      platform_user.password_salt%type;
+        v_password_algo      platform_user.password_algo%type;
+        v_password_iterations platform_user.password_iterations%type;
+        v_new_salt           platform_user.password_salt%type;
+        v_new_iterations     platform_user.password_iterations%type;
         v_membership_count   number;
         v_requested_member   org_member.id_org_member%type;
 
@@ -953,7 +970,10 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
                 pu.email,
                 pu.is_active,
                 pu.failed_login_attempts,
-                pu.locked_until
+                pu.locked_until,
+                pu.password_salt,
+                pu.password_algo,
+                pu.password_iterations
             into
                 v_platform_user_id,
                 v_password_hash,
@@ -961,7 +981,10 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
                 v_email,
                 v_pu_active,
                 v_failed_attempts,
-                v_locked_until
+                v_locked_until,
+                v_password_salt,
+                v_password_algo,
+                v_password_iterations
             from platform_user pu
             where upper(pu.apex_user_name) = upper(trim(v_identifier))
                or upper(pu.email) = upper(trim(v_identifier));
@@ -974,12 +997,33 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
             raise_application_error(-20030, 'Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intentá de nuevo más tarde.');
         end if;
 
-        if pkg_aox_util.fn_hash_password(v_password) != v_password_hash then
+        if not pkg_aox_util.fn_verify_password(
+                pi_password    => v_password,
+                pi_stored_hash => v_password_hash,
+                pi_salt        => v_password_salt,
+                pi_algo        => v_password_algo,
+                pi_iterations  => v_password_iterations
+           ) then
             pr_register_failed_login(v_platform_user_id);
             raise_application_error(-20001, 'Usuario o contraseña incorrectos.');
         end if;
 
-        if v_failed_attempts != 0 or v_locked_until is not null then
+        -- Password correcto: resetear lockout y, si el hash es del algoritmo legado
+        -- (SHA256_LEGACY), rehashear de forma transparente al nuevo algoritmo con salt
+        -- (migración progresiva, sin forzar reset masivo de contraseñas).
+        if v_password_algo = pkg_aox_util.c_password_algo_legacy then
+            v_new_salt       := pkg_aox_util.fn_generate_password_salt;
+            v_new_iterations := pkg_aox_util.fn_param_number('PASSWORD_HASH_ITERATIONS', 100000);
+            update platform_user
+               set password_hash       = pkg_aox_util.fn_hash_password_v2(v_password, v_new_salt, v_new_iterations),
+                   password_salt       = v_new_salt,
+                   password_algo       = pkg_aox_util.c_password_algo_v1,
+                   password_iterations = v_new_iterations,
+                   failed_login_attempts = 0,
+                   locked_until        = null
+             where id_platform_user = v_platform_user_id;
+            commit;
+        elsif v_failed_attempts != 0 or v_locked_until is not null then
             update platform_user
                set failed_login_attempts = 0,
                    locked_until = null
@@ -1879,6 +1923,8 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         v_response_json json_object_t := json_object_t();
         v_validation_errors json_array_t := json_array_t();
         v_error         json_object_t;
+        v_password_salt       platform_user.password_salt%type;
+        v_password_iterations platform_user.password_iterations%type;
     begin
         -- Parsear JSON
         begin
@@ -1948,9 +1994,17 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
                 return;
         end;
 
-        -- Actualizar la contraseña de la identidad global
+        -- Actualizar la contraseña de la identidad global (siempre al algoritmo nuevo)
+        v_password_salt       := pkg_aox_util.fn_generate_password_salt;
+        v_password_iterations := pkg_aox_util.fn_param_number('PASSWORD_HASH_ITERATIONS', 100000);
+
         update platform_user pu
-        set password_hash = pkg_aox_util.fn_hash_password(v_new_password)
+        set password_hash       = pkg_aox_util.fn_hash_password_v2(v_new_password, v_password_salt, v_password_iterations),
+            password_salt       = v_password_salt,
+            password_algo       = pkg_aox_util.c_password_algo_v1,
+            password_iterations = v_password_iterations,
+            failed_login_attempts = 0,
+            locked_until        = null
         where pu.id_platform_user = (
             select m.platform_user_id from org_member m where m.id_org_member = v_user_id
         );
@@ -2405,6 +2459,8 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         v_refresh_token      varchar2(255);
         v_session_username   platform_user.apex_user_name%type;
         v_public_slug        platform_user.public_slug%type;
+        v_password_salt       platform_user.password_salt%type;
+        v_password_iterations platform_user.password_iterations%type;
     begin
         begin
             v_json_req   := json_object_t.parse(pi_body);
@@ -2553,10 +2609,16 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
                 v_apex_user_name := upper(substr(replace(v_invite_email, '@', '_'), 1, 100));
             end if;
 
+            v_password_salt       := pkg_aox_util.fn_generate_password_salt;
+            v_password_iterations := pkg_aox_util.fn_param_number('PASSWORD_HASH_ITERATIONS', 100000);
+
             insert into platform_user (
                 apex_user_name,
                 email,
                 password_hash,
+                password_salt,
+                password_algo,
+                password_iterations,
                 first_name,
                 last_name,
                 is_active,
@@ -2564,7 +2626,10 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
             ) values (
                 upper(trim(v_apex_user_name)),
                 lower(trim(v_invite_email)),
-                pkg_aox_util.fn_hash_password(v_password),
+                pkg_aox_util.fn_hash_password_v2(v_password, v_password_salt, v_password_iterations),
+                v_password_salt,
+                pkg_aox_util.c_password_algo_v1,
+                v_password_iterations,
                 trim(v_first_name),
                 trim(v_last_name),
                 1,

@@ -14,6 +14,9 @@ CREATE TABLE platform_user (
   email_verified_at TIMESTAMP(6) WITH TIME ZONE NULL,
   failed_login_attempts    NUMBER                      DEFAULT 0 NOT NULL,
   locked_until             TIMESTAMP(6) WITH TIME ZONE NULL,
+  password_salt            VARCHAR2(64)                NULL,
+  password_algo            VARCHAR2(30)                DEFAULT 'SHA256_LEGACY' NOT NULL,
+  password_iterations      NUMBER                      NULL,
   created_at        TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 )
 /
@@ -51,3 +54,6 @@ COMMENT ON COLUMN platform_user.profile_image_file_name IS 'Nombre de archivo en
 COMMENT ON COLUMN platform_user.email_verified_at IS 'Verificacion de correo a nivel de cuenta global.';
 COMMENT ON COLUMN platform_user.failed_login_attempts IS 'Contador de intentos fallidos de login consecutivos; se resetea a 0 en login exitoso.';
 COMMENT ON COLUMN platform_user.locked_until IS 'Timestamp hasta el cual la cuenta esta bloqueada por exceso de intentos fallidos (NULL = no bloqueada).';
+COMMENT ON COLUMN platform_user.password_salt IS 'Salt aleatorio (hex) por usuario para password_algo = PBKDF2_HMAC_SHA256_V1. NULL para hashes legados.';
+COMMENT ON COLUMN platform_user.password_algo IS 'Algoritmo del password_hash: SHA256_LEGACY (sin salt, legado) o PBKDF2_HMAC_SHA256_V1 (con salt e iteraciones).';
+COMMENT ON COLUMN platform_user.password_iterations IS 'Cantidad de iteraciones usadas al generar password_hash cuando password_algo = PBKDF2_HMAC_SHA256_V1.';

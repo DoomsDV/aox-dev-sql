@@ -37,6 +37,10 @@ CREATE OR REPLACE package pkg_aox_util as
     c_sqlcode_forbidden             constant number := -20011;
     c_sqlcode_rate_limit            constant number := -20029;
 
+    /** Algoritmos de hash de password (platform_user.password_algo). */
+    c_password_algo_legacy          constant varchar2(30) := 'SHA256_LEGACY';
+    c_password_algo_v1              constant varchar2(30) := 'PBKDF2_HMAC_SHA256_V1';
+
     function fn_clean_sqlerrm(
         pi_sqlerrm in varchar2 default sqlerrm
     ) return varchar2;
@@ -216,10 +220,47 @@ CREATE OR REPLACE package pkg_aox_util as
      * Genera un hash seguro utilizando el algoritmo SHA-256.
      * @param pi_password Contraseña en texto plano.
      * @return varchar2   Representación hexadecimal del hash.
+     * @deprecated Solo para verificar hashes legados (password_algo = SHA256_LEGACY).
+     *             Usuarios nuevos y rehashes usan fn_hash_password_v2. Usar fn_verify_password
+     *             para comparar contra el hash almacenado (soporta ambos algoritmos).
      */
     function fn_hash_password (
         pi_password in varchar2
     ) return varchar2;
+
+    /**
+     * Genera un salt aleatorio (32 caracteres hex / 16 bytes) para password_salt.
+     */
+    function fn_generate_password_salt return varchar2;
+
+    /**
+     * Hash de password iterado (HMAC-SHA256 encadenado, semilla = salt, clave = password),
+     * algoritmo PBKDF2_HMAC_SHA256_V1. Reemplaza a fn_hash_password (SHA-256 de una sola
+     * pasada, sin salt) para nuevos usuarios y rehashes progresivos.
+     * @param pi_password   Contraseña en texto plano.
+     * @param pi_salt       Salt único por usuario (ver fn_generate_password_salt).
+     * @param pi_iterations Cantidad de iteraciones (default 100000; ver parámetro
+     *                      PASSWORD_HASH_ITERATIONS en app_parameter).
+     */
+    function fn_hash_password_v2 (
+        pi_password   in varchar2,
+        pi_salt       in varchar2,
+        pi_iterations in number default 100000
+    ) return varchar2;
+
+    /**
+     * Verifica una contraseña contra el hash almacenado, soportando ambos algoritmos:
+     * SHA256_LEGACY (fn_hash_password, sin salt) y PBKDF2_HMAC_SHA256_V1 (fn_hash_password_v2,
+     * con salt e iteraciones). Centraliza la comparación para no duplicar la lógica de
+     * despacho por algoritmo en cada paquete que valida contraseñas.
+     */
+    function fn_verify_password (
+        pi_password    in varchar2,
+        pi_stored_hash in varchar2,
+        pi_salt        in varchar2,
+        pi_algo        in varchar2,
+        pi_iterations  in number
+    ) return boolean;
 
     FUNCTION fn_get_org_id_from_jwt(
       pi_auth_header IN VARCHAR2
@@ -981,6 +1022,50 @@ CREATE OR REPLACE package body pkg_aox_util as
 
         return lower(rawtohex(v_hash));
     end fn_hash_password;
+
+    function fn_generate_password_salt return varchar2 is
+    begin
+        return lower(rawtohex(dbms_crypto.randombytes(16)));
+    end fn_generate_password_salt;
+
+    function fn_hash_password_v2 (
+        pi_password   in varchar2,
+        pi_salt       in varchar2,
+        pi_iterations in number default 100000
+    ) return varchar2 is
+        -- No es PBKDF2 estricto (RFC 8018): es un HMAC-SHA256 encadenado, semilla = salt,
+        -- clave = password, iterado N veces. Con DBMS_CRYPTO (sin bcrypt/argon2 nativo en
+        -- Oracle) esto ya eleva el costo de fuerza bruta varios órdenes de magnitud frente
+        -- a un SHA-256 de una sola pasada sin salt (fn_hash_password).
+        v_key    raw(2000) := utl_i18n.string_to_raw(pi_password, 'AL32UTF8');
+        v_result raw(32)   := utl_i18n.string_to_raw(pi_salt, 'AL32UTF8');
+    begin
+        for i in 1..nvl(pi_iterations, 100000) loop
+            v_result := dbms_crypto.mac(
+                src => v_result,
+                typ => dbms_crypto.hmac_sh256,
+                key => v_key
+            );
+        end loop;
+
+        return lower(rawtohex(v_result));
+    end fn_hash_password_v2;
+
+    function fn_verify_password (
+        pi_password    in varchar2,
+        pi_stored_hash in varchar2,
+        pi_salt        in varchar2,
+        pi_algo        in varchar2,
+        pi_iterations  in number
+    ) return boolean is
+    begin
+        if pi_algo = c_password_algo_v1 and pi_salt is not null then
+            return fn_hash_password_v2(pi_password, pi_salt, nvl(pi_iterations, 100000)) = pi_stored_hash;
+        end if;
+
+        -- SHA256_LEGACY (o algo desconocido/NULL): comparar con el hash sin salt de siempre.
+        return fn_hash_password(pi_password) = pi_stored_hash;
+    end fn_verify_password;
 
     FUNCTION fn_decode_validated_jwt_payload(
         pi_auth_header IN VARCHAR2

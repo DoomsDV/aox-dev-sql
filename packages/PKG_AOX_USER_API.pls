@@ -389,8 +389,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_user_api IS
         v_new_pass      VARCHAR2(100);
 
         v_stored_hash   VARCHAR2(255);
-        v_current_hash  VARCHAR2(255);
         v_new_hash      VARCHAR2(255);
+        v_password_salt       platform_user.password_salt%TYPE;
+        v_password_algo       platform_user.password_algo%TYPE;
+        v_password_iterations platform_user.password_iterations%TYPE;
+        v_new_salt            platform_user.password_salt%TYPE;
+        v_new_iterations      platform_user.password_iterations%TYPE;
     BEGIN
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
@@ -407,8 +411,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_user_api IS
         END IF;
 
         BEGIN
-            SELECT password_hash
-              INTO v_stored_hash
+            SELECT password_hash, password_salt, password_algo, password_iterations
+              INTO v_stored_hash, v_password_salt, v_password_algo, v_password_iterations
               FROM platform_user pu
              INNER JOIN org_member m ON m.platform_user_id = pu.id_platform_user
              WHERE m.id_org_member = v_user_id;
@@ -417,16 +421,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_user_api IS
                 RAISE_APPLICATION_ERROR(-20001, 'Usuario no encontrado.');
         END;
 
-        v_current_hash := pkg_aox_util.fn_hash_password(v_current_pass);
-
-        IF v_current_hash != v_stored_hash THEN
+        IF NOT pkg_aox_util.fn_verify_password(
+                pi_password    => v_current_pass,
+                pi_stored_hash => v_stored_hash,
+                pi_salt        => v_password_salt,
+                pi_algo        => v_password_algo,
+                pi_iterations  => v_password_iterations
+           ) THEN
             RAISE_APPLICATION_ERROR(-20005, 'La contraseña actual es incorrecta.');
         END IF;
 
-        v_new_hash := pkg_aox_util.fn_hash_password(v_new_pass);
+        -- La nueva contraseña siempre queda en el algoritmo nuevo (PBKDF2_HMAC_SHA256_V1).
+        v_new_salt       := pkg_aox_util.fn_generate_password_salt;
+        v_new_iterations := pkg_aox_util.fn_param_number('PASSWORD_HASH_ITERATIONS', 100000);
+        v_new_hash       := pkg_aox_util.fn_hash_password_v2(v_new_pass, v_new_salt, v_new_iterations);
 
         UPDATE platform_user pu
-           SET password_hash = v_new_hash
+           SET password_hash       = v_new_hash,
+               password_salt       = v_new_salt,
+               password_algo       = pkg_aox_util.c_password_algo_v1,
+               password_iterations = v_new_iterations
          WHERE pu.id_platform_user = (
             SELECT m.platform_user_id FROM org_member m WHERE m.id_org_member = v_user_id
         );
