@@ -142,7 +142,8 @@ CREATE OR REPLACE package pkg_aox_util as
     function fn_get_schedule_exception_type (
         pi_pro_id      in number,
         pi_target_date in date
-    ) return varchar2;
+    ) return varchar2
+    result_cache;
 
     /**
      * Cierre vigente de una sucursal en una fecha.
@@ -152,7 +153,8 @@ CREATE OR REPLACE package pkg_aox_util as
     function fn_is_location_closed_full_day (
         pi_loc_id      in number,
         pi_target_date in date
-    ) return number;
+    ) return number
+    result_cache;
 
     /**
      * Nombre del cierre vigente hoy para una sucursal (o NULL si no hay).
@@ -544,7 +546,8 @@ CREATE OR REPLACE package body pkg_aox_util as
     function fn_get_schedule_exception_type (
         pi_pro_id      in number,
         pi_target_date in date
-    ) return varchar2 is
+    ) return varchar2
+    result_cache is
         v_type professional_schedule_exception.exception_type%type;
     begin
         select e.exception_type
@@ -562,7 +565,8 @@ CREATE OR REPLACE package body pkg_aox_util as
     function fn_is_location_closed_full_day (
         pi_loc_id      in number,
         pi_target_date in date
-    ) return number is
+    ) return number
+    result_cache is
         v_count number;
         v_target date := trunc(pi_target_date);
     begin
