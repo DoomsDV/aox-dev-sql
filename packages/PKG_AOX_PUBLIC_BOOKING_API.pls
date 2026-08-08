@@ -1737,6 +1737,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_preview         json_object_t;
         v_refund_preview  NUMBER;
         v_requires_alias  NUMBER;
+        v_locations_arr   json_array_t;
+        v_loc_obj         json_object_t;
     BEGIN
         FOR rec IN (
             SELECT
@@ -1760,9 +1762,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 l.address AS location_address,
                 s.name AS service_name,
                 s.duration_minutes,
+                s.image_url AS service_image_url,
                 NVL(p.display_name, TRIM(pu.first_name || ' ' || pu.last_name)) AS professional_name,
                 p.profile_slug AS professional_slug,
-                ws.profile_slug AS organization_slug
+                NVL(NULLIF(TRIM(p.profile_image_url), ''), NULLIF(TRIM(pu.profile_image_url), '')) AS professional_image_url,
+                ws.profile_slug AS organization_slug,
+                o.name AS organization_name
             FROM appointment a
             JOIN customer c ON c.id_customer = a.cus_id_customer
             JOIN location l ON l.id_location = a.loc_id_location
@@ -1771,6 +1776,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             JOIN org_member m ON m.id_org_member = p.usr_id_user
             JOIN platform_user pu ON pu.id_platform_user = m.platform_user_id
             JOIN workspace_setting ws ON ws.org_id_organization = a.org_id_organization
+            JOIN organization o ON o.id_organization = a.org_id_organization
             WHERE a.public_manage_token = TRIM(pi_public_token)
         ) LOOP
             v_data_obj.put('id_appointment'      , rec.id_appointment);
@@ -1781,9 +1787,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_data_obj.put('pro_id_professional' , rec.pro_id_professional);
             v_data_obj.put('professional_name'   , rec.professional_name);
             v_data_obj.put('professional_slug'   , rec.professional_slug);
+            v_data_obj.put('professional_image_url', NVL(rec.professional_image_url, ''));
             v_data_obj.put('organization_slug'   , rec.organization_slug);
+            v_data_obj.put('organization_name'   , rec.organization_name);
             v_data_obj.put('ser_id_service'      , rec.ser_id_service);
             v_data_obj.put('service_name'        , rec.service_name);
+            v_data_obj.put('service_image_url'   , NVL(rec.service_image_url, ''));
             v_data_obj.put('duration_minutes'    , rec.duration_minutes);
             v_data_obj.put('customer_name'       , rec.customer_name);
             v_data_obj.put('customer_phone'      , rec.customer_phone);
@@ -1791,6 +1800,30 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_data_obj.put('start_time'          , TO_CHAR(rec.start_time, 'YYYY-MM-DD"T"HH24:MI:SS'));
             v_data_obj.put('end_time'            , TO_CHAR(rec.end_time, 'YYYY-MM-DD"T"HH24:MI:SS'));
             v_data_obj.put('payment_status'      , rec.payment_status);
+
+            -- Sucursales activas de la organizacion (evita el 2do fetch a
+            -- getPublicProfileWithOrds que hacia el frontend solo para esto).
+            v_locations_arr := json_array_t();
+            FOR loc_rec IN (
+                SELECT id_location, name, address, latitude, longitude
+                  FROM location
+                 WHERE org_id_organization = rec.org_id_organization
+                   AND is_active = 1
+                 ORDER BY name
+            ) LOOP
+                v_loc_obj := json_object_t();
+                v_loc_obj.put('id_location', loc_rec.id_location);
+                v_loc_obj.put('name'       , loc_rec.name);
+                v_loc_obj.put('address'    , loc_rec.address);
+                IF loc_rec.latitude IS NOT NULL THEN
+                    v_loc_obj.put('latitude', loc_rec.latitude);
+                END IF;
+                IF loc_rec.longitude IS NOT NULL THEN
+                    v_loc_obj.put('longitude', loc_rec.longitude);
+                END IF;
+                v_locations_arr.append(v_loc_obj);
+            END LOOP;
+            v_data_obj.put('locations', v_locations_arr);
             IF rec.deposit_amount IS NOT NULL THEN
                 v_data_obj.put('deposit_amount', rec.deposit_amount);
             END IF;
