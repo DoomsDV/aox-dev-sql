@@ -39,8 +39,9 @@ CREATE OR REPLACE package body pkg_aox_jwt as
         po_access_token  out clob,
         po_refresh_token out varchar2
     ) is
-        v_jwt_secret    raw(256);
-        v_refresh_token varchar2(255);
+        v_jwt_secret       raw(256);
+        v_refresh_token    varchar2(255);
+        v_max_sessions     number;
     begin
         -- 1. Generar el Access Token (JWT) - Expira en 1 hora
         v_jwt_secret := utl_raw.cast_to_raw(fn_get_parameter('JWT_TOKEN'));
@@ -70,6 +71,25 @@ CREATE OR REPLACE package body pkg_aox_jwt as
             v_refresh_token,
             current_timestamp + NUMTODSINTERVAL(pkg_aox_util.fn_param_number('JWT_REFRESH_EXP_DAYS', 30), 'DAY')
         );
+
+        -- Higiene de sesiones: se permite multi-dispositivo, pero se tope la cantidad de
+        -- refresh tokens activos por usuario; al superar el tope, se revoca el excedente
+        -- más antiguo (no expirado, no revocado). No afecta al recién creado (el más nuevo).
+        v_max_sessions := pkg_aox_util.fn_param_number('MAX_CONCURRENT_SESSIONS', 5);
+
+        for r in (
+            select s.id_session as id_session
+            from app_user_session s
+            where s.use_id_user = pi_user_id
+              and s.is_revoked  = 0
+              and s.expires_at  > current_timestamp
+            order by s.created_at desc
+            offset v_max_sessions rows
+        ) loop
+            update app_user_session
+               set is_revoked = 1
+             where id_session = r.id_session;
+        end loop;
 
         commit;
     end pr_generate_auth_tokens;
