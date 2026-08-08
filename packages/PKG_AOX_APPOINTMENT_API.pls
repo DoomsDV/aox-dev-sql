@@ -28,6 +28,18 @@ CREATE OR REPLACE PACKAGE pkg_aox_appointment_api IS
         po_response_body OUT CLOB
     );
 
+    -- Fase 4 (N+1 fix): guardado masivo de citas (escaneo de agenda). Resuelve
+    -- identidad/suscripcion UNA sola vez y reutiliza el mismo enforcement de
+    -- pr_create_appointment fila por fila, dentro de la misma conexion PL/SQL
+    -- (sin round-trips HTTP). No aborta el lote si una fila falla.
+    -- Body esperado: { "appointments": [ {...igual a pr_create_appointment...}, ... ] }
+    PROCEDURE pr_create_appointments_bulk(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- Actualizar una reserva existente (Reprogramar o cambiar datos del cliente)
     PROCEDURE pr_update_appointment(
         pi_auth_header   IN  VARCHAR2,
@@ -387,19 +399,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         po_response_body := v_response_json.to_clob();
     END pr_get_appointment;
 
-    PROCEDURE pr_create_appointment(
-        pi_auth_header   IN  VARCHAR2,
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+    -- Helper interno (Fase 4, N+1 fix): logica compartida entre pr_create_appointment
+    -- (endpoint unitario) y pr_create_appointments_bulk (endpoint de lote). Recibe la
+    -- identidad ya resuelta (org/rol/pro efectivo) para no repetir esa resolucion por fila.
+    -- No arma respuesta HTTP: si la cita queda desalineada de agenda y no fue reconocida
+    -- por el llamador (po_new_id queda NULL), devuelve el motivo en po_misaligned_reason
+    -- para que cada endpoint decida como comunicarlo. Cualquier otro problema (datos
+    -- invalidos, solapamiento, permisos, etc.) se sigue señalando con RAISE_APPLICATION_ERROR,
+    -- igual que antes de la extraccion.
+    PROCEDURE pr_create_appointment_row(
+        pi_org_id            IN  NUMBER,
+        pi_role_id           IN  NUMBER,
+        pi_actual_pro_id     IN  NUMBER,
+        pi_row_json          IN  json_object_t,
+        po_new_id            OUT NUMBER,
+        po_misaligned_reason OUT VARCHAR2
     ) IS
-        v_org_id        NUMBER;
-        v_role_id       NUMBER;
-        v_user_id       NUMBER;
-        v_actual_pro_id NUMBER;
-        v_json_req      json_object_t;
-        v_response_json json_object_t := json_object_t();
-
         v_loc_id        NUMBER;
         v_pro_id        NUMBER;
         v_ser_id        NUMBER;
@@ -416,7 +431,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
         v_overlap_count NUMBER := 0;
         v_customer_access_count NUMBER := 0;
-        v_new_id        NUMBER;
         v_lock_dummy    NUMBER;
         v_payment_status appointment.payment_status%TYPE;
         v_deposit_amount appointment.deposit_amount%TYPE;
@@ -425,6 +439,336 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_ack_raw       VARCHAR2(20);
         v_notify_customer BOOLEAN := TRUE;
         v_notify_raw    VARCHAR2(20);
+    BEGIN
+        po_new_id := NULL;
+        po_misaligned_reason := NULL;
+
+        v_loc_id     := pi_row_json.get_number('loc_id_location');
+        v_pro_id     := pi_row_json.get_number('pro_id_professional');
+        v_ser_id     := pi_row_json.get_number('ser_id_service');
+        IF pi_row_json.has('id_customer') THEN
+            v_requested_cus_id := pi_row_json.get_number('id_customer');
+        END IF;
+        v_cust_name  := TRIM(pi_row_json.get_string('customer_name'));
+        v_cust_phone := TRIM(pi_row_json.get_string('customer_phone'));
+
+        IF pi_row_json.has('acknowledge_schedule_misalignment') THEN
+            BEGIN
+                v_acknowledge := pi_row_json.get_boolean('acknowledge_schedule_misalignment');
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_ack_raw := LOWER(TRIM(NVL(pi_row_json.get_string('acknowledge_schedule_misalignment'), 'false')));
+                    v_acknowledge := v_ack_raw IN ('true', '1', 'yes', 'si', 'sí');
+            END;
+        END IF;
+
+        IF pi_row_json.has('notify_customer') THEN
+            BEGIN
+                v_notify_customer := pi_row_json.get_boolean('notify_customer');
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_notify_raw := LOWER(TRIM(NVL(pi_row_json.get_string('notify_customer'), 'true')));
+                    v_notify_customer := v_notify_raw IN ('true', '1', 'yes', 'si', 'sí');
+            END;
+        END IF;
+
+        IF pi_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            v_pro_id := pi_actual_pro_id;
+        END IF;
+
+        -- El profesional debe tener el servicio asignado
+        DECLARE
+            v_ps_count NUMBER := 0;
+        BEGIN
+            SELECT COUNT(*)
+              INTO v_ps_count
+              FROM professional_service ps
+             WHERE ps.pro_id_professional = v_pro_id
+               AND ps.ser_id_service      = v_ser_id
+               AND ps.org_id_organization = pi_org_id;
+
+            IF v_ps_count = 0 THEN
+                RAISE_APPLICATION_ERROR(-20004, 'El profesional no realiza ese servicio.');
+            END IF;
+        END;
+
+        v_start_time_tz := fn_parse_iso_date(pi_row_json.get_string('start_time'));
+        v_end_time_tz   := fn_parse_iso_date(pi_row_json.get_string('end_time'));
+
+        -- La tabla appointment guarda TIMESTAMP sin zona horaria
+        v_start_time := CAST(v_start_time_tz AS TIMESTAMP);
+        v_end_time   := CAST(v_end_time_tz   AS TIMESTAMP);
+
+        -- Validación básica de rango horario
+        IF v_start_time >= v_end_time THEN
+            RAISE_APPLICATION_ERROR(-20003, 'La fecha/hora de inicio debe ser menor a la de fin.');
+        END IF;
+
+        -- Gestión de Customer: si viene id_customer, usarlo; si no, crear/actualizar por teléfono.
+        IF NVL(v_requested_cus_id, 0) > 0 THEN
+            BEGIN
+                SELECT
+                    id_customer,
+                    full_name,
+                    phone_number
+                INTO
+                    v_cus_id,
+                    v_cust_name,
+                    v_cust_phone
+                FROM customer
+                WHERE id_customer         = v_requested_cus_id
+                  AND org_id_organization = pi_org_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20004, 'Cliente no encontrado.');
+            END;
+
+            IF pi_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+                SELECT COUNT(*)
+                  INTO v_customer_access_count
+                  FROM appointment a
+                WHERE a.cus_id_customer     = v_cus_id
+                  AND a.pro_id_professional = v_pro_id
+                  AND a.org_id_organization = pi_org_id;
+
+                IF v_customer_access_count = 0 THEN
+                    RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No tienes permisos para usar este cliente.');
+                END IF;
+            END IF;
+        ELSE
+            IF NVL(v_cust_name, '') = '' THEN
+                RAISE_APPLICATION_ERROR(-20006, 'El nombre del cliente es obligatorio.');
+            END IF;
+
+            IF NVL(v_cust_phone, '') <> '' THEN
+                -- Flujo estandar: upsert por telefono (clave unica por org).
+                BEGIN
+                    SELECT id_customer
+                      INTO v_cus_id
+                      FROM customer
+                    WHERE phone_number        = v_cust_phone
+                      AND org_id_organization = pi_org_id;
+
+                    UPDATE customer
+                      SET full_name   = v_cust_name
+                    WHERE id_customer = v_cus_id;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        INSERT INTO customer (
+                            org_id_organization,
+                            full_name,
+                            phone_number
+                        )
+                        VALUES (
+                            pi_org_id,
+                            v_cust_name,
+                            v_cust_phone
+                        )
+                        RETURNING id_customer INTO v_cus_id;
+                END;
+            ELSE
+                -- Sin telefono (ej. carga masiva desde escaneo de agenda manuscrita):
+                -- enlazar por nombre exacto si hay UNO solo; si no, crear con telefono NULL.
+                DECLARE
+                    v_name_matches NUMBER := 0;
+                BEGIN
+                    SELECT COUNT(*)
+                      INTO v_name_matches
+                      FROM customer
+                     WHERE org_id_organization = pi_org_id
+                       AND UPPER(TRIM(full_name)) = UPPER(TRIM(v_cust_name));
+
+                    IF v_name_matches = 1 THEN
+                        SELECT id_customer
+                          INTO v_cus_id
+                          FROM customer
+                         WHERE org_id_organization = pi_org_id
+                           AND UPPER(TRIM(full_name)) = UPPER(TRIM(v_cust_name));
+                    ELSE
+                        INSERT INTO customer (
+                            org_id_organization,
+                            full_name,
+                            phone_number
+                        )
+                        VALUES (
+                            pi_org_id,
+                            v_cust_name,
+                            NULL
+                        )
+                        RETURNING id_customer INTO v_cus_id;
+                    END IF;
+                END;
+            END IF;
+        END IF;
+
+        -- Lock del profesional para evitar doble booking concurrente
+        SELECT 1
+          INTO v_lock_dummy
+          FROM professional
+        WHERE id_professional     = v_pro_id
+          AND org_id_organization = pi_org_id
+        FOR UPDATE;
+
+        -- Soft-check: fuera de agenda del profesional (requiere confirmación del cliente).
+        po_misaligned_reason := pkg_aox_util.fn_get_appointment_schedule_misaligned_reason(
+            v_pro_id,
+            v_start_time,
+            v_end_time,
+            v_loc_id
+        );
+
+        IF po_misaligned_reason IS NOT NULL AND NOT v_acknowledge THEN
+            -- No se crea la cita. Se persiste el alta/actualizacion de cliente hecha
+            -- mas arriba (misma paridad que el auto-commit de ORDS para el endpoint
+            -- unitario) y se devuelve el motivo para que el llamador decida la respuesta.
+            COMMIT;
+            RETURN;
+        END IF;
+
+        po_misaligned_reason := NULL;
+
+        -- Validación de solapamiento
+        SELECT COUNT(*)
+          INTO v_overlap_count
+          FROM appointment a
+        WHERE a.org_id_organization = pi_org_id
+          AND a.pro_id_professional = v_pro_id
+          AND a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO')
+          AND a.start_time < v_end_time
+          AND a.end_time   > v_start_time;
+
+        IF v_overlap_count > 0 THEN
+            RAISE_APPLICATION_ERROR(-20002, 'El profesional ya tiene una cita en ese horario.');
+        END IF;
+
+        -- Determinar seña del servicio (para turnos internos / contabilidad)
+        BEGIN
+            SELECT NVL(requires_deposit, 0)
+              INTO v_requires_deposit
+              FROM service
+             WHERE id_service = v_ser_id
+               AND org_id_organization = pi_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(-20005, 'Servicio no encontrado.');
+        END;
+
+        IF v_requires_deposit = 1 THEN
+            v_deposit_amount := pkg_aox_payment_settings_api.fn_calculate_deposit(v_ser_id, pi_org_id);
+        ELSE
+            v_deposit_amount := NULL;
+        END IF;
+
+        -- Estado de pago manual (solo panel). Si no viene, default seguro:
+        -- - Servicio sin seña: NONE
+        -- - Servicio con seña: PENDING (reserva telefónica / pendiente de cobro)
+        IF pi_row_json.has('payment_status') THEN
+            v_payment_status := UPPER(TRIM(pi_row_json.get_string('payment_status')));
+        ELSE
+            v_payment_status := CASE WHEN v_requires_deposit = 1 THEN 'PENDING' ELSE 'NONE' END;
+        END IF;
+
+        IF v_payment_status NOT IN ('NONE', 'PENDING', 'PAID', 'PAID_TRANSFER', 'PAID_CASH', 'EXEMPT') THEN
+            RAISE_APPLICATION_ERROR(-20006, 'payment_status inválido.');
+        END IF;
+
+        -- Insertar Cita
+        INSERT INTO appointment (
+            org_id_organization,
+            loc_id_location,
+            pro_id_professional,
+            ser_id_service,
+            cus_id_customer,
+            start_time,
+            end_time,
+            status,
+            payment_status,
+            deposit_amount,
+            public_manage_token
+        ) VALUES (
+            pi_org_id,
+            v_loc_id,
+            v_pro_id,
+            v_ser_id,
+            v_cus_id,
+            v_start_time,
+            v_end_time,
+            CASE WHEN v_payment_status = 'PENDING' THEN 'PENDIENTE' ELSE 'CONFIRMADO' END,
+            v_payment_status,
+            v_deposit_amount,
+            LOWER(RAWTOHEX(SYS_GUID()) || RAWTOHEX(SYS_GUID()))
+        )
+        RETURNING id_appointment INTO po_new_id;
+
+        COMMIT;
+
+        -- Auditoría de pago manual (panel). No llama a Pagopar.
+        IF v_payment_status <> 'NONE' THEN
+            BEGIN
+                INSERT INTO payment_transaction (
+                    org_id_organization,
+                    app_id_appointment,
+                    provider,
+                    external_reference,
+                    id_pedido_comercio,
+                    idempotency_key,
+                    amount,
+                    currency,
+                    payment_status,
+                    payment_channel,
+                    source,
+                    processed_at
+                ) VALUES (
+                    pi_org_id,
+                    po_new_id,
+                    'manual',
+                    NULL,
+                    'MANUAL-' || po_new_id,
+                    'MANUAL:' || po_new_id || ':' || v_payment_status,
+                    CASE
+                        WHEN v_payment_status IN ('PAID', 'PAID_TRANSFER', 'PAID_CASH') THEN NVL(v_deposit_amount, 0)
+                        ELSE 0
+                    END,
+                    'PYG',
+                    v_payment_status,
+                    'MANUAL',
+                    'MANUAL',
+                    CURRENT_TIMESTAMP
+                );
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+        END IF;
+
+        -- Plantilla confirmacion_reserva_hasel (mismo flujo que reserva pública).
+        IF v_notify_customer THEN
+            BEGIN
+                pkg_aox_meta_api.pr_enqueue_booking_confirmation_wa(
+                    pi_appointment_id => po_new_id
+                );
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+        END IF;
+    END pr_create_appointment_row;
+
+    PROCEDURE pr_create_appointment(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_user_id       NUMBER;
+        v_actual_pro_id NUMBER;
+        v_json_req      json_object_t;
+        v_response_json json_object_t := json_object_t();
+
+        v_new_id            NUMBER;
         v_misaligned_reason VARCHAR2(40);
     BEGIN
         v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
@@ -452,181 +796,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
         v_json_req := json_object_t.parse(pi_body);
 
-        v_loc_id     := v_json_req.get_number('loc_id_location');
-        v_pro_id     := v_json_req.get_number('pro_id_professional');
-        v_ser_id     := v_json_req.get_number('ser_id_service');
-        IF v_json_req.has('id_customer') THEN
-            v_requested_cus_id := v_json_req.get_number('id_customer');
-        END IF;
-        v_cust_name  := TRIM(v_json_req.get_string('customer_name'));
-        v_cust_phone := TRIM(v_json_req.get_string('customer_phone'));
-
-        IF v_json_req.has('acknowledge_schedule_misalignment') THEN
-            BEGIN
-                v_acknowledge := v_json_req.get_boolean('acknowledge_schedule_misalignment');
-            EXCEPTION
-                WHEN OTHERS THEN
-                    v_ack_raw := LOWER(TRIM(NVL(v_json_req.get_string('acknowledge_schedule_misalignment'), 'false')));
-                    v_acknowledge := v_ack_raw IN ('true', '1', 'yes', 'si', 'sí');
-            END;
-        END IF;
-
-        IF v_json_req.has('notify_customer') THEN
-            BEGIN
-                v_notify_customer := v_json_req.get_boolean('notify_customer');
-            EXCEPTION
-                WHEN OTHERS THEN
-                    v_notify_raw := LOWER(TRIM(NVL(v_json_req.get_string('notify_customer'), 'true')));
-                    v_notify_customer := v_notify_raw IN ('true', '1', 'yes', 'si', 'sí');
-            END;
-        END IF;
-
-        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
-            v_pro_id := v_actual_pro_id;
-        END IF;
-
-        -- El profesional debe tener el servicio asignado
-        DECLARE
-            v_ps_count NUMBER := 0;
-        BEGIN
-            SELECT COUNT(*)
-              INTO v_ps_count
-              FROM professional_service ps
-             WHERE ps.pro_id_professional = v_pro_id
-               AND ps.ser_id_service      = v_ser_id
-               AND ps.org_id_organization = v_org_id;
-
-            IF v_ps_count = 0 THEN
-                RAISE_APPLICATION_ERROR(-20004, 'El profesional no realiza ese servicio.');
-            END IF;
-        END;
-
-        v_start_time_tz := fn_parse_iso_date(v_json_req.get_string('start_time'));
-        v_end_time_tz   := fn_parse_iso_date(v_json_req.get_string('end_time'));
-
-        -- La tabla appointment guarda TIMESTAMP sin zona horaria
-        v_start_time := CAST(v_start_time_tz AS TIMESTAMP);
-        v_end_time   := CAST(v_end_time_tz   AS TIMESTAMP);
-
-        -- Validación básica de rango horario
-        IF v_start_time >= v_end_time THEN
-            RAISE_APPLICATION_ERROR(-20003, 'La fecha/hora de inicio debe ser menor a la de fin.');
-        END IF;
-
-        -- Gestión de Customer: si viene id_customer, usarlo; si no, crear/actualizar por teléfono.
-        IF NVL(v_requested_cus_id, 0) > 0 THEN
-            BEGIN
-                SELECT
-                    id_customer,
-                    full_name,
-                    phone_number
-                INTO
-                    v_cus_id,
-                    v_cust_name,
-                    v_cust_phone
-                FROM customer
-                WHERE id_customer         = v_requested_cus_id
-                  AND org_id_organization = v_org_id;
-            EXCEPTION
-                WHEN NO_DATA_FOUND THEN
-                    RAISE_APPLICATION_ERROR(-20004, 'Cliente no encontrado.');
-            END;
-
-            IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
-                SELECT COUNT(*)
-                  INTO v_customer_access_count
-                  FROM appointment a
-                WHERE a.cus_id_customer     = v_cus_id
-                  AND a.pro_id_professional = v_pro_id
-                  AND a.org_id_organization = v_org_id;
-
-                IF v_customer_access_count = 0 THEN
-                    RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No tienes permisos para usar este cliente.');
-                END IF;
-            END IF;
-        ELSE
-            IF NVL(v_cust_name, '') = '' THEN
-                RAISE_APPLICATION_ERROR(-20006, 'El nombre del cliente es obligatorio.');
-            END IF;
-
-            IF NVL(v_cust_phone, '') <> '' THEN
-                -- Flujo estandar: upsert por telefono (clave unica por org).
-                BEGIN
-                    SELECT id_customer
-                      INTO v_cus_id
-                      FROM customer
-                    WHERE phone_number        = v_cust_phone
-                      AND org_id_organization = v_org_id;
-
-                    UPDATE customer
-                      SET full_name   = v_cust_name
-                    WHERE id_customer = v_cus_id;
-                EXCEPTION
-                    WHEN NO_DATA_FOUND THEN
-                        INSERT INTO customer (
-                            org_id_organization,
-                            full_name,
-                            phone_number
-                        )
-                        VALUES (
-                            v_org_id,
-                            v_cust_name,
-                            v_cust_phone
-                        )
-                        RETURNING id_customer INTO v_cus_id;
-                END;
-            ELSE
-                -- Sin telefono (ej. carga masiva desde escaneo de agenda manuscrita):
-                -- enlazar por nombre exacto si hay UNO solo; si no, crear con telefono NULL.
-                DECLARE
-                    v_name_matches NUMBER := 0;
-                BEGIN
-                    SELECT COUNT(*)
-                      INTO v_name_matches
-                      FROM customer
-                     WHERE org_id_organization = v_org_id
-                       AND UPPER(TRIM(full_name)) = UPPER(TRIM(v_cust_name));
-
-                    IF v_name_matches = 1 THEN
-                        SELECT id_customer
-                          INTO v_cus_id
-                          FROM customer
-                         WHERE org_id_organization = v_org_id
-                           AND UPPER(TRIM(full_name)) = UPPER(TRIM(v_cust_name));
-                    ELSE
-                        INSERT INTO customer (
-                            org_id_organization,
-                            full_name,
-                            phone_number
-                        )
-                        VALUES (
-                            v_org_id,
-                            v_cust_name,
-                            NULL
-                        )
-                        RETURNING id_customer INTO v_cus_id;
-                    END IF;
-                END;
-            END IF;
-        END IF;
-
-        -- Lock del profesional para evitar doble booking concurrente
-        SELECT 1
-          INTO v_lock_dummy
-          FROM professional
-        WHERE id_professional     = v_pro_id
-          AND org_id_organization = v_org_id
-        FOR UPDATE;
-
-        -- Soft-check: fuera de agenda del profesional (requiere confirmación del cliente).
-        v_misaligned_reason := pkg_aox_util.fn_get_appointment_schedule_misaligned_reason(
-            v_pro_id,
-            v_start_time,
-            v_end_time,
-            v_loc_id
+        pr_create_appointment_row(
+            pi_org_id            => v_org_id,
+            pi_role_id           => v_role_id,
+            pi_actual_pro_id     => v_actual_pro_id,
+            pi_row_json          => v_json_req,
+            po_new_id            => v_new_id,
+            po_misaligned_reason => v_misaligned_reason
         );
 
-        IF v_misaligned_reason IS NOT NULL AND NOT v_acknowledge THEN
+        IF v_new_id IS NULL AND v_misaligned_reason IS NOT NULL THEN
             po_status_code := pkg_aox_util.c_conflict_code;
             v_response_json.put('status', 'error');
             v_response_json.put('code', 'SCHEDULE_MISALIGNED');
@@ -644,133 +823,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             );
             po_response_body := v_response_json.to_clob();
             RETURN;
-        END IF;
-
-        -- Validación de solapamiento
-        SELECT COUNT(*)
-          INTO v_overlap_count
-          FROM appointment a
-        WHERE a.org_id_organization = v_org_id
-          AND a.pro_id_professional = v_pro_id
-          AND a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO')
-          AND a.start_time < v_end_time
-          AND a.end_time   > v_start_time;
-
-        IF v_overlap_count > 0 THEN
-            RAISE_APPLICATION_ERROR(-20002, 'El profesional ya tiene una cita en ese horario.');
-        END IF;
-
-        -- Determinar seña del servicio (para turnos internos / contabilidad)
-        BEGIN
-            SELECT NVL(requires_deposit, 0)
-              INTO v_requires_deposit
-              FROM service
-             WHERE id_service = v_ser_id
-               AND org_id_organization = v_org_id;
-        EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                RAISE_APPLICATION_ERROR(-20005, 'Servicio no encontrado.');
-        END;
-
-        IF v_requires_deposit = 1 THEN
-            v_deposit_amount := pkg_aox_payment_settings_api.fn_calculate_deposit(v_ser_id, v_org_id);
-        ELSE
-            v_deposit_amount := NULL;
-        END IF;
-
-        -- Estado de pago manual (solo panel). Si no viene, default seguro:
-        -- - Servicio sin seña: NONE
-        -- - Servicio con seña: PENDING (reserva telefónica / pendiente de cobro)
-        IF v_json_req.has('payment_status') THEN
-            v_payment_status := UPPER(TRIM(v_json_req.get_string('payment_status')));
-        ELSE
-            v_payment_status := CASE WHEN v_requires_deposit = 1 THEN 'PENDING' ELSE 'NONE' END;
-        END IF;
-
-        IF v_payment_status NOT IN ('NONE', 'PENDING', 'PAID', 'PAID_TRANSFER', 'PAID_CASH', 'EXEMPT') THEN
-            RAISE_APPLICATION_ERROR(-20006, 'payment_status inválido.');
-        END IF;
-
-        -- Insertar Cita
-        INSERT INTO appointment (
-            org_id_organization,
-            loc_id_location,
-            pro_id_professional,
-            ser_id_service,
-            cus_id_customer,
-            start_time,
-            end_time,
-            status,
-            payment_status,
-            deposit_amount,
-            public_manage_token
-        ) VALUES (
-            v_org_id,
-            v_loc_id,
-            v_pro_id,
-            v_ser_id,
-            v_cus_id,
-            v_start_time,
-            v_end_time,
-            CASE WHEN v_payment_status = 'PENDING' THEN 'PENDIENTE' ELSE 'CONFIRMADO' END,
-            v_payment_status,
-            v_deposit_amount,
-            LOWER(RAWTOHEX(SYS_GUID()) || RAWTOHEX(SYS_GUID()))
-        )
-        RETURNING id_appointment INTO v_new_id;
-
-        COMMIT;
-
-        -- Auditoría de pago manual (panel). No llama a Pagopar.
-        IF v_payment_status <> 'NONE' THEN
-            BEGIN
-                INSERT INTO payment_transaction (
-                    org_id_organization,
-                    app_id_appointment,
-                    provider,
-                    external_reference,
-                    id_pedido_comercio,
-                    idempotency_key,
-                    amount,
-                    currency,
-                    payment_status,
-                    payment_channel,
-                    source,
-                    processed_at
-                ) VALUES (
-                    v_org_id,
-                    v_new_id,
-                    'manual',
-                    NULL,
-                    'MANUAL-' || v_new_id,
-                    'MANUAL:' || v_new_id || ':' || v_payment_status,
-                    CASE
-                        WHEN v_payment_status IN ('PAID', 'PAID_TRANSFER', 'PAID_CASH') THEN NVL(v_deposit_amount, 0)
-                        ELSE 0
-                    END,
-                    'PYG',
-                    v_payment_status,
-                    'MANUAL',
-                    'MANUAL',
-                    CURRENT_TIMESTAMP
-                );
-                COMMIT;
-            EXCEPTION
-                WHEN OTHERS THEN
-                    NULL;
-            END;
-        END IF;
-
-        -- Plantilla confirmacion_reserva_hasel (mismo flujo que reserva pública).
-        IF v_notify_customer THEN
-            BEGIN
-                pkg_aox_meta_api.pr_enqueue_booking_confirmation_wa(
-                    pi_appointment_id => v_new_id
-                );
-            EXCEPTION
-                WHEN OTHERS THEN
-                    NULL;
-            END;
         END IF;
 
         po_status_code := pkg_aox_util.c_success_create_code;
@@ -811,6 +863,137 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 po_response_body => po_response_body
             );
     END pr_create_appointment;
+
+    -- Fase 4 (N+1 fix): guardado masivo de citas (escaneo de agenda). Resuelve
+    -- identidad/suscripcion UNA sola vez y reutiliza pr_create_appointment_row fila
+    -- por fila, dentro de la misma conexion PL/SQL (sin round-trips HTTP por fila).
+    -- No aborta el lote si una fila falla: cada fila termina en COMMIT (creada o
+    -- desalineada-sin-confirmar) o ROLLBACK (error) antes de seguir con la siguiente,
+    -- para que un fallo posterior nunca deshaga filas ya persistidas.
+    PROCEDURE pr_create_appointments_bulk(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_user_id       NUMBER;
+        v_actual_pro_id NUMBER;
+
+        v_body_json     json_object_t;
+        v_rows_arr      json_array_t;
+        v_row_json      json_object_t;
+
+        v_response_json json_object_t := json_object_t();
+        v_results_arr   json_array_t := json_array_t();
+        v_result_obj    json_object_t;
+
+        v_created       NUMBER := 0;
+        v_failed        NUMBER := 0;
+        v_new_id        NUMBER;
+        v_misaligned_reason VARCHAR2(40);
+        v_row_count     NUMBER;
+    BEGIN
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        IF NVL(v_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+        END IF;
+
+        -- Gate de suscripción: se valida UNA sola vez para todo el lote (no por fila).
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
+        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            BEGIN
+                SELECT id_professional
+                  INTO v_actual_pro_id
+                  FROM professional
+                WHERE usr_id_user         = v_user_id
+                  AND org_id_organization = v_org_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20001, 'Perfil profesional no asignado.');
+            END;
+        END IF;
+
+        v_body_json := json_object_t.parse(pi_body);
+        IF NOT v_body_json.has('appointments') THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Falta el arreglo "appointments".');
+        END IF;
+        v_rows_arr  := TREAT(v_body_json.get('appointments') AS json_array_t);
+        v_row_count := v_rows_arr.get_size();
+
+        IF v_row_count = 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'No hay citas para guardar.');
+        END IF;
+        IF v_row_count > 60 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El lote admite hasta 60 citas.');
+        END IF;
+
+        FOR i IN 0 .. v_row_count - 1 LOOP
+            v_result_obj := json_object_t();
+            v_result_obj.put('index', i);
+            v_new_id := NULL;
+            v_misaligned_reason := NULL;
+
+            BEGIN
+                v_row_json := TREAT(v_rows_arr.get(i) AS json_object_t);
+
+                pr_create_appointment_row(
+                    pi_org_id            => v_org_id,
+                    pi_role_id           => v_role_id,
+                    pi_actual_pro_id     => v_actual_pro_id,
+                    pi_row_json          => v_row_json,
+                    po_new_id            => v_new_id,
+                    po_misaligned_reason => v_misaligned_reason
+                );
+
+                IF v_new_id IS NOT NULL THEN
+                    v_created := v_created + 1;
+                    v_result_obj.put('status', 'created');
+                    v_result_obj.put('id_appointment', v_new_id);
+                ELSE
+                    v_failed := v_failed + 1;
+                    v_result_obj.put('status', 'error');
+                    v_result_obj.put(
+                        'message',
+                        CASE v_misaligned_reason
+                            WHEN 'DAY_BLOCKED' THEN
+                                'El profesional tiene ese día bloqueado en excepciones de horario.'
+                            WHEN 'WRONG_LOCATION' THEN
+                                'El profesional no atiende en esa sucursal en el horario elegido.'
+                            WHEN 'LOCATION_CLOSED' THEN
+                                'La sucursal está cerrada ese día.'
+                            ELSE
+                                'El horario elegido no coincide con los turnos del profesional ese día.'
+                        END
+                    );
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    ROLLBACK;
+                    v_failed := v_failed + 1;
+                    v_result_obj.put('status', 'error');
+                    v_result_obj.put('message', pkg_aox_util.fn_clean_sqlerrm(SQLERRM));
+            END;
+
+            v_results_arr.append(v_result_obj);
+        END LOOP;
+
+        po_status_code := CASE WHEN v_created > 0 THEN pkg_aox_util.c_success_create_code ELSE pkg_aox_util.c_bad_request_code END;
+        v_response_json.put('status', 'success');
+        v_response_json.put('created', v_created);
+        v_response_json.put('failed', v_failed);
+        v_response_json.put('results', v_results_arr);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_create_appointments_bulk;
 
     PROCEDURE pr_update_appointment(
         pi_auth_header   IN  VARCHAR2,
