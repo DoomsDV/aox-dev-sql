@@ -818,6 +818,27 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         return v_errors;
     end fn_validate_login_inputs;
 
+    -- Registra un intento de login fallido y, si supera ACCOUNT_LOCKOUT_MAX_ATTEMPTS,
+    -- bloquea la cuenta por ACCOUNT_LOCKOUT_MINUTES (Fase 2 hardening de login).
+    procedure pr_register_failed_login(pi_platform_user_id in platform_user.id_platform_user%type) is
+        v_max_attempts    number := pkg_aox_util.fn_param_number('ACCOUNT_LOCKOUT_MAX_ATTEMPTS', 5);
+        v_lockout_minutes number := pkg_aox_util.fn_param_number('ACCOUNT_LOCKOUT_MINUTES', 15);
+        v_attempts        number;
+    begin
+        update platform_user
+           set failed_login_attempts = failed_login_attempts + 1
+         where id_platform_user = pi_platform_user_id
+        returning failed_login_attempts into v_attempts;
+
+        if v_attempts >= v_max_attempts then
+            update platform_user
+               set locked_until = systimestamp + numtodsinterval(v_lockout_minutes, 'minute')
+             where id_platform_user = pi_platform_user_id;
+        end if;
+
+        commit;
+    end pr_register_failed_login;
+
     procedure pr_login_auth(
         pi_body          in clob,
         po_status_code   out number,
@@ -831,6 +852,8 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         v_email_verified_at  platform_user.email_verified_at%type;
         v_email              platform_user.email%type;
         v_pu_active          platform_user.is_active%type;
+        v_failed_attempts    platform_user.failed_login_attempts%type;
+        v_locked_until       platform_user.locked_until%type;
         v_membership_count   number;
         v_requested_member   org_member.id_org_member%type;
 
@@ -928,13 +951,17 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
                 pu.password_hash,
                 pu.email_verified_at,
                 pu.email,
-                pu.is_active
+                pu.is_active,
+                pu.failed_login_attempts,
+                pu.locked_until
             into
                 v_platform_user_id,
                 v_password_hash,
                 v_email_verified_at,
                 v_email,
-                v_pu_active
+                v_pu_active,
+                v_failed_attempts,
+                v_locked_until
             from platform_user pu
             where upper(pu.apex_user_name) = upper(trim(v_identifier))
                or upper(pu.email) = upper(trim(v_identifier));
@@ -943,8 +970,21 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
                 raise_application_error(-20001, 'Credenciales inválidas.');
         end;
 
+        if v_locked_until is not null and v_locked_until > systimestamp then
+            raise_application_error(-20030, 'Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intentá de nuevo más tarde.');
+        end if;
+
         if pkg_aox_util.fn_hash_password(v_password) != v_password_hash then
+            pr_register_failed_login(v_platform_user_id);
             raise_application_error(-20001, 'Usuario o contraseña incorrectos.');
+        end if;
+
+        if v_failed_attempts != 0 or v_locked_until is not null then
+            update platform_user
+               set failed_login_attempts = 0,
+                   locked_until = null
+             where id_platform_user = v_platform_user_id;
+            commit;
         end if;
 
         if v_pu_active = 0 and v_email_verified_at is null then

@@ -12,6 +12,8 @@ CREATE TABLE platform_user (
   profile_image_file_name  VARCHAR2(255)               NULL,
   is_active                NUMBER(1,0)                 DEFAULT 1 NOT NULL,
   email_verified_at TIMESTAMP(6) WITH TIME ZONE NULL,
+  failed_login_attempts    NUMBER                      DEFAULT 0 NOT NULL,
+  locked_until             TIMESTAMP(6) WITH TIME ZONE NULL,
   created_at        TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 )
 /
@@ -47,3 +49,5 @@ COMMENT ON COLUMN platform_user.profile_image_url IS 'Foto publica global del us
 COMMENT ON COLUMN platform_user.profile_image_mime IS 'MIME type de la foto publica global.';
 COMMENT ON COLUMN platform_user.profile_image_file_name IS 'Nombre de archivo en bucket para la foto global.';
 COMMENT ON COLUMN platform_user.email_verified_at IS 'Verificacion de correo a nivel de cuenta global.';
+COMMENT ON COLUMN platform_user.failed_login_attempts IS 'Contador de intentos fallidos de login consecutivos; se resetea a 0 en login exitoso.';
+COMMENT ON COLUMN platform_user.locked_until IS 'Timestamp hasta el cual la cuenta esta bloqueada por exceso de intentos fallidos (NULL = no bloqueada).';
