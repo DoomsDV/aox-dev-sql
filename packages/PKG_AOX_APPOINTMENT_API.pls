@@ -435,6 +435,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_payment_status appointment.payment_status%TYPE;
         v_deposit_amount appointment.deposit_amount%TYPE;
         v_requires_deposit service.requires_deposit%TYPE := 0;
+        v_service_duration_minutes service.duration_minutes%TYPE;
+        v_loc_count     NUMBER;
         v_acknowledge   BOOLEAN := FALSE;
         v_ack_raw       VARCHAR2(20);
         v_notify_customer BOOLEAN := TRUE;
@@ -446,6 +448,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_loc_id     := pi_row_json.get_number('loc_id_location');
         v_pro_id     := pi_row_json.get_number('pro_id_professional');
         v_ser_id     := pi_row_json.get_number('ser_id_service');
+
+        -- Fase 6: la sucursal debe pertenecer a la misma organización.
+        SELECT COUNT(*) INTO v_loc_count
+          FROM location
+         WHERE id_location = v_loc_id AND org_id_organization = pi_org_id;
+
+        IF v_loc_count = 0 THEN
+            RAISE_APPLICATION_ERROR(-20009, 'Sucursal no encontrada.');
+        END IF;
+
         IF pi_row_json.has('id_customer') THEN
             v_requested_cus_id := pi_row_json.get_number('id_customer');
         END IF;
@@ -492,12 +504,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             END IF;
         END;
 
+        -- Duración y seña del servicio (se usa para recalcular end_time server-side
+        -- y para el payment_status default; reemplaza la consulta duplicada que existía mas abajo).
+        BEGIN
+            SELECT NVL(requires_deposit, 0), duration_minutes
+              INTO v_requires_deposit, v_service_duration_minutes
+              FROM service
+             WHERE id_service = v_ser_id
+               AND org_id_organization = pi_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(-20005, 'Servicio no encontrado.');
+        END;
+
         v_start_time_tz := fn_parse_iso_date(pi_row_json.get_string('start_time'));
-        v_end_time_tz   := fn_parse_iso_date(pi_row_json.get_string('end_time'));
 
         -- La tabla appointment guarda TIMESTAMP sin zona horaria
         v_start_time := CAST(v_start_time_tz AS TIMESTAMP);
-        v_end_time   := CAST(v_end_time_tz   AS TIMESTAMP);
+
+        -- Fase 3: end_time siempre se recalcula server-side desde la duración del
+        -- servicio; nunca se confía en el end_time enviado por el cliente.
+        v_end_time := v_start_time + NUMTODSINTERVAL(v_service_duration_minutes, 'MINUTE');
 
         -- Validación básica de rango horario
         IF v_start_time >= v_end_time THEN
@@ -641,18 +668,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             RAISE_APPLICATION_ERROR(-20002, 'El profesional ya tiene una cita en ese horario.');
         END IF;
 
-        -- Determinar seña del servicio (para turnos internos / contabilidad)
-        BEGIN
-            SELECT NVL(requires_deposit, 0)
-              INTO v_requires_deposit
-              FROM service
-             WHERE id_service = v_ser_id
-               AND org_id_organization = pi_org_id;
-        EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                RAISE_APPLICATION_ERROR(-20005, 'Servicio no encontrado.');
-        END;
-
+        -- La seña del servicio (v_requires_deposit) ya se resolvió más arriba junto
+        -- con la duración, para poder recalcular end_time antes del chequeo de solapamiento.
         IF v_requires_deposit = 1 THEN
             v_deposit_amount := pkg_aox_payment_settings_api.fn_calculate_deposit(v_ser_id, pi_org_id);
         ELSE
@@ -837,7 +854,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 WHEN SQLCODE = pkg_aox_util.c_sqlcode_session THEN pkg_aox_util.c_unauthorized_code
                 WHEN SQLCODE = pkg_aox_util.c_sqlcode_forbidden THEN pkg_aox_util.c_forbidden_code
                 WHEN SQLCODE IN (-20003, -20006, -20007) THEN pkg_aox_util.c_bad_request_code
-                WHEN SQLCODE = -20004 THEN pkg_aox_util.c_not_found_code
+                WHEN SQLCODE IN (-20004, -20009) THEN pkg_aox_util.c_not_found_code
                 WHEN SQLCODE = -20002 THEN pkg_aox_util.c_conflict_code
                 ELSE pkg_aox_util.c_internal_error_code
             END;
@@ -1035,6 +1052,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_overlap_count    NUMBER := 0;
         v_customer_access_count NUMBER := 0;
         v_lock_dummy       NUMBER;
+        v_service_duration_minutes service.duration_minutes%TYPE;
+        v_loc_count        NUMBER;
         v_session_notes    CLOB;
         v_has_notes_key    BOOLEAN := FALSE;
         v_old_pay_status   appointment.payment_status%TYPE;
@@ -1078,6 +1097,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_loc_id        := v_json_req.get_number('loc_id_location');
         v_pro_id        := v_json_req.get_number('pro_id_professional');
         v_ser_id        := v_json_req.get_number('ser_id_service');
+
+        -- Fase 6: la sucursal debe pertenecer a la misma organización.
+        SELECT COUNT(*) INTO v_loc_count
+          FROM location
+         WHERE id_location = v_loc_id AND org_id_organization = v_org_id;
+
+        IF v_loc_count = 0 THEN
+            RAISE_APPLICATION_ERROR(-20009, 'Sucursal no encontrada.');
+        END IF;
+
         IF v_json_req.has('id_customer') THEN
             v_requested_cus_id := v_json_req.get_number('id_customer');
         END IF;
@@ -1111,11 +1140,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         END IF;
 
         v_start_time_tz := fn_parse_iso_date(v_json_req.get_string('start_time'));
-        v_end_time_tz   := fn_parse_iso_date(v_json_req.get_string('end_time'));
 
         -- Normalizar a TIMESTAMP (tabla appointment usa TIMESTAMP)
         v_start_time := CAST(v_start_time_tz AS TIMESTAMP);
-        v_end_time   := CAST(v_end_time_tz   AS TIMESTAMP);
 
         -- Si es profesional, no puede reasignar a otro profesional
         IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
@@ -1137,6 +1164,21 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 RAISE_APPLICATION_ERROR(-20004, 'El profesional no realiza ese servicio.');
             END IF;
         END;
+
+        -- Fase 3: end_time siempre se recalcula server-side desde la duración del
+        -- servicio; nunca se confía en el end_time enviado por el cliente.
+        BEGIN
+            SELECT duration_minutes
+              INTO v_service_duration_minutes
+              FROM service
+             WHERE id_service = v_ser_id
+               AND org_id_organization = v_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(-20010, 'Servicio no encontrado.');
+        END;
+
+        v_end_time := v_start_time + NUMTODSINTERVAL(v_service_duration_minutes, 'MINUTE');
 
         -- Validaciones básicas
         IF v_start_time >= v_end_time THEN
@@ -1447,7 +1489,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             po_status_code := CASE
                 WHEN SQLCODE = pkg_aox_util.c_sqlcode_session THEN pkg_aox_util.c_unauthorized_code
                 WHEN SQLCODE = pkg_aox_util.c_sqlcode_forbidden THEN pkg_aox_util.c_forbidden_code
-                WHEN SQLCODE = -20004 THEN pkg_aox_util.c_not_found_code
+                WHEN SQLCODE IN (-20004, -20009, -20010) THEN pkg_aox_util.c_not_found_code
                 WHEN SQLCODE IN (-20003, -20005, -20006, -20007, -20008) THEN pkg_aox_util.c_bad_request_code
                 WHEN SQLCODE = -20002 THEN pkg_aox_util.c_conflict_code
                 ELSE pkg_aox_util.c_internal_error_code
@@ -1485,13 +1527,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         po_response_body OUT CLOB
     ) IS
         v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_user_id       NUMBER;
+        v_actual_pro_id NUMBER;
         v_start_time    appointment.start_time%TYPE;
         v_old_status    appointment.status%TYPE;
         v_old_pay_status appointment.payment_status%TYPE;
         v_old_deposit   appointment.deposit_amount%TYPE;
         v_response_json json_object_t := json_object_t();
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
@@ -1499,6 +1546,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
         -- Gate de suscripción: bloquea eliminación en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
+        -- Fase 5: mismo alcance PROFESIONAL que ya usan pr_get_appointment y
+        -- pr_update_appointment (evita el IDOR horizontal: un PROFESIONAL borrando
+        -- la cita de otro profesional de la misma organización).
+        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            BEGIN
+                SELECT id_professional
+                  INTO v_actual_pro_id
+                  FROM professional
+                WHERE usr_id_user         = v_user_id
+                  AND org_id_organization = v_org_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20001, 'Perfil no asignado.');
+            END;
+        END IF;
 
         SELECT
             start_time,
@@ -1512,7 +1575,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             v_old_deposit
           FROM appointment
          WHERE id_appointment      = pi_app_id
-           AND org_id_organization = v_org_id;
+           AND org_id_organization = v_org_id
+           AND (v_role_id != pkg_aox_util.fn_rol('PROFESIONAL') OR pro_id_professional = v_actual_pro_id);
 
         IF NVL(v_old_status, '-') IN ('CANCELADO', 'COMPLETADO') THEN
             RAISE_APPLICATION_ERROR(-20008, 'Las citas canceladas o completadas no se pueden eliminar.');
@@ -1632,6 +1696,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
     ) IS
         v_org_id        NUMBER;
         v_user_id       NUMBER;
+        v_role_id       NUMBER;
+        v_actual_pro_id NUMBER;
+        v_scope_count   NUMBER;
         v_json          json_object_t;
         v_base64        CLOB;
         v_filename      VARCHAR2(255);
@@ -1642,12 +1709,39 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_size          NUMBER := 0;
         v_response_json json_object_t := json_object_t();
         v_data_obj      json_object_t := json_object_t();
+        v_max_bytes     NUMBER;
+        v_max_b64_len   NUMBER;
     BEGIN
         v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+        END IF;
+
+        -- Fase 7: mismo alcance PROFESIONAL que pr_get_appointment/pr_delete_appointment.
+        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            BEGIN
+                SELECT id_professional
+                  INTO v_actual_pro_id
+                  FROM professional
+                WHERE usr_id_user         = v_user_id
+                  AND org_id_organization = v_org_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20001, 'Perfil no asignado.');
+            END;
+
+            SELECT COUNT(*) INTO v_scope_count
+              FROM appointment
+             WHERE id_appointment      = pi_app_id
+               AND org_id_organization = v_org_id
+               AND pro_id_professional = v_actual_pro_id;
+
+            IF v_scope_count = 0 THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No tienes permisos sobre esta cita.');
+            END IF;
         END IF;
 
         IF pi_body IS NULL OR DBMS_LOB.GETLENGTH(pi_body) = 0 THEN
@@ -1661,6 +1755,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
         IF v_base64 IS NULL OR DBMS_LOB.GETLENGTH(v_base64) = 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El archivo adjunto esta vacio.');
+        END IF;
+
+        -- Hardening (auditoría ORDS R2/R4): tope de tamaño ANTES de clobbase642blob,
+        -- igual criterio que pr_upload_public_receipt (largo base64 ~4/3 del binario).
+        v_max_bytes   := pkg_aox_util.fn_param_number('ATTACHMENT_MAX_BYTES', 20971520);
+        v_max_b64_len := CEIL(v_max_bytes / 3) * 4 + 4;
+        IF DBMS_LOB.GETLENGTH(v_base64) > v_max_b64_len THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'El archivo adjunto supera el tamaño máximo permitido (' || TRUNC(v_max_bytes / 1024 / 1024) || ' MB).'
+            );
         END IF;
 
         v_blob := apex_web_service.clobbase642blob(v_base64);
@@ -1707,22 +1812,44 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         po_response_body OUT CLOB
     ) IS
         v_org_id        NUMBER;
+        v_user_id       NUMBER;
+        v_role_id       NUMBER;
+        v_actual_pro_id NUMBER;
         v_cnt           NUMBER;
         v_response_json json_object_t := json_object_t();
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
 
-        -- El adjunto debe pertenecer a la cita indicada y a la organización.
+        -- Fase 7: mismo alcance PROFESIONAL que pr_get_appointment/pr_delete_appointment.
+        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            BEGIN
+                SELECT id_professional
+                  INTO v_actual_pro_id
+                  FROM professional
+                WHERE usr_id_user         = v_user_id
+                  AND org_id_organization = v_org_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20001, 'Perfil no asignado.');
+            END;
+        END IF;
+
+        -- El adjunto debe pertenecer a la cita indicada, a la organización y,
+        -- si el rol es PROFESIONAL, a una cita de ese profesional.
         SELECT COUNT(*)
           INTO v_cnt
-          FROM appointment_attachment
-         WHERE id_attachment       = pi_attachment_id
-           AND app_id_appointment  = pi_app_id
-           AND org_id_organization = v_org_id;
+          FROM appointment_attachment att
+          JOIN appointment a ON a.id_appointment = att.app_id_appointment
+         WHERE att.id_attachment       = pi_attachment_id
+           AND att.app_id_appointment  = pi_app_id
+           AND att.org_id_organization = v_org_id
+           AND (v_role_id != pkg_aox_util.fn_rol('PROFESIONAL') OR a.pro_id_professional = v_actual_pro_id);
 
         IF v_cnt = 0 THEN
             RAISE_APPLICATION_ERROR(-20004, 'Adjunto no encontrado.');
