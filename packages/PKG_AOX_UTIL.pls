@@ -30,12 +30,17 @@ CREATE OR REPLACE package pkg_aox_util as
     c_api_code_conflict             constant varchar2(30) := 'CONFLICT';
     c_api_code_rate_limited         constant varchar2(30) := 'RATE_LIMITED';
     c_api_code_internal_error       constant varchar2(30) := 'INTERNAL_ERROR';
+    c_api_code_idempotency_progress constant varchar2(30) := 'IDEMPOTENCY_IN_PROGRESS';
+    c_api_code_idempotency_conflict constant varchar2(30) := 'IDEMPOTENCY_KEY_REUSED';
 
     /** SQLCODE de aplicación: JWT/sesión (-20001), validación (-20002), permisos (-20011), rate limit (-20029). */
     c_sqlcode_session               constant number := -20001;
     c_sqlcode_validation            constant number := -20002;
     c_sqlcode_forbidden             constant number := -20011;
     c_sqlcode_rate_limit            constant number := -20029;
+    /** Idempotency-Key (framework generico): mismo key en vuelo (-20037) o reusado con datos distintos (-20038). */
+    c_sqlcode_idempotency_progress  constant number := -20037;
+    c_sqlcode_idempotency_conflict  constant number := -20038;
 
     /** Algoritmos de hash de password (platform_user.password_algo). */
     c_password_algo_legacy          constant varchar2(30) := 'SHA256_LEGACY';
@@ -294,6 +299,41 @@ CREATE OR REPLACE package pkg_aox_util as
         pi_key           IN VARCHAR2,
         pi_max_attempts  IN NUMBER,
         pi_window_sec    IN NUMBER
+    );
+
+    /**
+     * Framework genérico de Idempotency-Key (estilo Stripe). Registra el intento
+     * scope+key de forma atómica y resuelve qué debe hacer el llamador:
+     *   NEW         -> seguir el flujo normal (primera vez que se ve esta key).
+     *   REPLAY      -> ya se completó antes con el mismo pi_request_hash; devolver
+     *                  po_response_status/po_response_payload sin re-ejecutar la operación.
+     *   IN_PROGRESS -> mismo scope+key en vuelo concurrente (request duplicada en simultáneo).
+     *   CONFLICT    -> mismo scope+key pero pi_request_hash distinto (key reusada con otro payload).
+     * El llamador debe invocar pr_idempotency_complete tras un resultado exitoso, o
+     * pr_idempotency_release si la operación falló por un motivo técnico/transitorio.
+     */
+    PROCEDURE pr_idempotency_begin(
+        pi_scope             IN  VARCHAR2,
+        pi_key               IN  VARCHAR2,
+        pi_request_hash      IN  VARCHAR2,
+        pi_ttl_sec           IN  NUMBER DEFAULT 86400,
+        po_outcome           OUT VARCHAR2,
+        po_response_status   OUT NUMBER,
+        po_response_payload  OUT CLOB
+    );
+
+    /** Marca una idempotency key como COMPLETED y guarda el resultado para replay futuro. */
+    PROCEDURE pr_idempotency_complete(
+        pi_scope             IN VARCHAR2,
+        pi_key               IN VARCHAR2,
+        pi_response_status   IN NUMBER,
+        pi_response_payload  IN CLOB
+    );
+
+    /** Libera (borra) una idempotency key IN_PROGRESS tras una falla técnica/transitoria, para permitir un retry limpio. */
+    PROCEDURE pr_idempotency_release(
+        pi_scope IN VARCHAR2,
+        pi_key   IN VARCHAR2
     );
 
     -- Encripta un texto usando AES-256
@@ -1230,6 +1270,111 @@ CREATE OR REPLACE package body pkg_aox_util as
         END IF;
     END pr_assert_rate_limit;
 
+    PROCEDURE pr_idempotency_begin(
+        pi_scope             IN  VARCHAR2,
+        pi_key               IN  VARCHAR2,
+        pi_request_hash      IN  VARCHAR2,
+        pi_ttl_sec           IN  NUMBER DEFAULT 86400,
+        po_outcome           OUT VARCHAR2,
+        po_response_status   OUT NUMBER,
+        po_response_payload  OUT CLOB
+    ) IS
+        v_scope       VARCHAR2(64)  := UPPER(TRIM(pi_scope));
+        v_key         VARCHAR2(255) := TRIM(pi_key);
+        v_hash        VARCHAR2(64)  := TRIM(pi_request_hash);
+        v_ttl         NUMBER := NVL(pi_ttl_sec, 86400);
+        v_now         TIMESTAMP WITH TIME ZONE := SYSTIMESTAMP;
+        v_exist_status  VARCHAR2(20);
+        v_exist_hash    VARCHAR2(64);
+    BEGIN
+        po_outcome          := 'NEW';
+        po_response_status  := NULL;
+        po_response_payload  := NULL;
+
+        IF v_scope IS NULL OR v_key IS NULL THEN
+            RETURN;
+        END IF;
+
+        DELETE FROM api_idempotency_key
+         WHERE scope_code = v_scope
+           AND idem_key    = v_key
+           AND expires_at  < v_now;
+
+        BEGIN
+            INSERT INTO api_idempotency_key (
+                scope_code, idem_key, request_hash, status, created_at, expires_at
+            ) VALUES (
+                v_scope, v_key, v_hash, 'IN_PROGRESS', v_now, v_now + NUMTODSINTERVAL(v_ttl, 'SECOND')
+            );
+            po_outcome := 'NEW';
+            RETURN;
+        EXCEPTION
+            WHEN DUP_VAL_ON_INDEX THEN
+                NULL; -- ya existe una fila con este scope+key: resolver outcome abajo
+        END;
+
+        SELECT status, request_hash, response_status_code, response_payload
+          INTO v_exist_status, v_exist_hash, po_response_status, po_response_payload
+          FROM api_idempotency_key
+         WHERE scope_code = v_scope
+           AND idem_key    = v_key;
+
+        IF v_exist_hash != v_hash THEN
+            po_outcome          := 'CONFLICT';
+            po_response_status  := NULL;
+            po_response_payload  := NULL;
+            RETURN;
+        END IF;
+
+        IF v_exist_status = 'COMPLETED' THEN
+            po_outcome := 'REPLAY';
+            RETURN;
+        END IF;
+
+        po_outcome          := 'IN_PROGRESS';
+        po_response_status  := NULL;
+        po_response_payload  := NULL;
+    END pr_idempotency_begin;
+
+    PROCEDURE pr_idempotency_complete(
+        pi_scope             IN VARCHAR2,
+        pi_key               IN VARCHAR2,
+        pi_response_status   IN NUMBER,
+        pi_response_payload  IN CLOB
+    ) IS
+        v_scope VARCHAR2(64)  := UPPER(TRIM(pi_scope));
+        v_key   VARCHAR2(255) := TRIM(pi_key);
+    BEGIN
+        IF v_scope IS NULL OR v_key IS NULL THEN
+            RETURN;
+        END IF;
+
+        UPDATE api_idempotency_key
+           SET status               = 'COMPLETED',
+               response_status_code = pi_response_status,
+               response_payload     = pi_response_payload,
+               completed_at         = SYSTIMESTAMP
+         WHERE scope_code = v_scope
+           AND idem_key    = v_key;
+    END pr_idempotency_complete;
+
+    PROCEDURE pr_idempotency_release(
+        pi_scope IN VARCHAR2,
+        pi_key   IN VARCHAR2
+    ) IS
+        v_scope VARCHAR2(64)  := UPPER(TRIM(pi_scope));
+        v_key   VARCHAR2(255) := TRIM(pi_key);
+    BEGIN
+        IF v_scope IS NULL OR v_key IS NULL THEN
+            RETURN;
+        END IF;
+
+        DELETE FROM api_idempotency_key
+         WHERE scope_code = v_scope
+           AND idem_key    = v_key
+           AND status      = 'IN_PROGRESS';
+    END pr_idempotency_release;
+
     FUNCTION fn_encrypt_data(pi_text IN VARCHAR2) RETURN VARCHAR2 IS
         -- Obtenemos una clave secreta de 32 caracteres de tu tabla de parámetros
         v_key RAW(32) := UTL_RAW.CAST_TO_RAW(fn_get_parameter('HASEL_SECRET_KEY'));
@@ -1669,6 +1814,10 @@ CREATE OR REPLACE package body pkg_aox_util as
             return c_api_code_validation_error;
         elsif pi_sqlcode = c_sqlcode_rate_limit then
             return c_api_code_rate_limited;
+        elsif pi_sqlcode = c_sqlcode_idempotency_progress then
+            return c_api_code_idempotency_progress;
+        elsif pi_sqlcode = c_sqlcode_idempotency_conflict then
+            return c_api_code_idempotency_conflict;
         end if;
 
         return c_api_code_internal_error;
@@ -1730,6 +1879,18 @@ CREATE OR REPLACE package body pkg_aox_util as
         if pi_sqlcode = c_sqlcode_rate_limit then
             po_status_code := c_too_many_requests_code;
             po_api_code    := c_api_code_rate_limited;
+            return;
+        end if;
+
+        if pi_sqlcode = c_sqlcode_idempotency_progress then
+            po_status_code := c_conflict_code;
+            po_api_code    := c_api_code_idempotency_progress;
+            return;
+        end if;
+
+        if pi_sqlcode = c_sqlcode_idempotency_conflict then
+            po_status_code := c_conflict_code;
+            po_api_code    := c_api_code_idempotency_conflict;
             return;
         end if;
 

@@ -22,6 +22,9 @@ PROMPT [5/29] app_parameter
 PROMPT [5b] api_rate_limit_bucket
 @@tables\API_RATE_LIMIT_BUCKET.sql
 
+PROMPT [5c] api_idempotency_key
+@@tables\API_IDEMPOTENCY_KEY.sql
+
 PROMPT [6/29] organization
 @@tables\ORGANIZATION.sql
 

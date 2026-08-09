@@ -136,10 +136,11 @@ DECLARE
     v_response_body CLOB;
 BEGIN
     pkg_aox_subscription_billing_api.pr_activate_subscription(
-        pi_auth_header   => owa_util.get_cgi_env('AUTHORIZATION'),
-        pi_body          => :body_text,
-        po_status_code   => v_status_code,
-        po_response_body => v_response_body
+        pi_auth_header      => owa_util.get_cgi_env('AUTHORIZATION'),
+        pi_body             => :body_text,
+        po_status_code      => v_status_code,
+        po_response_body    => v_response_body,
+        pi_idempotency_key  => owa_util.get_cgi_env('HTTP_IDEMPOTENCY_KEY')
     );
     :status := v_status_code;
     owa_util.mime_header('application/json', TRUE);

@@ -24,11 +24,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
     );
 
     -- POST /workspace/subscription/checkout  (inicia pago Pagopar de plan o addon)
+    -- pi_idempotency_key (header Idempotency-Key): evita doble cobro si el cliente reintenta
+    -- la misma peticion (ver PKG_AOX_UTIL.pr_idempotency_begin).
     PROCEDURE pr_create_checkout(
-        pi_auth_header   IN  VARCHAR2,
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_auth_header      IN  VARCHAR2,
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     );
 
     -- POST /workspace/subscription/change-plan
@@ -130,11 +133,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
     );
 
     -- POST /workspace/subscription/activate  -> primer cobro recurrente con la tarjeta default
+    -- pi_idempotency_key (header Idempotency-Key): evita doble cobro si el cliente reintenta
+    -- la misma peticion (ver PKG_AOX_UTIL.pr_idempotency_begin).
     PROCEDURE pr_activate_subscription(
-        pi_auth_header   IN  VARCHAR2,
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_auth_header      IN  VARCHAR2,
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     );
 
     -- Job HASEL_SUBSCRIPTION_BILLING_CYCLE: cobro mensual automatico + dunning.
@@ -857,13 +863,25 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
      * Si net=0: PAID inmediato sin Pagopar. Si net>0: webhook confirma PAID.
      */
     PROCEDURE pr_charge_target(
-        pi_org_id      IN  NUMBER,
-        pi_target_type IN  VARCHAR2,
-        pi_plan_code   IN  VARCHAR2,
-        pi_addon_code  IN  VARCHAR2,
-        po_invoice_id  OUT NUMBER,
-        po_hash        OUT VARCHAR2
+        pi_org_id           IN  NUMBER,
+        pi_target_type      IN  VARCHAR2,
+        pi_plan_code        IN  VARCHAR2,
+        pi_addon_code       IN  VARCHAR2,
+        po_invoice_id       OUT NUMBER,
+        po_hash             OUT VARCHAR2,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     ) IS
+        -- Idempotencia (framework generico PKG_AOX_UTIL): protege el unico choke point
+        -- de cobro de suscripcion/addon (checkout, activate y billing cycle) contra
+        -- doble cobro por reintento de red.
+        c_idem_scope        CONSTANT VARCHAR2(64) := 'SUBSCRIPTION_CHARGE_TARGET';
+        v_idem_key          VARCHAR2(255) := TRIM(pi_idempotency_key);
+        v_idem_request_hash VARCHAR2(64);
+        v_idem_outcome      VARCHAR2(20);
+        v_idem_resp_status  NUMBER;
+        v_idem_resp_payload CLOB;
+        v_idem_replay       json_object_t;
+
         v_public_key   VARCHAR2(500);
         v_private_key  VARCHAR2(500);
         v_sub_id       org_subscription.id_subscription%TYPE;
@@ -893,6 +911,56 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_pay_raw      CLOB;
         v_pay_resp     json_object_t;
         v_target       VARCHAR2(20) := UPPER(TRIM(pi_target_type));
+
+        PROCEDURE lp_idem_complete(pi_invoice_id IN NUMBER, pi_hash IN VARCHAR2) IS
+            v_payload json_object_t := json_object_t();
+        BEGIN
+            IF v_idem_key IS NULL THEN
+                RETURN;
+            END IF;
+            v_payload.put('invoice_id', pi_invoice_id);
+            v_payload.put('hash', pi_hash);
+            pkg_aox_util.pr_idempotency_complete(c_idem_scope, v_idem_key, 200, v_payload.to_clob());
+        END lp_idem_complete;
+    BEGIN
+        IF v_idem_key IS NOT NULL THEN
+            v_idem_request_hash := RAWTOHEX(DBMS_CRYPTO.HASH(
+                UTL_I18N.STRING_TO_RAW(
+                    TO_CHAR(pi_org_id) || '|' || v_target || '|' ||
+                    NVL(UPPER(TRIM(pi_plan_code)), '') || '|' || NVL(UPPER(TRIM(pi_addon_code)), ''),
+                    'AL32UTF8'
+                ),
+                DBMS_CRYPTO.HASH_SH256
+            ));
+
+            pkg_aox_util.pr_idempotency_begin(
+                pi_scope             => c_idem_scope,
+                pi_key               => v_idem_key,
+                pi_request_hash      => v_idem_request_hash,
+                po_outcome           => v_idem_outcome,
+                po_response_status   => v_idem_resp_status,
+                po_response_payload  => v_idem_resp_payload
+            );
+
+            IF v_idem_outcome = 'REPLAY' THEN
+                v_idem_replay := json_object_t.parse(v_idem_resp_payload);
+                po_invoice_id := v_idem_replay.get_number('invoice_id');
+                po_hash       := v_idem_replay.get_string('hash');
+                RETURN;
+            ELSIF v_idem_outcome = 'IN_PROGRESS' THEN
+                RAISE_APPLICATION_ERROR(
+                    pkg_aox_util.c_sqlcode_idempotency_progress,
+                    'Ya hay un cobro en curso para esta operacion. Espera unos segundos e intenta de nuevo.'
+                );
+            ELSIF v_idem_outcome = 'CONFLICT' THEN
+                RAISE_APPLICATION_ERROR(
+                    pkg_aox_util.c_sqlcode_idempotency_conflict,
+                    'La clave de idempotencia ya fue usada con una operacion distinta.'
+                );
+            END IF;
+            -- outcome = 'NEW': continua el flujo normal abajo
+        END IF;
+
     BEGIN
         SELECT id_subscription, NVL(is_founder, 0)
           INTO v_sub_id, v_founder
@@ -994,6 +1062,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                 pr_activate_addon_free(pi_org_id, v_addon_id);
                 po_invoice_id := NULL;
                 po_hash       := NULL;
+                lp_idem_complete(po_invoice_id, po_hash);
                 RETURN;
             END IF;
             v_invoice_type := 'STORAGE_ADDON';
@@ -1029,6 +1098,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             END IF;
             COMMIT;
             po_hash := NULL;
+            lp_idem_complete(po_invoice_id, po_hash);
             RETURN;
         END IF;
 
@@ -1088,6 +1158,21 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             COMMIT;
             RAISE_APPLICATION_ERROR(-20032, NVL(v_pay_resp.get_string('resultado'), 'Pagopar rechazo el cobro de la tarjeta.'));
         END IF;
+
+        lp_idem_complete(po_invoice_id, po_hash);
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Libera la key ante fallas tecnicas/transitorias (sin cobro confirmado) para no
+            -- bloquear un retry legitimo. Los rechazos de negocio (validacion, sin tarjeta,
+            -- Pagopar rechazo explicito) dejan la key IN_PROGRESS: el frontend emite una key
+            -- nueva para el siguiente intento del usuario (ver Fase 4 del plan).
+            IF v_idem_key IS NOT NULL AND SQLCODE NOT IN (
+                pkg_aox_util.c_sqlcode_validation, pkg_aox_util.c_sqlcode_forbidden, -20031, -20032
+            ) THEN
+                pkg_aox_util.pr_idempotency_release(c_idem_scope, v_idem_key);
+            END IF;
+            RAISE;
+    END;
     END pr_charge_target;
 
     --------------------------------------------------------------------------
@@ -1358,10 +1443,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     -- POST /workspace/subscription/checkout
     --------------------------------------------------------------------------
     PROCEDURE pr_create_checkout(
-        pi_auth_header   IN  VARCHAR2,
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_auth_header      IN  VARCHAR2,
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     ) IS
         v_org_id      NUMBER;
         v_req         json_object_t;
@@ -1383,12 +1469,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_addon_code  := UPPER(TRIM(v_req.get_string('addon_code')));
 
         pr_charge_target(
-            pi_org_id      => v_org_id,
-            pi_target_type => v_target_type,
-            pi_plan_code   => v_plan_code,
-            pi_addon_code  => v_addon_code,
-            po_invoice_id  => v_invoice_id,
-            po_hash        => v_hash
+            pi_org_id           => v_org_id,
+            pi_target_type      => v_target_type,
+            pi_plan_code        => v_plan_code,
+            pi_addon_code       => v_addon_code,
+            po_invoice_id       => v_invoice_id,
+            po_hash             => v_hash,
+            pi_idempotency_key  => pi_idempotency_key
         );
 
         IF v_hash IS NULL AND v_target_type = 'STORAGE_ADDON' THEN
@@ -2024,6 +2111,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_pagado         := v_result_obj.get_boolean('pagado');
 
         BEGIN
+            -- FOR UPDATE: si dos entregas concurrentes del mismo webhook llegan en simultaneo,
+            -- la segunda espera a que la primera confirme/commitee y ve status ya actualizado
+            -- (cae en el check "ya esta PAID" de abajo en vez de reprocesar).
             SELECT id_invoice, org_id_organization, invoice_type, status, pln_id_plan,
                    sad_id_storage_addon, amount, credit_applied, period_start, period_end, description
               INTO v_invoice_id, v_org_id, v_invoice_type, v_status, v_plan_id,
@@ -2031,7 +2121,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
               FROM org_subscription_invoice
              WHERE external_reference = v_hash_pedido
              ORDER BY id_invoice DESC
-             FETCH FIRST 1 ROW ONLY;
+             FETCH FIRST 1 ROW ONLY
+               FOR UPDATE OF status;
         EXCEPTION WHEN NO_DATA_FOUND THEN
             po_status_code := 404;
             po_response_body := '{"status":"error","message":"Factura no encontrada."}';
@@ -2352,10 +2443,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     END pr_delete_card;
 
     PROCEDURE pr_activate_subscription(
-        pi_auth_header   IN  VARCHAR2,
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_auth_header      IN  VARCHAR2,
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     ) IS
         v_org_id      NUMBER;
         v_req         json_object_t;
@@ -2384,12 +2476,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         pr_charge_target(
-            pi_org_id      => v_org_id,
-            pi_target_type => v_target_type,
-            pi_plan_code   => v_plan_code,
-            pi_addon_code  => v_addon_code,
-            po_invoice_id  => v_invoice_id,
-            po_hash        => v_hash
+            pi_org_id           => v_org_id,
+            pi_target_type      => v_target_type,
+            pi_plan_code        => v_plan_code,
+            pi_addon_code       => v_addon_code,
+            po_invoice_id       => v_invoice_id,
+            po_hash             => v_hash,
+            pi_idempotency_key  => pi_idempotency_key
         );
 
         -- Sin hash: alta gratis (addon 0 dias) o factura cubierta 100% por saldo a favor.
@@ -2505,13 +2598,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                 COMMIT;
 
                 -- Un solo cargo: plan efectivo (BASE o PREMIUM) + addons ACTIVE, menos account_balance.
+                -- Key deterministica org+dia: si el job corre dos veces el mismo dia (overlap/retry
+                -- del scheduler) no duplica el cobro del ciclo.
                 pr_charge_target(
-                    pi_org_id      => rec.org_id,
-                    pi_target_type => 'CONSOLIDATED',
-                    pi_plan_code   => v_plan_code,
-                    pi_addon_code  => NULL,
-                    po_invoice_id  => v_invoice_id,
-                    po_hash        => v_hash
+                    pi_org_id           => rec.org_id,
+                    pi_target_type      => 'CONSOLIDATED',
+                    pi_plan_code        => v_plan_code,
+                    pi_addon_code       => NULL,
+                    po_invoice_id       => v_invoice_id,
+                    po_hash             => v_hash,
+                    pi_idempotency_key  => 'CYCLE:' || rec.org_id || ':' || TO_CHAR(systimestamp, 'YYYYMMDD')
                 );
             EXCEPTION
                 WHEN OTHERS THEN

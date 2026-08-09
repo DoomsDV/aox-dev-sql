@@ -61,10 +61,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_public_booking_api IS
     );
 
     -- Crear cita pública (Sin JWT)
+    -- pi_idempotency_key (header Idempotency-Key, opcional): si el cliente reintenta el POST
+    -- (timeout de red) con la misma key, se devuelve la cita ya creada (REPLAY) en vez de
+    -- fallar por solape (ver PKG_AOX_UTIL.pr_idempotency_begin).
     PROCEDURE pr_create_public_app(
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     );
 
     -- Validar si un cliente existe por su número de teléfono (API Pública)
@@ -106,11 +110,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_public_booking_api IS
     );
 
     -- Fase B2: subir comprobante SIPAP + OCR (token de gestion publica)
+    -- pi_idempotency_key (header Idempotency-Key, opcional): evita re-subir/re-correr OCR si
+    -- el cliente reintenta el POST por timeout de red (ver PKG_AOX_UTIL.pr_idempotency_begin).
     PROCEDURE pr_upload_public_receipt(
-        pi_public_token  IN  VARCHAR2,
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_public_token     IN  VARCHAR2,
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     );
 
 END pkg_aox_public_booking_api;
@@ -1247,10 +1254,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
 
     -- API 3: Crear Cita Pública
     PROCEDURE pr_create_public_app(
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     ) IS
+        c_idem_scope        CONSTANT VARCHAR2(64) := 'PUBLIC_BOOKING_CREATE';
+        v_idem_key          VARCHAR2(255) := TRIM(pi_idempotency_key);
+        v_idem_request_hash VARCHAR2(64);
+        v_idem_outcome      VARCHAR2(20);
+        v_idem_resp_status  NUMBER;
+        v_idem_resp_payload CLOB;
+
         v_json_req      json_object_t;
         v_response_json json_object_t := json_object_t();
         v_org_id        NUMBER;
@@ -1261,6 +1276,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_end_time      TIMESTAMP WITH TIME ZONE;
         v_overlap_count NUMBER;
         v_available_count NUMBER;
+        v_lock_dummy    NUMBER;
+        v_loc_count     NUMBER;
+        v_service_duration_minutes service.duration_minutes%TYPE;
 
         -- Nuevas variables para cliente
         v_cus_phone            VARCHAR2(20);
@@ -1293,6 +1311,54 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         -- Extraer los datos del cliente desde el JSON
         v_cus_phone  := TRIM(v_json_req.get_string('customer_phone'));
         v_cus_name   := TRIM(v_json_req.get_string('customer_name'));
+
+        IF v_idem_key IS NOT NULL THEN
+            v_idem_request_hash := RAWTOHEX(DBMS_CRYPTO.HASH(
+                UTL_I18N.STRING_TO_RAW(
+                    TO_CHAR(v_org_id) || '|' || TO_CHAR(v_pro_id) || '|' || TO_CHAR(v_loc_id) || '|' ||
+                    TO_CHAR(v_ser_id) || '|' || NVL(v_cus_phone, '') || '|' ||
+                    NVL(v_json_req.get_string('start_time'), ''),
+                    'AL32UTF8'
+                ),
+                DBMS_CRYPTO.HASH_SH256
+            ));
+
+            pkg_aox_util.pr_idempotency_begin(
+                pi_scope             => c_idem_scope,
+                pi_key               => v_idem_key,
+                pi_request_hash      => v_idem_request_hash,
+                po_outcome           => v_idem_outcome,
+                po_response_status   => v_idem_resp_status,
+                po_response_payload  => v_idem_resp_payload
+            );
+
+            IF v_idem_outcome = 'REPLAY' THEN
+                -- Reintento del mismo pedido: devolver la cita ya creada en vez de fallar por
+                -- solape/duplicado.
+                po_status_code    := v_idem_resp_status;
+                po_response_body  := v_idem_resp_payload;
+                RETURN;
+            ELSIF v_idem_outcome = 'IN_PROGRESS' THEN
+                po_status_code := pkg_aox_util.c_conflict_code;
+                pkg_aox_util.pr_build_api_error_response(
+                    pi_status_code   => po_status_code,
+                    pi_api_code      => pkg_aox_util.c_api_code_idempotency_progress,
+                    pi_message       => 'Ya hay una reserva en curso para esta operacion. Espera unos segundos e intenta de nuevo.',
+                    po_response_body => po_response_body
+                );
+                RETURN;
+            ELSIF v_idem_outcome = 'CONFLICT' THEN
+                po_status_code := pkg_aox_util.c_conflict_code;
+                pkg_aox_util.pr_build_api_error_response(
+                    pi_status_code   => po_status_code,
+                    pi_api_code      => pkg_aox_util.c_api_code_idempotency_conflict,
+                    pi_message       => 'La clave de idempotencia ya fue usada con una reserva distinta.',
+                    po_response_body => po_response_body
+                );
+                RETURN;
+            END IF;
+            -- outcome = 'NEW': continua el flujo normal abajo
+        END IF;
 
         BEGIN
             pkg_aox_util.pr_assert_rate_limit(
@@ -1348,14 +1414,29 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             END;
         END IF;
 
-        SELECT NVL(requires_deposit, 0), deposit_type, deposit_value
-          INTO v_requires_deposit, v_deposit_type, v_deposit_value
+        -- Fase 6: la sucursal debe pertenecer a la misma organización.
+        SELECT COUNT(*) INTO v_loc_count
+          FROM location
+         WHERE id_location = v_loc_id AND org_id_organization = v_org_id;
+
+        IF v_loc_count = 0 THEN
+            RAISE_APPLICATION_ERROR(-20025, 'Sucursal no encontrada.');
+        END IF;
+
+        SELECT NVL(requires_deposit, 0), deposit_type, deposit_value, duration_minutes
+          INTO v_requires_deposit, v_deposit_type, v_deposit_value, v_service_duration_minutes
           FROM service
          WHERE id_service = v_ser_id
            AND org_id_organization = v_org_id;
 
         IF v_reserve_for_deposit AND NVL(v_requires_deposit, 0) = 0 THEN
             RAISE_APPLICATION_ERROR(-20020, 'Este servicio no requiere seña.');
+        END IF;
+
+        -- Fase 2: si el servicio exige seña, forzar el hold SIPAP sin depender
+        -- del flag reserve_for_deposit enviado por el cliente (bypass de seña obligatoria).
+        IF NVL(v_requires_deposit, 0) = 1 AND NOT v_reserve_for_deposit THEN
+            v_reserve_for_deposit := TRUE;
         END IF;
 
         IF v_reserve_for_deposit THEN
@@ -1402,7 +1483,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         -- Parsear la Z y la T
         -- Parsear ignorando el TimeZone del cliente para forzar la hora local exacta
         v_start_time := TO_TIMESTAMP(SUBSTR(REPLACE(v_json_req.get_string('start_time'), 'T', ' '), 1, 19), 'YYYY-MM-DD HH24:MI:SS');
-        v_end_time   := TO_TIMESTAMP(SUBSTR(REPLACE(v_json_req.get_string('end_time'), 'T', ' '), 1, 19), 'YYYY-MM-DD HH24:MI:SS');
+
+        -- Fase 3: end_time siempre se recalcula server-side desde la duración del
+        -- servicio; nunca se confía en el end_time enviado por el cliente.
+        v_end_time := v_start_time + NUMTODSINTERVAL(v_service_duration_minutes, 'MINUTE');
+
+        -- Fase 1: lock del profesional para evitar doble booking concurrente
+        -- (mismo patrón que ya usa el panel en pr_create_appointment_row).
+        SELECT 1
+          INTO v_lock_dummy
+          FROM professional
+        WHERE id_professional     = v_pro_id
+          AND org_id_organization = v_org_id
+        FOR UPDATE;
 
         SELECT
             COUNT(*)
@@ -1552,6 +1645,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_response_json.put('refund_policy_label', fn_policy_label(v_policy_code));
             v_response_json.put('refund_policy_summary', fn_policy_summary(v_policy_code));
             po_response_body := v_response_json.to_clob();
+            IF v_idem_key IS NOT NULL THEN
+                pkg_aox_util.pr_idempotency_complete(c_idem_scope, v_idem_key, po_status_code, po_response_body);
+            END IF;
             RETURN;
         END IF;
 
@@ -1605,6 +1701,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_response_json.put('message' , '¡Cita confirmada exitosamente!');
         v_response_json.put('appointment_id', v_new_app_id);
         po_response_body := v_response_json.to_clob();
+        IF v_idem_key IS NOT NULL THEN
+            pkg_aox_util.pr_idempotency_complete(c_idem_scope, v_idem_key, po_status_code, po_response_body);
+        END IF;
 
     EXCEPTION
         WHEN OTHERS THEN
@@ -1613,9 +1712,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 WHEN SQLCODE = -20002 THEN pkg_aox_util.c_conflict_code
                 WHEN SQLCODE = -20003 THEN pkg_aox_util.c_bad_request_code
                 WHEN SQLCODE = -20004 THEN pkg_aox_util.c_conflict_code
-                WHEN SQLCODE IN (-20020, -20021) THEN pkg_aox_util.c_bad_request_code
+                WHEN SQLCODE IN (-20020, -20021, -20022, -20023, -20024) THEN pkg_aox_util.c_bad_request_code
+                WHEN SQLCODE = -20025 THEN pkg_aox_util.c_not_found_code
                 ELSE pkg_aox_util.c_internal_error_code
             END;
+            -- Libera la key ante fallas tecnicas/transitorias (sin cita confirmada) para no
+            -- bloquear un retry legitimo; los rechazos de negocio dejan la key IN_PROGRESS.
+            IF v_idem_key IS NOT NULL AND SQLCODE NOT IN (
+                -20002, -20003, -20004, -20020, -20021, -20022, -20023, -20024, -20025
+            ) THEN
+                pkg_aox_util.pr_idempotency_release(c_idem_scope, v_idem_key);
+            END IF;
             pkg_aox_util.pr_log_api(
                 pi_api_name        => 'PUBLIC_APPOINTMENTS_CREATE',
                 pi_process_name    => 'PKG_AOX_PUBLIC_BOOKING_API.PR_CREATE_PUBLIC_APP',
@@ -1926,14 +2033,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_overlap_count     NUMBER;
         v_available_count   NUMBER;
         v_schedule_changed  BOOLEAN;
+        v_payment_status    appointment.payment_status%TYPE;
+        v_service_duration_minutes service.duration_minutes%TYPE;
+        v_loc_count         NUMBER;
     BEGIN
         v_json_req := json_object_t.parse(pi_body);
         v_start_time := TO_TIMESTAMP(SUBSTR(REPLACE(v_json_req.get_string('start_time'), 'T', ' '), 1, 19), 'YYYY-MM-DD HH24:MI:SS');
-        v_end_time   := TO_TIMESTAMP(SUBSTR(REPLACE(v_json_req.get_string('end_time'), 'T', ' '), 1, 19), 'YYYY-MM-DD HH24:MI:SS');
-
-        IF v_start_time >= v_end_time THEN
-            RAISE_APPLICATION_ERROR(-20003, 'La fecha/hora de inicio debe ser menor a la de fin.');
-        END IF;
 
         SELECT
             a.id_appointment,
@@ -1944,6 +2049,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             a.status,
             a.start_time,
             a.end_time,
+            a.payment_status,
             c.full_name
         INTO
             v_app_id,
@@ -1954,6 +2060,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_status,
             v_old_start_time,
             v_old_end_time,
+            v_payment_status,
             v_cus_name
         FROM appointment a
         JOIN customer c
@@ -1968,10 +2075,33 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
 
         IF v_json_req.has('loc_id_location') THEN
             v_loc_id := v_json_req.get_number('loc_id_location');
+
+            -- Fase 6: la sucursal debe pertenecer a la misma organización.
+            SELECT COUNT(*) INTO v_loc_count
+              FROM location
+             WHERE id_location = v_loc_id AND org_id_organization = v_org_id;
+
+            IF v_loc_count = 0 THEN
+                RAISE_APPLICATION_ERROR(-20025, 'Sucursal no encontrada.');
+            END IF;
         END IF;
 
         IF v_status = 'CANCELADO' THEN
             RAISE_APPLICATION_ERROR(-20005, 'No se puede modificar una reserva cancelada.');
+        END IF;
+
+        -- Fase 3: end_time siempre se recalcula server-side desde la duración del
+        -- servicio; nunca se confía en el end_time enviado por el cliente.
+        SELECT duration_minutes
+          INTO v_service_duration_minutes
+          FROM service
+         WHERE id_service = v_ser_id
+           AND org_id_organization = v_org_id;
+
+        v_end_time := v_start_time + NUMTODSINTERVAL(v_service_duration_minutes, 'MINUTE');
+
+        IF v_start_time >= v_end_time THEN
+            RAISE_APPLICATION_ERROR(-20003, 'La fecha/hora de inicio debe ser menor a la de fin.');
         END IF;
 
         SELECT COUNT(*)
@@ -2007,7 +2137,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
            SET loc_id_location     = v_loc_id,
                start_time          = v_start_time,
                end_time            = v_end_time,
-               status              = 'CONFIRMADO',
+               -- Fase 4: si es un hold SIPAP sin pagar, la reprogramación no debe
+               -- "confirmar" la cita sin que se haya completado el pago de la seña.
+               status              = CASE WHEN v_payment_status = 'PENDING' THEN 'PENDIENTE' ELSE 'CONFIRMADO' END,
                attendance_status   = 'NOT_REQUESTED',
                attendance_sent_at  = NULL,
                attendance_due_at   = NULL,
@@ -2067,6 +2199,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             po_status_code := CASE
                 WHEN SQLCODE IN (-20003, -20005) THEN pkg_aox_util.c_bad_request_code
                 WHEN SQLCODE IN (-20002, -20004) THEN pkg_aox_util.c_conflict_code
+                WHEN SQLCODE = -20025 THEN pkg_aox_util.c_not_found_code
                 ELSE pkg_aox_util.c_internal_error_code
             END;
             pkg_aox_util.pr_log_api(
@@ -2369,11 +2502,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
 
     -- Fase B2: subir comprobante + OCR sync. Token = public_manage_token del hold SIPAP.
     PROCEDURE pr_upload_public_receipt(
-        pi_public_token  IN  VARCHAR2,
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_public_token     IN  VARCHAR2,
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     ) IS
+        c_idem_scope        CONSTANT VARCHAR2(64) := 'PUBLIC_RECEIPT_UPLOAD';
+        v_idem_key          VARCHAR2(255) := TRIM(pi_idempotency_key);
+        v_idem_request_hash VARCHAR2(64);
+        v_idem_outcome      VARCHAR2(20);
+        v_idem_resp_status  NUMBER;
+        v_idem_resp_payload CLOB;
+
         v_json            json_object_t;
         v_base64          CLOB;
         v_filename        VARCHAR2(255);
@@ -2406,10 +2547,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_response_json   json_object_t := json_object_t();
         v_data_obj        json_object_t := json_object_t();
         v_is_image        BOOLEAN := FALSE;
+        v_max_bytes       NUMBER;
+        v_max_b64_len     NUMBER;
     BEGIN
         IF pi_public_token IS NULL OR LENGTH(TRIM(pi_public_token)) = 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Token de reserva requerido.');
         END IF;
+
+        -- Hardening (auditoría ORDS R1): limitar intentos de upload por reserva y por IP
+        -- antes de procesar el body, para frenar fuerza bruta / DoS con payloads grandes.
+        pkg_aox_util.pr_assert_rate_limit(
+            pi_scope        => 'PUBLIC_RECEIPT_UPLOAD',
+            pi_key          => TRIM(pi_public_token),
+            pi_max_attempts => pkg_aox_util.fn_param_number('RATE_LIMIT_RECEIPT_UPLOAD_MAX', 10),
+            pi_window_sec   => pkg_aox_util.fn_param_number('RATE_LIMIT_RECEIPT_UPLOAD_WINDOW_SEC', 900)
+        );
+        pkg_aox_util.pr_assert_rate_limit(
+            pi_scope        => 'PUBLIC_RECEIPT_UPLOAD_IP',
+            pi_key          => pkg_aox_util.fn_client_ip,
+            pi_max_attempts => pkg_aox_util.fn_param_number('RATE_LIMIT_RECEIPT_UPLOAD_IP_MAX', 30),
+            pi_window_sec   => pkg_aox_util.fn_param_number('RATE_LIMIT_RECEIPT_UPLOAD_IP_WINDOW_SEC', 900)
+        );
 
         IF pi_body IS NULL OR DBMS_LOB.GETLENGTH(pi_body) = 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Debes enviar el comprobante.');
@@ -2422,6 +2580,67 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
 
         IF v_base64 IS NULL OR DBMS_LOB.GETLENGTH(v_base64) = 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El comprobante esta vacio.');
+        END IF;
+
+        -- Hardening (auditoría ORDS R1/R4): tope de tamaño ANTES de clobbase642blob.
+        -- El tamaño en base64 es ~4/3 del binario; se calcula el largo máximo permitido
+        -- del CLOB codificado y se rechaza sin decodificar si lo supera.
+        v_max_bytes   := pkg_aox_util.fn_param_number('RECEIPT_MAX_BYTES', 8388608);
+        v_max_b64_len := CEIL(v_max_bytes / 3) * 4 + 4;
+        IF DBMS_LOB.GETLENGTH(v_base64) > v_max_b64_len THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'El comprobante supera el tamaño máximo permitido (' || TRUNC(v_max_bytes / 1024 / 1024) || ' MB).'
+            );
+        END IF;
+
+        IF v_idem_key IS NOT NULL THEN
+            -- Hash liviano (sin hashear los MB del base64 completo): token + metadata + largo
+            -- alcanza para distinguir "mismo intento reintentado" de "otro comprobante".
+            v_idem_request_hash := RAWTOHEX(DBMS_CRYPTO.HASH(
+                UTL_I18N.STRING_TO_RAW(
+                    TRIM(pi_public_token) || '|' || NVL(v_filename, '') || '|' || v_mime || '|' ||
+                    TO_CHAR(DBMS_LOB.GETLENGTH(v_base64)),
+                    'AL32UTF8'
+                ),
+                DBMS_CRYPTO.HASH_SH256
+            ));
+
+            pkg_aox_util.pr_idempotency_begin(
+                pi_scope             => c_idem_scope,
+                pi_key               => v_idem_key,
+                pi_request_hash      => v_idem_request_hash,
+                po_outcome           => v_idem_outcome,
+                po_response_status   => v_idem_resp_status,
+                po_response_payload  => v_idem_resp_payload
+            );
+
+            IF v_idem_outcome = 'REPLAY' THEN
+                -- Reintento del mismo upload: devolver el resultado ya procesado sin
+                -- re-subir el archivo ni re-correr el OCR.
+                po_status_code    := v_idem_resp_status;
+                po_response_body  := v_idem_resp_payload;
+                RETURN;
+            ELSIF v_idem_outcome = 'IN_PROGRESS' THEN
+                po_status_code := pkg_aox_util.c_conflict_code;
+                pkg_aox_util.pr_build_api_error_response(
+                    pi_status_code   => po_status_code,
+                    pi_api_code      => pkg_aox_util.c_api_code_idempotency_progress,
+                    pi_message       => 'Ya hay una subida en curso para este comprobante. Espera unos segundos e intenta de nuevo.',
+                    po_response_body => po_response_body
+                );
+                RETURN;
+            ELSIF v_idem_outcome = 'CONFLICT' THEN
+                po_status_code := pkg_aox_util.c_conflict_code;
+                pkg_aox_util.pr_build_api_error_response(
+                    pi_status_code   => po_status_code,
+                    pi_api_code      => pkg_aox_util.c_api_code_idempotency_conflict,
+                    pi_message       => 'La clave de idempotencia ya fue usada con un comprobante distinto.',
+                    po_response_body => po_response_body
+                );
+                RETURN;
+            END IF;
+            -- outcome = 'NEW': continua el flujo normal abajo
         END IF;
 
         SELECT a.id_appointment,
@@ -2640,6 +2859,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         IF v_ocr_conf IS NOT NULL THEN v_data_obj.put('ocr_confidence', v_ocr_conf); END IF;
         v_response_json.put('data', v_data_obj);
         po_response_body := v_response_json.to_clob();
+        IF v_idem_key IS NOT NULL THEN
+            pkg_aox_util.pr_idempotency_complete(c_idem_scope, v_idem_key, po_status_code, po_response_body);
+        END IF;
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
             ROLLBACK;
@@ -2650,6 +2872,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 pi_message       => 'Reserva no encontrada.',
                 po_response_body => po_response_body
             );
+            IF v_idem_key IS NOT NULL THEN
+                pkg_aox_util.pr_idempotency_release(c_idem_scope, v_idem_key);
+            END IF;
             pkg_aox_util.pr_log_api(
                 pi_api_name        => 'PUBLIC_RECEIPT_UPLOAD',
                 pi_process_name    => 'PKG_AOX_PUBLIC_BOOKING_API.PR_UPLOAD_PUBLIC_RECEIPT',
@@ -2666,6 +2891,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         WHEN OTHERS THEN
             ROLLBACK;
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+            -- Libera la key salvo en el rechazo de validacion mas comun (todas las reglas de
+            -- negocio de este endpoint usan c_sqlcode_validation); no bloquea un retry legitimo
+            -- tras una falla tecnica/transitoria (bucket, OCR, red).
+            IF v_idem_key IS NOT NULL AND SQLCODE != pkg_aox_util.c_sqlcode_validation THEN
+                pkg_aox_util.pr_idempotency_release(c_idem_scope, v_idem_key);
+            END IF;
             pkg_aox_util.pr_log_api(
                 pi_api_name        => 'PUBLIC_RECEIPT_UPLOAD',
                 pi_process_name    => 'PKG_AOX_PUBLIC_BOOKING_API.PR_UPLOAD_PUBLIC_RECEIPT',
