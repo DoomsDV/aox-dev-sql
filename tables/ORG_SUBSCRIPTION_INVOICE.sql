@@ -18,7 +18,16 @@ CREATE TABLE org_subscription_invoice (
   paid_at             TIMESTAMP(6) WITH TIME ZONE NULL,
   payment_provider    VARCHAR2(50)                NULL,
   external_reference  VARCHAR2(128)               NULL,
-  created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
+  created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  einvoice_status       VARCHAR2(20)                DEFAULT 'NONE' NOT NULL,
+  einvoice_cdc          VARCHAR2(44)                NULL,
+  einvoice_estado_sifen VARCHAR2(20)                NULL,
+  einvoice_cod_res      VARCHAR2(10)                NULL,
+  einvoice_prot_aut     VARCHAR2(30)                NULL,
+  einvoice_kude_url     VARCHAR2(500)               NULL,
+  einvoice_ambiente     VARCHAR2(10)                NULL,
+  einvoice_sent_at      TIMESTAMP(6) WITH TIME ZONE NULL,
+  einvoice_error        VARCHAR2(500)               NULL
 )
 /
 
@@ -55,6 +64,13 @@ PROMPT ALTER TABLE org_subscription_invoice ADD CONSTRAINT chk_orginv_status CHE
 ALTER TABLE org_subscription_invoice
   ADD CONSTRAINT chk_orginv_status CHECK (
     status IN ('PENDING', 'PAID', 'FAILED', 'VOID')
+  )
+/
+
+PROMPT ALTER TABLE org_subscription_invoice ADD CONSTRAINT chk_orginv_einvoice_status CHECK
+ALTER TABLE org_subscription_invoice
+  ADD CONSTRAINT chk_orginv_einvoice_status CHECK (
+    einvoice_status IN ('NONE', 'PENDING', 'SENT_PENDING_KUDE', 'SENT', 'FAILED')
   )
 /
 
@@ -98,3 +114,12 @@ COMMENT ON TABLE org_subscription_invoice IS 'Facturacion de plan y addons de st
 COMMENT ON COLUMN org_subscription_invoice.sad_id_storage_addon IS 'Addon de storage asociado (facturas STORAGE_ADDON mid-cycle / prorrateo).';
 COMMENT ON COLUMN org_subscription_invoice.gross_amount IS 'Monto antes de descontar saldo a favor.';
 COMMENT ON COLUMN org_subscription_invoice.credit_applied IS 'Gs de saldo a favor aplicados (se consumen al pasar a PAID).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_status IS 'Ciclo de emision de Factura Electronica SIFEN: NONE (no aplica/no configurado) | PENDING (webhook enviado al firmador) | SENT_PENDING_KUDE (FE aprobada, esperando PDF) | SENT (email con KuDE enviado) | FAILED.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_cdc IS 'CDC (44 digitos) del documento emitido en el firmador esign.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_estado_sifen IS 'estado devuelto por POST /v1/documents del firmador (APROBADO | RECHAZADO | FIRMADO).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_cod_res IS 'codRes SIFEN (ej. 0260 aprobado).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_prot_aut IS 'Protocolo de autorizacion SIFEN.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_kude_url IS 'URL publica del KuDE (PDF) en el bucket del firmador, una vez listo.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_ambiente IS 'Ambiente SIFEN de la emision (test | prod), segun el prefijo de la api key usada.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_sent_at IS 'Cuando se envio el email de factura con el KuDE adjunto al billing_email.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_error IS 'Ultimo error del ciclo de emision (SIFEN rechazado o fallo de envio de email).';

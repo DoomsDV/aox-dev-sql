@@ -147,6 +147,41 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
     -- No expone HTTP; lo invoca DBMS_SCHEDULER (ver migracion del job, solo en produccion).
     PROCEDURE pr_run_billing_cycle;
 
+    ----------------------------------------------------------------------------
+    -- Factura electronica SIFEN (firmador esign) sobre invoices de suscripcion.
+    -- Disparo interno server-to-server: sin JWT de usuario, protegido por
+    -- header X-Service-Token (app_parameter ESIGN_CALLBACK_SERVICE_TOKEN).
+    -- Ver aox-dev/docs (facturacion electronica) para el flujo completo.
+    ----------------------------------------------------------------------------
+
+    -- POST /internal/v1/subscription-invoices/:id/einvoice
+    -- Callback de Astro con el resultado de POST /v1/documents en el firmador.
+    PROCEDURE pr_save_einvoice_result(
+        pi_service_token IN  VARCHAR2,
+        pi_invoice_id    IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    -- GET /internal/v1/subscription-invoices/pending-kude
+    -- Invoices con FE aprobada pero KuDE aun no confirmado (para el cron de Astro).
+    PROCEDURE pr_list_pending_kude(
+        pi_service_token IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    -- POST /internal/v1/subscription-invoices/:id/einvoice-kude
+    -- Callback de Astro cuando el KuDE (PDF) ya esta listo: dispara el email con adjunto.
+    PROCEDURE pr_save_einvoice_kude(
+        pi_service_token IN  VARCHAR2,
+        pi_invoice_id    IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
 END pkg_aox_subscription_billing_api;
 /
 
@@ -204,6 +239,313 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             );
         END IF;
     END pr_get_platform_keys;
+
+    --------------------------------------------------------------------------
+    -- Factura electronica SIFEN (firmador esign) - helpers
+    --------------------------------------------------------------------------
+
+    FUNCTION fn_json_escape(pi_value IN VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN REPLACE(REPLACE(NVL(pi_value, ''), CHR(92), CHR(92) || CHR(92)), '"', CHR(92) || '"');
+    END fn_json_escape;
+
+    -- Digito verificador de RUC/CI paraguayo (modulo 11, pesos ciclicos 2..11),
+    -- algoritmo oficial DNIT/SET (Pa_Calcular_Dv_11_A). Se usa para completar
+    -- el receptor "ruc" del documento SIFEN sin pedirle el DV al usuario.
+    FUNCTION fn_calcular_dv_ruc(pi_numero IN VARCHAR2) RETURN NUMBER IS
+        v_digits VARCHAR2(40);
+        v_total  PLS_INTEGER := 0;
+        v_peso   PLS_INTEGER := 2;
+        v_resto  PLS_INTEGER;
+    BEGIN
+        -- Solo digitos (por si viene con guion/puntos, ej. "80012345-6" o "80.012.345").
+        v_digits := REGEXP_REPLACE(NVL(pi_numero, ''), '[^0-9]', '');
+        IF v_digits IS NULL THEN
+            RETURN NULL;
+        END IF;
+
+        FOR i IN REVERSE 1 .. LENGTH(v_digits) LOOP
+            v_total := v_total + TO_NUMBER(SUBSTR(v_digits, i, 1)) * v_peso;
+            v_peso  := CASE WHEN v_peso >= 11 THEN 2 ELSE v_peso + 1 END;
+        END LOOP;
+
+        v_resto := MOD(v_total, 11);
+        RETURN CASE WHEN v_resto > 1 THEN 11 - v_resto ELSE 0 END;
+    END fn_calcular_dv_ruc;
+
+    -- Valida el header X-Service-Token de las llamadas internas Astro -> ORDS
+    -- (sin JWT de usuario). Secreto compartido en app_parameter ESIGN_CALLBACK_SERVICE_TOKEN.
+    PROCEDURE pr_assert_service_token(pi_service_token IN VARCHAR2) IS
+        v_expected VARCHAR2(200);
+    BEGIN
+        v_expected := fn_get_parameter('ESIGN_CALLBACK_SERVICE_TOKEN');
+        IF v_expected IS NULL OR TRIM(v_expected) IS NULL THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Integracion de facturacion electronica no configurada.');
+        END IF;
+        IF pi_service_token IS NULL OR pi_service_token <> v_expected THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Token de servicio invalido.');
+        END IF;
+    END pr_assert_service_token;
+
+    -- Dispara (best-effort, nunca bloqueante) la emision de Factura Electronica en el
+    -- firmador para una invoice que acaba de pasar a PAID. Hace un POST saliente a
+    -- ESIGN_WEBHOOK_URL (Astro /api/internal/esign/emit-invoice) con X-Service-Token.
+    -- Astro llama al firmador y luego confirma el resultado via
+    -- pr_save_einvoice_result / pr_save_einvoice_kude (endpoints internos, mas abajo).
+    PROCEDURE pr_notificar_emision_fe(pi_invoice_id IN NUMBER) IS
+        v_org_id          NUMBER;
+        v_desc            org_subscription_invoice.description%TYPE;
+        v_amount          org_subscription_invoice.amount%TYPE;
+        v_currency        org_subscription_invoice.currency%TYPE;
+        v_billing_name    org_billing_profile.billing_name%TYPE;
+        v_doc_type        org_billing_profile.billing_doc_type%TYPE;
+        v_doc_number      org_billing_profile.billing_doc_number%TYPE;
+        v_billing_email   org_billing_profile.billing_email%TYPE;
+        v_webhook_url     VARCHAR2(500);
+        v_service_token   VARCHAR2(200);
+        v_establecimiento VARCHAR2(10);
+        v_punto           VARCHAR2(10);
+        v_payload         json_object_t := json_object_t();
+        v_receptor        json_object_t := json_object_t();
+        v_datos_op        json_object_t := json_object_t();
+        v_response        CLOB;
+        v_status_code     NUMBER;
+    BEGIN
+        BEGIN
+            -- Se factura el valor real del servicio (gross_amount), no el "amount"
+            -- neto efectivamente cobrado en Gs: cuando se cubre con saldo a favor
+            -- (credit_applied), amount puede ser 0 pero igual se presto el servicio.
+            SELECT org_id_organization, description, NVL(gross_amount, amount), currency
+              INTO v_org_id, v_desc, v_amount, v_currency
+              FROM org_subscription_invoice
+             WHERE id_invoice = pi_invoice_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RETURN;
+        END;
+
+        -- Sin valor a facturar (ej. addon gratis $0) no corresponde emitir FE.
+        IF NVL(v_amount, 0) <= 0 THEN
+            RETURN;
+        END IF;
+
+        BEGIN
+            SELECT billing_name, billing_doc_type, billing_doc_number, billing_email
+              INTO v_billing_name, v_doc_type, v_doc_number, v_billing_email
+              FROM org_billing_profile
+             WHERE org_id_organization = v_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                pkg_aox_util.pr_log_api(
+                    pi_api_name      => 'ESIGN_EINVOICE',
+                    pi_process_name  => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
+                    pi_org_id        => v_org_id,
+                    pi_status        => 'SKIPPED',
+                    pi_error_message => 'Org sin org_billing_profile; no se emite FE.',
+                    pi_request_body  => TO_CLOB('invoice_id=' || pi_invoice_id)
+                );
+                RETURN;
+        END;
+
+        IF v_doc_type IS NULL OR v_doc_number IS NULL OR v_billing_email IS NULL THEN
+            pkg_aox_util.pr_log_api(
+                pi_api_name      => 'ESIGN_EINVOICE',
+                pi_process_name  => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
+                pi_org_id        => v_org_id,
+                pi_status        => 'SKIPPED',
+                pi_error_message => 'org_billing_profile incompleto; no se emite FE.',
+                pi_request_body  => TO_CLOB('invoice_id=' || pi_invoice_id)
+            );
+            RETURN;
+        END IF;
+
+        v_webhook_url      := fn_get_parameter('ESIGN_WEBHOOK_URL');
+        v_service_token    := fn_get_parameter('ESIGN_CALLBACK_SERVICE_TOKEN');
+        v_establecimiento  := NVL(fn_get_parameter('ESIGN_ESTABLECIMIENTO'), '001');
+        v_punto            := NVL(fn_get_parameter('ESIGN_PUNTO_EXPEDICION'), '001');
+
+        -- Integracion aun no configurada (ej. produccion sin key real todavia):
+        -- no bloquear el pago, solo no emitir.
+        IF v_webhook_url IS NULL OR TRIM(v_webhook_url) IS NULL
+           OR v_service_token IS NULL OR TRIM(v_service_token) IS NULL THEN
+            RETURN;
+        END IF;
+
+        v_datos_op.put('establecimiento', v_establecimiento);
+        v_datos_op.put('punto_expedicion', v_punto);
+
+        v_receptor.put('tipo', LOWER(v_doc_type)); -- 'ci' | 'ruc'
+        v_receptor.put('documento', v_doc_number);
+        v_receptor.put('nombre', v_billing_name);
+        IF v_doc_type = 'RUC' THEN
+            v_receptor.put('dv', fn_calcular_dv_ruc(v_doc_number));
+            v_receptor.put('tipoContribuyente', 2); -- juridica (Hasel factura a la organizacion)
+        END IF;
+
+        v_payload.put('invoice_id', pi_invoice_id);
+        v_payload.put('datos_operacion', v_datos_op);
+        v_payload.put('receptor', v_receptor);
+        v_payload.put('moneda', NVL(v_currency, 'PYG'));
+        v_payload.put('descripcion', NVL(v_desc, 'Suscripcion Hasel'));
+        v_payload.put('monto', v_amount);
+
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_status = 'PENDING'
+         WHERE id_invoice = pi_invoice_id
+           AND NVL(einvoice_status, 'NONE') IN ('NONE', 'FAILED');
+        COMMIT;
+
+        BEGIN
+            apex_web_service.g_request_headers.delete();
+            apex_web_service.g_request_headers(1).name  := 'Content-Type';
+            apex_web_service.g_request_headers(1).value := 'application/json';
+            apex_web_service.g_request_headers(2).name  := 'X-Service-Token';
+            apex_web_service.g_request_headers(2).value := v_service_token;
+
+            v_response := apex_web_service.make_rest_request(
+                p_url         => v_webhook_url,
+                p_http_method => 'POST',
+                p_body        => v_payload.to_clob()
+            );
+            v_status_code := apex_web_service.g_status_code;
+
+            pkg_aox_util.pr_log_api(
+                pi_api_name      => 'ESIGN_EINVOICE',
+                pi_process_name  => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
+                pi_http_method   => 'POST',
+                pi_endpoint      => v_webhook_url,
+                pi_org_id        => v_org_id,
+                pi_status        => CASE WHEN v_status_code BETWEEN 200 AND 299 THEN 'SUCCESS' ELSE 'ERROR' END,
+                pi_status_code   => v_status_code,
+                pi_request_body  => v_payload.to_clob(),
+                pi_response_body => v_response
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_util.pr_log_api(
+                    pi_api_name        => 'ESIGN_EINVOICE',
+                    pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
+                    pi_http_method     => 'POST',
+                    pi_endpoint        => v_webhook_url,
+                    pi_org_id          => v_org_id,
+                    pi_status          => 'ERROR',
+                    pi_error_code      => SQLCODE,
+                    pi_error_message   => SQLERRM,
+                    pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                    pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                    pi_request_body    => v_payload.to_clob()
+                );
+        END;
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Nunca debe romper el flujo de pago/checkout que la invoco.
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'ESIGN_EINVOICE',
+                pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
+                pi_status          => 'ERROR',
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_request_body    => TO_CLOB('invoice_id=' || pi_invoice_id)
+            );
+    END pr_notificar_emision_fe;
+
+    -- Baja el KuDE (PDF) publico y manda el mail de factura al billing_email
+    -- con el PDF adjunto. Se invoca desde pr_save_einvoice_kude una vez que
+    -- Astro confirma que el KuDE ya esta listo.
+    PROCEDURE pr_send_einvoice_email(pi_invoice_id IN NUMBER) IS
+        v_org_id         NUMBER;
+        v_cdc            org_subscription_invoice.einvoice_cdc%TYPE;
+        v_kude_url       org_subscription_invoice.einvoice_kude_url%TYPE;
+        v_billing_name   org_billing_profile.billing_name%TYPE;
+        v_billing_email  org_billing_profile.billing_email%TYPE;
+        v_pdf_blob       BLOB;
+        v_mail_id        NUMBER;
+        v_apex_session_created BOOLEAN := FALSE;
+        v_error_message  VARCHAR2(4000);
+    BEGIN
+        SELECT i.org_id_organization, i.einvoice_cdc, i.einvoice_kude_url,
+               p.billing_name, p.billing_email
+          INTO v_org_id, v_cdc, v_kude_url, v_billing_name, v_billing_email
+          FROM org_subscription_invoice i
+          JOIN org_billing_profile p ON p.org_id_organization = i.org_id_organization
+         WHERE i.id_invoice = pi_invoice_id;
+
+        IF v_kude_url IS NULL OR v_billing_email IS NULL THEN
+            RETURN;
+        END IF;
+
+        apex_web_service.g_request_headers.delete();
+        v_pdf_blob := apex_web_service.make_rest_request_b(
+            p_url         => v_kude_url,
+            p_http_method => 'GET'
+        );
+
+        IF apex_web_service.g_status_code NOT BETWEEN 200 AND 299
+           OR v_pdf_blob IS NULL OR DBMS_LOB.GETLENGTH(v_pdf_blob) = 0 THEN
+            RAISE_APPLICATION_ERROR(-20090, 'No se pudo descargar el KuDE (' || apex_web_service.g_status_code || ').');
+        END IF;
+
+        apex_session.create_session(
+            p_app_id   => 100,
+            p_page_id  => 1,
+            p_username => 'AOX'
+        );
+        v_apex_session_created := TRUE;
+
+        v_mail_id := apex_mail.send(
+            p_to                 => TRIM(v_billing_email),
+            p_from               => NVL(fn_get_parameter('MAIL_FROM_ADDRESS'), 'noreply@hasel.app'),
+            p_template_static_id => 'FACTURASUSCRIPCION',
+            p_placeholders       => '{' ||
+                                    '"NOMBRE": "' || fn_json_escape(v_billing_name) || '",' ||
+                                    '"CDC": "' || fn_json_escape(v_cdc) || '"' ||
+                                    '}'
+        );
+
+        apex_mail.add_attachment(
+            p_mail_id     => v_mail_id,
+            p_attachment  => v_pdf_blob,
+            p_filename    => 'factura-' || v_cdc || '.pdf',
+            p_mime_type   => 'application/pdf'
+        );
+
+        apex_mail.push_queue;
+
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_status = 'SENT',
+               einvoice_sent_at = systimestamp
+         WHERE id_invoice = pi_invoice_id;
+        COMMIT;
+
+        apex_session.delete_session;
+    EXCEPTION
+        WHEN OTHERS THEN
+            v_error_message := SQLERRM;
+            IF v_apex_session_created THEN
+                BEGIN
+                    apex_session.delete_session;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL;
+                END;
+            END IF;
+            UPDATE /*+ no_parallel */ org_subscription_invoice
+               SET einvoice_status = 'FAILED',
+                   einvoice_error  = SUBSTR(v_error_message, 1, 500)
+             WHERE id_invoice = pi_invoice_id;
+            COMMIT;
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'ESIGN_EINVOICE',
+                pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_SEND_EINVOICE_EMAIL',
+                pi_org_id          => v_org_id,
+                pi_status          => 'ERROR',
+                pi_error_code      => SQLCODE,
+                pi_error_message   => v_error_message,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_request_body    => TO_CLOB('invoice_id=' || pi_invoice_id)
+            );
+    END pr_send_einvoice_email;
 
     FUNCTION fn_http_post_json(pi_url IN VARCHAR2, pi_body IN CLOB) RETURN CLOB IS
         v_response CLOB;
@@ -1097,6 +1439,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                 pr_fulfill_paid_addon(pi_org_id, v_addon_id);
             END IF;
             COMMIT;
+
+            pr_notificar_emision_fe(po_invoice_id);
             po_hash := NULL;
             lp_idem_complete(po_invoice_id, po_hash);
             RETURN;
@@ -2151,6 +2495,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                SET status = 'PAID', paid_at = systimestamp
              WHERE id_invoice = v_invoice_id;
 
+            pr_notificar_emision_fe(v_invoice_id);
+
             -- Consumir credito declarado en la factura (idempotente via ledger).
             pr_consume_credit(v_org_id, NVL(v_credit_applied, 0), v_invoice_id);
 
@@ -2622,6 +2968,167 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             END;
         END LOOP;
     END pr_run_billing_cycle;
+
+    --------------------------------------------------------------------------
+    -- Factura electronica SIFEN (firmador esign) - endpoints internos
+    -- (X-Service-Token, sin JWT de usuario)
+    --------------------------------------------------------------------------
+
+    -- POST /internal/v1/subscription-invoices/:id/einvoice
+    PROCEDURE pr_save_einvoice_result(
+        pi_service_token IN  VARCHAR2,
+        pi_invoice_id    IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_json          json_object_t;
+        v_response      json_object_t := json_object_t();
+        v_cdc           VARCHAR2(44);
+        v_estado        VARCHAR2(20);
+        v_cod_res       VARCHAR2(10);
+        v_prot_aut      VARCHAR2(30);
+        v_ambiente      VARCHAR2(10);
+        v_mensaje       VARCHAR2(500);
+        v_new_status    VARCHAR2(20);
+    BEGIN
+        pr_assert_service_token(pi_service_token);
+
+        v_json     := json_object_t.parse(pi_body);
+        v_cdc      := v_json.get_string('cdc');
+        v_estado   := v_json.get_string('estado');
+        v_cod_res  := CASE WHEN v_json.has('codRes') THEN v_json.get_string('codRes') END;
+        v_prot_aut := CASE WHEN v_json.has('protAut') THEN v_json.get_string('protAut') END;
+        v_ambiente := CASE WHEN v_json.has('ambiente') THEN v_json.get_string('ambiente') END;
+        v_mensaje  := CASE WHEN v_json.has('mensaje') THEN v_json.get_string('mensaje') END;
+
+        v_new_status := CASE WHEN UPPER(v_estado) = 'APROBADO' THEN 'SENT_PENDING_KUDE' ELSE 'FAILED' END;
+
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_cdc          = v_cdc,
+               einvoice_estado_sifen = v_estado,
+               einvoice_cod_res      = v_cod_res,
+               einvoice_prot_aut     = v_prot_aut,
+               einvoice_ambiente     = v_ambiente,
+               einvoice_status       = v_new_status,
+               einvoice_error        = CASE WHEN v_new_status = 'FAILED'
+                                             THEN SUBSTR('SIFEN estado=' || v_estado
+                                                          || CASE WHEN v_cod_res IS NOT NULL THEN ' codRes=' || v_cod_res END
+                                                          || CASE WHEN v_mensaje IS NOT NULL THEN ' - ' || v_mensaje END, 1, 500)
+                                             ELSE NULL END
+         WHERE id_invoice = pi_invoice_id;
+
+        IF SQL%ROWCOUNT = 0 THEN
+            po_status_code := 404;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Invoice no encontrada.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_save_einvoice_result;
+
+    -- GET /internal/v1/subscription-invoices/pending-kude
+    PROCEDURE pr_list_pending_kude(
+        pi_service_token IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_response json_object_t := json_object_t();
+        v_data     json_array_t := json_array_t();
+        v_item     json_object_t;
+    BEGIN
+        pr_assert_service_token(pi_service_token);
+
+        FOR rec IN (
+            SELECT id_invoice, einvoice_cdc
+              FROM org_subscription_invoice
+             WHERE einvoice_status = 'SENT_PENDING_KUDE'
+               AND einvoice_cdc IS NOT NULL
+             ORDER BY id_invoice
+             FETCH FIRST 50 ROWS ONLY
+        ) LOOP
+            v_item := json_object_t();
+            v_item.put('invoice_id', rec.id_invoice);
+            v_item.put('cdc', rec.einvoice_cdc);
+            v_data.append(v_item);
+        END LOOP;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_list_pending_kude;
+
+    -- POST /internal/v1/subscription-invoices/:id/einvoice-kude
+    PROCEDURE pr_save_einvoice_kude(
+        pi_service_token IN  VARCHAR2,
+        pi_invoice_id    IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_json      json_object_t;
+        v_response  json_object_t := json_object_t();
+        v_kude_url  VARCHAR2(500);
+    BEGIN
+        pr_assert_service_token(pi_service_token);
+
+        v_json     := json_object_t.parse(pi_body);
+        v_kude_url := v_json.get_string('kudeUrl');
+
+        IF v_kude_url IS NULL OR TRIM(v_kude_url) IS NULL THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Falta kudeUrl.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_kude_url = v_kude_url
+         WHERE id_invoice = pi_invoice_id
+           AND einvoice_status = 'SENT_PENDING_KUDE';
+
+        IF SQL%ROWCOUNT = 0 THEN
+            po_status_code := 404;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Invoice no encontrada o ya procesada.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        COMMIT;
+
+        -- Envio del mail con adjunto: no debe hacer fallar el callback si el mail
+        -- falla (queda einvoice_status=FAILED y se puede reintentar aparte).
+        BEGIN
+            pr_send_einvoice_email(pi_invoice_id);
+        EXCEPTION
+            WHEN OTHERS THEN
+                NULL;
+        END;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_save_einvoice_kude;
 
 END pkg_aox_subscription_billing_api;
 /

@@ -20,6 +20,26 @@ las claves por-organización que se usan para las señas de citas.
 Registro reproducible: `migrations/20260710_subscription_billing_ords.sql`
 (`ords.define_template` + `ords.define_handler`, bind de estado `:status`, cuerpo `:body_text`).
 
+## Facturación electrónica SIFEN (firmador esign)
+
+Endpoints internos server-to-server, **sin JWT de usuario**: protegidos por header
+`X-Service-Token` (validado por `pr_assert_service_token` contra el `app_parameter`
+`ESIGN_CALLBACK_SERVICE_TOKEN`). Los llama bookmate (Astro) desde
+`src/pages/api/internal/esign/*.ts`, nunca el navegador.
+
+| Método | Ruta ORDS | Procedimiento |
+|--------|-----------|----------------|
+| POST | `/api/v1/internal/subscription-invoices/:id/einvoice` | `pr_save_einvoice_result` |
+| GET  | `/api/v1/internal/subscription-invoices/pending-kude` | `pr_list_pending_kude` |
+| POST | `/api/v1/internal/subscription-invoices/:id/einvoice-kude` | `pr_save_einvoice_kude` |
+
+Registro reproducible: `migrations/20260810_subscription_einvoice_sifen.sql` (columnas
+`org_subscription_invoice.einvoice_*` + `app_parameter`) y
+`migrations/20260810_subscription_einvoice_ords.sql` (endpoints ORDS).
+
+Flujo completo (trigger, payload, polling de KuDE, envío de mail con adjunto) documentado
+en el header de `PKG_AOX_SUBSCRIPTION_BILLING_API.pls`, sección "Factura electronica SIFEN".
+
 ## Contratos
 
 ### GET /workspace/plans
