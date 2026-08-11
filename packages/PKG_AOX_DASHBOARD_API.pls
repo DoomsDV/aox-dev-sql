@@ -10,7 +10,9 @@ CREATE OR REPLACE PACKAGE pkg_aox_dashboard_api IS
     );
 
     -- Fase 6: métricas de rentabilidad del dashboard (Base + Premium).
-    -- Solo ADMIN y organizaciones con feature PROFITABILITY_ANALYTICS.
+    -- ADMIN ve la organización completa; PROFESIONAL ve únicamente su propia
+    -- producción (filtrado por pro_id_professional). Requiere feature
+    -- PROFITABILITY_ANALYTICS en la organización.
     PROCEDURE pr_get_profitability(
         pi_auth_header   IN  VARCHAR2,
         po_status_code   OUT NUMBER,
@@ -272,6 +274,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_user_id          NUMBER;
         v_org_id           NUMBER;
         v_role_id          NUMBER;
+        v_prof_id          NUMBER := -1;
+        v_is_admin         BOOLEAN := FALSE;
+        v_total_clients    NUMBER := 0;
 
         v_now_local        TIMESTAMP;
         v_month_start      TIMESTAMP;
@@ -305,10 +310,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
 
-        -- Solo administradores pueden ver la rentabilidad de la organización.
-        IF v_role_id <> pkg_aox_util.fn_rol('ADMIN') THEN
-            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden,
-                'Solo los administradores pueden ver la rentabilidad.');
+        v_is_admin := v_role_id = pkg_aox_util.fn_rol('ADMIN');
+
+        -- ADMIN ve la rentabilidad de toda la organización; PROFESIONAL solo la
+        -- propia (RBAC: mismo query, filtrado por su pro_id_professional).
+        IF NOT v_is_admin THEN
+            IF v_role_id <> pkg_aox_util.fn_rol('PROFESIONAL') THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden,
+                    'No autorizado a ver la rentabilidad.');
+            END IF;
+
+            BEGIN
+                SELECT id_professional
+                  INTO v_prof_id
+                  FROM professional
+                 WHERE usr_id_user           = v_user_id
+                   AND org_id_organization   = v_org_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden,
+                        'No se encontró el perfil de profesional del usuario.');
+            END;
         END IF;
 
         -- Gate de plan: requiere feature PROFITABILITY_ANALYTICS (Base + Premium).
@@ -327,6 +349,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
           FROM appointment a
           LEFT JOIN service s ON s.id_service = a.ser_id_service
          WHERE a.org_id_organization = v_org_id
+           AND (v_is_admin OR a.pro_id_professional = v_prof_id)
            AND a.status IN ('CONFIRMADO', 'COMPLETADO')
            AND a.start_time >= v_today_start
            AND a.start_time < v_tomorrow_start;
@@ -337,6 +360,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
           FROM appointment a
           LEFT JOIN service s ON s.id_service = a.ser_id_service
          WHERE a.org_id_organization = v_org_id
+           AND (v_is_admin OR a.pro_id_professional = v_prof_id)
            AND a.status IN ('CONFIRMADO', 'COMPLETADO')
            AND a.start_time >= v_month_start
            AND a.start_time < v_now_local;
@@ -347,6 +371,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
           FROM appointment a
           LEFT JOIN service s ON s.id_service = a.ser_id_service
          WHERE a.org_id_organization = v_org_id
+           AND (v_is_admin OR a.pro_id_professional = v_prof_id)
            AND a.status IN ('CONFIRMADO', 'COMPLETADO')
            AND a.start_time >= v_prev_month_start
            AND a.start_time < v_month_start;
@@ -357,8 +382,24 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
           FROM appointment a
           LEFT JOIN service s ON s.id_service = a.ser_id_service
          WHERE a.org_id_organization = v_org_id
+           AND (v_is_admin OR a.pro_id_professional = v_prof_id)
            AND a.status IN ('PENDIENTE', 'CONFIRMADO')
            AND a.start_time >= v_now_local;
+
+        -- Total de clientes: base de la organización para ADMIN, cartera propia
+        -- (pacientes únicos atendidos) para PROFESIONAL.
+        IF v_is_admin THEN
+            SELECT COUNT(*)
+              INTO v_total_clients
+              FROM customer
+             WHERE org_id_organization = v_org_id;
+        ELSE
+            SELECT COUNT(DISTINCT a.cus_id_customer)
+              INTO v_total_clients
+              FROM appointment a
+             WHERE a.org_id_organization = v_org_id
+               AND a.pro_id_professional = v_prof_id;
+        END IF;
 
         IF v_month_count > 0 THEN
             v_avg_ticket := ROUND(v_month_rev / v_month_count);
@@ -376,6 +417,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
               FROM appointment a
               JOIN service s ON s.id_service = a.ser_id_service
              WHERE a.org_id_organization = v_org_id
+               AND (v_is_admin OR a.pro_id_professional = v_prof_id)
                AND a.status IN ('CONFIRMADO', 'COMPLETADO')
                AND a.start_time >= v_month_start
                AND a.start_time < v_now_local
@@ -436,6 +478,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
             v_data_obj.put('mom_delta_pct', v_mom_delta);
         END IF;
         v_data_obj.put('pending_expected_revenue', v_pending_expected);
+        v_data_obj.put('total_clients'           , v_total_clients);
         v_data_obj.put('top_services'            , v_top_services_arr);
         v_data_obj.put('by_professional'         , v_by_prof_arr);
         v_data_obj.put('generated_at_local'      , TO_CHAR(v_now_local, 'YYYY-MM-DD"T"HH24:MI:SS'));
