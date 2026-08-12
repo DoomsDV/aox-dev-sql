@@ -4,6 +4,9 @@ CREATE TABLE appointment_session_record (
   app_id_appointment  NUMBER                      NOT NULL,
   org_id_organization NUMBER                      NOT NULL,
   notes               CLOB                        NULL,
+  consultation_reason CLOB                        NULL,
+  procedure_notes     CLOB                        NULL,
+  recommendations     CLOB                        NULL,
   created_by_user     NUMBER                      NULL,
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   updated_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
@@ -43,5 +46,8 @@ ALTER TABLE appointment_session_record
 /
 
 COMMENT ON TABLE appointment_session_record IS 'Historial (notas) por cita. Feature Premium APPOINTMENT_HISTORY. Se crea al pasar la cita a COMPLETADO (misma transaccion). 1:1 con appointment.';
-COMMENT ON COLUMN appointment_session_record.notes IS 'Notas de la sesion registradas al completar la cita.';
+COMMENT ON COLUMN appointment_session_record.notes IS 'Notas legacy (texto libre). Solo lectura; usar consultation_reason, procedure_notes y recommendations.';
+COMMENT ON COLUMN appointment_session_record.consultation_reason IS 'Motivo de consulta o requerimiento inicial del cliente.';
+COMMENT ON COLUMN appointment_session_record.procedure_notes IS 'Procedimiento o trabajo realizado en la sesion.';
+COMMENT ON COLUMN appointment_session_record.recommendations IS 'Recomendaciones o proximos pasos para el cliente.';
 COMMENT ON COLUMN appointment_session_record.created_by_user IS 'Usuario (JWT) que registro el historial.';

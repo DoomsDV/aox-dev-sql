@@ -76,7 +76,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_obj          json_object_t := json_object_t();
         v_has_notes    NUMBER := 0;
         v_attach_count NUMBER := 0;
-        v_notes        CLOB;
+        v_notes_legacy CLOB;
+        v_consultation_reason CLOB;
+        v_procedure_notes CLOB;
+        v_recommendations CLOB;
         v_attach_arr   json_array_t := json_array_t();
         v_attach_obj   json_object_t;
     BEGIN
@@ -99,7 +102,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                   INTO v_has_notes
                   FROM appointment_session_record
                  WHERE app_id_appointment = pi_app_id
-                   AND notes IS NOT NULL;
+                   AND (
+                        notes IS NOT NULL
+                     OR consultation_reason IS NOT NULL
+                     OR procedure_notes IS NOT NULL
+                     OR recommendations IS NOT NULL
+                   );
 
                 SELECT COUNT(*)
                   INTO v_attach_count
@@ -113,17 +121,48 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                 -- Detalle completo (notas + adjuntos) para el historial del perfil.
                 IF NVL(pi_include_detail, 0) = 1 THEN
                     BEGIN
-                        SELECT notes
-                          INTO v_notes
+                        SELECT notes,
+                               consultation_reason,
+                               procedure_notes,
+                               recommendations
+                          INTO v_notes_legacy,
+                               v_consultation_reason,
+                               v_procedure_notes,
+                               v_recommendations
                           FROM appointment_session_record
                          WHERE app_id_appointment = pi_app_id;
                     EXCEPTION
                         WHEN NO_DATA_FOUND THEN
-                            v_notes := NULL;
+                            v_notes_legacy        := NULL;
+                            v_consultation_reason := NULL;
+                            v_procedure_notes     := NULL;
+                            v_recommendations     := NULL;
                     END;
 
-                    IF v_notes IS NOT NULL THEN
-                        v_obj.put('notes', v_notes);
+                    IF v_procedure_notes IS NULL AND v_notes_legacy IS NOT NULL THEN
+                        v_procedure_notes := v_notes_legacy;
+                    END IF;
+
+                    IF v_consultation_reason IS NOT NULL THEN
+                        v_obj.put('consultation_reason', v_consultation_reason);
+                    ELSE
+                        v_obj.put_null('consultation_reason');
+                    END IF;
+
+                    IF v_procedure_notes IS NOT NULL THEN
+                        v_obj.put('procedure_notes', v_procedure_notes);
+                    ELSE
+                        v_obj.put_null('procedure_notes');
+                    END IF;
+
+                    IF v_recommendations IS NOT NULL THEN
+                        v_obj.put('recommendations', v_recommendations);
+                    ELSE
+                        v_obj.put_null('recommendations');
+                    END IF;
+
+                    IF v_notes_legacy IS NOT NULL THEN
+                        v_obj.put('notes', v_notes_legacy);
                     ELSE
                         v_obj.put_null('notes');
                     END IF;

@@ -342,21 +342,57 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             -- Historial (Fase 4): notas y adjuntos de la cita si el plan lo incluye.
             IF pkg_aox_subscription_api.fn_org_has_feature(v_org_id, 'APPOINTMENT_HISTORY') = 1 THEN
                 DECLARE
-                    v_history_obj  json_object_t := json_object_t();
-                    v_attach_arr   json_array_t  := json_array_t();
-                    v_attach_obj   json_object_t;
-                    v_notes        CLOB;
+                    v_history_obj         json_object_t := json_object_t();
+                    v_attach_arr          json_array_t  := json_array_t();
+                    v_attach_obj          json_object_t;
+                    v_notes_legacy        CLOB;
+                    v_consultation_reason CLOB;
+                    v_procedure_notes     CLOB;
+                    v_recommendations     CLOB;
                 BEGIN
                     BEGIN
-                        SELECT notes INTO v_notes
+                        SELECT notes,
+                               consultation_reason,
+                               procedure_notes,
+                               recommendations
+                          INTO v_notes_legacy,
+                               v_consultation_reason,
+                               v_procedure_notes,
+                               v_recommendations
                           FROM appointment_session_record
                          WHERE app_id_appointment = rec.id_appointment;
                     EXCEPTION
-                        WHEN NO_DATA_FOUND THEN v_notes := NULL;
+                        WHEN NO_DATA_FOUND THEN
+                            v_notes_legacy        := NULL;
+                            v_consultation_reason := NULL;
+                            v_procedure_notes     := NULL;
+                            v_recommendations     := NULL;
                     END;
 
-                    IF v_notes IS NOT NULL THEN
-                        v_history_obj.put('notes', v_notes);
+                    IF v_procedure_notes IS NULL AND v_notes_legacy IS NOT NULL THEN
+                        v_procedure_notes := v_notes_legacy;
+                    END IF;
+
+                    IF v_consultation_reason IS NOT NULL THEN
+                        v_history_obj.put('consultation_reason', v_consultation_reason);
+                    ELSE
+                        v_history_obj.put_null('consultation_reason');
+                    END IF;
+
+                    IF v_procedure_notes IS NOT NULL THEN
+                        v_history_obj.put('procedure_notes', v_procedure_notes);
+                    ELSE
+                        v_history_obj.put_null('procedure_notes');
+                    END IF;
+
+                    IF v_recommendations IS NOT NULL THEN
+                        v_history_obj.put('recommendations', v_recommendations);
+                    ELSE
+                        v_history_obj.put_null('recommendations');
+                    END IF;
+
+                    IF v_notes_legacy IS NOT NULL THEN
+                        v_history_obj.put('notes', v_notes_legacy);
                     ELSE
                         v_history_obj.put_null('notes');
                     END IF;
@@ -1054,8 +1090,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_lock_dummy       NUMBER;
         v_service_duration_minutes service.duration_minutes%TYPE;
         v_loc_count        NUMBER;
-        v_session_notes    CLOB;
+        v_consultation_reason CLOB;
+        v_procedure_notes     CLOB;
+        v_recommendations     CLOB;
+        v_session_notes_obj   json_object_t;
         v_has_notes_key    BOOLEAN := FALSE;
+        v_has_session_content BOOLEAN := FALSE;
         v_old_pay_status   appointment.payment_status%TYPE;
         v_old_deposit      appointment.deposit_amount%TYPE;
         v_refund_status    VARCHAR2(20) := 'NONE';
@@ -1116,7 +1156,39 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         -- Historial (Fase 4): notas de la sesion enviadas en el mismo PUT al completar la cita.
         IF v_json_req.has('session_notes') THEN
             v_has_notes_key := TRUE;
-            v_session_notes := v_json_req.get_clob('session_notes');
+            BEGIN
+                v_session_notes_obj := v_json_req.get_object('session_notes');
+                IF v_session_notes_obj.has('consultation_reason')
+                   AND NOT v_session_notes_obj.get('consultation_reason').is_null THEN
+                    v_consultation_reason := TRIM(v_session_notes_obj.get_clob('consultation_reason'));
+                END IF;
+                IF v_session_notes_obj.has('procedure_notes')
+                   AND NOT v_session_notes_obj.get('procedure_notes').is_null THEN
+                    v_procedure_notes := TRIM(v_session_notes_obj.get_clob('procedure_notes'));
+                END IF;
+                IF v_session_notes_obj.has('recommendations')
+                   AND NOT v_session_notes_obj.get('recommendations').is_null THEN
+                    v_recommendations := TRIM(v_session_notes_obj.get_clob('recommendations'));
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_procedure_notes := TRIM(v_json_req.get_clob('session_notes'));
+            END;
+
+            IF LENGTH(TRIM(NVL(v_consultation_reason, ''))) = 0 THEN
+                v_consultation_reason := NULL;
+            END IF;
+            IF LENGTH(TRIM(NVL(v_procedure_notes, ''))) = 0 THEN
+                v_procedure_notes := NULL;
+            END IF;
+            IF LENGTH(TRIM(NVL(v_recommendations, ''))) = 0 THEN
+                v_recommendations := NULL;
+            END IF;
+
+            v_has_session_content :=
+                v_consultation_reason IS NOT NULL
+                OR v_procedure_notes IS NOT NULL
+                OR v_recommendations IS NOT NULL;
         END IF;
 
         IF v_json_req.has('acknowledge_schedule_misalignment') THEN
@@ -1431,17 +1503,34 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         -- Solo si el plan incluye APPOINTMENT_HISTORY y llegaron notas en el PUT.
         IF v_status = 'COMPLETADO'
            AND v_has_notes_key
+           AND v_has_session_content
            AND pkg_aox_subscription_api.fn_org_has_feature(v_org_id, 'APPOINTMENT_HISTORY') = 1 THEN
             MERGE INTO appointment_session_record t
             USING (SELECT pi_app_id AS app_id FROM dual) s
                ON (t.app_id_appointment = s.app_id)
             WHEN MATCHED THEN UPDATE SET
-                t.notes          = v_session_notes,
-                t.created_by_user = NVL(t.created_by_user, v_user_id),
-                t.updated_at     = CURRENT_TIMESTAMP
+                t.consultation_reason = v_consultation_reason,
+                t.procedure_notes     = v_procedure_notes,
+                t.recommendations     = v_recommendations,
+                t.created_by_user     = NVL(t.created_by_user, v_user_id),
+                t.updated_at          = CURRENT_TIMESTAMP
             WHEN NOT MATCHED THEN
-                INSERT (app_id_appointment, org_id_organization, notes, created_by_user)
-                VALUES (pi_app_id, v_org_id, v_session_notes, v_user_id);
+                INSERT (
+                    app_id_appointment,
+                    org_id_organization,
+                    consultation_reason,
+                    procedure_notes,
+                    recommendations,
+                    created_by_user
+                )
+                VALUES (
+                    pi_app_id,
+                    v_org_id,
+                    v_consultation_reason,
+                    v_procedure_notes,
+                    v_recommendations,
+                    v_user_id
+                );
         END IF;
 
         COMMIT;
@@ -1711,6 +1800,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_data_obj      json_object_t := json_object_t();
         v_max_bytes     NUMBER;
         v_max_b64_len   NUMBER;
+        v_attach_count  NUMBER := 0;
+        v_max_attachments NUMBER;
     BEGIN
         v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
@@ -1746,6 +1837,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
         IF pi_body IS NULL OR DBMS_LOB.GETLENGTH(pi_body) = 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Debes enviar un archivo adjunto.');
+        END IF;
+
+        SELECT COUNT(*) INTO v_attach_count
+          FROM appointment_attachment
+         WHERE app_id_appointment  = pi_app_id
+           AND org_id_organization = v_org_id;
+
+        v_max_attachments := pkg_aox_util.fn_param_number('ATTACHMENT_MAX_COUNT', 10);
+        IF v_attach_count >= v_max_attachments THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Ya alcanzaste el maximo de ' || v_max_attachments || ' archivos.'
+            );
         END IF;
 
         v_json     := json_object_t.parse(pi_body);
