@@ -1449,6 +1449,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             END IF;
         END IF;
 
+        -- Guardar ficha: si llegan notas de sesion con contenido, promover a COMPLETADO
+        -- (el frontend confirma con el usuario; esto evita perder notas si el status llega mal).
+        IF v_has_session_content
+           AND v_status IN ('PENDIENTE', 'CONFIRMADO') THEN
+            v_status := 'COMPLETADO';
+        END IF;
+
         -- Actualizar cita
         UPDATE appointment
           SET loc_id_location     = v_loc_id,
