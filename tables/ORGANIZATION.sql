@@ -4,7 +4,8 @@ CREATE TABLE organization (
   name                 VARCHAR2(100)               NOT NULL,
   created_at           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   company_email        VARCHAR2(150)               NULL,
-  org_spe_id_specialty NUMBER                      NULL
+  org_spe_id_specialty NUMBER                      NULL,
+  country_code         VARCHAR2(2)                 DEFAULT 'PY' NOT NULL
 )
   INITRANS  10
   STORAGE (
@@ -31,6 +32,16 @@ ALTER TABLE organization
   ) REFERENCES org_specialty (
     id_org_specialty
   )
+/
+
+PROMPT ALTER TABLE organization ADD CONSTRAINT chk_org_country_code CHECK
+ALTER TABLE organization
+  ADD CONSTRAINT chk_org_country_code CHECK (
+    REGEXP_LIKE(country_code, '^[A-Z]{2}$')
+  )
+/
+
+COMMENT ON COLUMN organization.country_code IS 'ISO 3166-1 alpha-2. Default PY. Dispara feriados de ref_holiday.';
 /
 
 

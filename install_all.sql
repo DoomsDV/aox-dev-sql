@@ -67,6 +67,9 @@ PROMPT [17/31] professional_schedule_exception_slot
 PROMPT [17b/31] location_closure
 @@tables\LOCATION_CLOSURE.sql
 
+PROMPT [17c/31] ref_holiday
+@@tables\REF_HOLIDAY.sql
+
 PROMPT [18/31] appointment
 @@tables\APPOINTMENT.sql
 
@@ -148,6 +151,9 @@ PROMPT [35d] push_campaign_var
 
 PROMPT [35e] push_campaign_delivery
 @@tables\PUSH_CAMPAIGN_DELIVERY.sql
+
+PROMPT [35f] user_notification (campanita in-app)
+@@tables\USER_NOTIFICATION.sql
 
 PROMPT --- Suscripcion y planes (Fase 1) ---
 PROMPT [36/41] ref_plan
@@ -304,6 +310,9 @@ PROMPT --- FASE 3: Paquetes - nucleo ---
 @@packages\PKG_AOX_REFUND_CLAIMS_API.pls
 @@packages\PKG_AOX_BUCKET.pls
 @@packages\PKG_AOX_META_API.pls
+@@packages\PKG_AOX_FCM_API.pls
+@@packages\PKG_AOX_INBOX_API.pls
+-- Recompilar FCM ahora que existe INBOX (el body encola en la campanita).
 @@packages\PKG_AOX_FCM_API.pls
 @@packages\PKG_AOX_PUSH_CAMPAIGN.pls
 

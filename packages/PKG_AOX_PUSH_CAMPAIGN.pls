@@ -583,6 +583,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
         v_body         VARCHAR2(4000);
         v_url          VARCHAR2(1000);
         v_queued_count PLS_INTEGER := 0;
+        v_inbox_count  PLS_INTEGER := 0;
         v_base_url     VARCHAR2(500);
         v_audience     VARCHAR2(20);
         v_role_id      NUMBER;
@@ -651,11 +652,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
                            OR (v_audience = 'ROLE' AND om.rol_id_role = v_role_id)
                             )
                    )
-               AND EXISTS (
-                     SELECT 1
-                       FROM user_fcm_devices d
-                      WHERE d.platform_user_id = pu.id_platform_user
-                   )
         ) LOOP
             v_title := SUBSTR(
                 fn_apply_all_vars(
@@ -692,6 +688,30 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
                 v_url := v_base_url || '/panel/dashboard';
             END IF;
 
+            FOR mem IN (
+                SELECT om.id_org_member, om.org_id_organization
+                  FROM org_member om
+                 WHERE om.platform_user_id = rec.id_platform_user
+                   AND om.is_active = 1
+                   AND (
+                         v_audience = 'ALL_ACTIVE'
+                      OR (v_audience = 'ROLE' AND om.rol_id_role = v_role_id)
+                       )
+            ) LOOP
+                pkg_aox_inbox_api.pr_enqueue(
+                    pi_org_id         => mem.org_id_organization,
+                    pi_org_member_id  => mem.id_org_member,
+                    pi_ntype          => 'SYSTEM',
+                    pi_title          => v_title,
+                    pi_body           => v_body,
+                    pi_action_type    => 'OPEN_URL',
+                    pi_action_url     => v_url,
+                    pi_campaign_id    => pi_campaign_id,
+                    pi_dedupe_key     => 'CAMPAIGN:' || pi_campaign_id || ':' || mem.id_org_member
+                );
+                v_inbox_count := v_inbox_count + 1;
+            END LOOP;
+
             FOR device IN (
                 SELECT f.fcm_token
                   FROM user_fcm_devices f
@@ -713,12 +733,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
             END LOOP;
         END LOOP;
 
-        -- Sin destinatarios con token: no hay nada que un worker pueda despachar
-        -- despues, asi que se resuelve el estado final de una vez (igual que antes).
+        -- Sin destinatarios con token: si al menos se escribio inbox, la campana
+        -- cumplio el canal in-app. Si tampoco hay inbox, queda ERROR.
         IF v_queued_count = 0 THEN
             UPDATE push_campaign
-               SET status        = 'ERROR',
-                   error_message = 'Sin destinatarios con token FCM.',
+               SET status        = CASE WHEN v_inbox_count > 0 THEN 'SENT' ELSE 'ERROR' END,
+                   error_message = CASE WHEN v_inbox_count > 0 THEN NULL ELSE 'Sin destinatarios con token FCM.' END,
+                   sent_at       = CASE WHEN v_inbox_count > 0 THEN CURRENT_TIMESTAMP ELSE sent_at END,
                    updated_at    = CURRENT_TIMESTAMP
              WHERE id_campaign = pi_campaign_id;
         END IF;

@@ -31,16 +31,24 @@ CREATE OR REPLACE PACKAGE pkg_aox_fcm_api IS
         pi_appointment_id IN NUMBER,
         pi_title          IN VARCHAR2,
         pi_body           IN VARCHAR2,
-        pi_process_name   IN VARCHAR2
+        pi_process_name   IN VARCHAR2,
+        pi_ntype          IN VARCHAR2 DEFAULT NULL
     );
 
     -- Notificación push a un miembro de la organización (ADMIN u otros roles)
     PROCEDURE pr_notify_org_member(
-        pi_org_member_id IN NUMBER,
-        pi_title         IN VARCHAR2,
-        pi_body          IN VARCHAR2,
-        pi_url           IN VARCHAR2,
-        pi_process_name  IN VARCHAR2
+        pi_org_member_id  IN NUMBER,
+        pi_title          IN VARCHAR2,
+        pi_body           IN VARCHAR2,
+        pi_url            IN VARCHAR2,
+        pi_process_name   IN VARCHAR2,
+        pi_ntype          IN VARCHAR2 DEFAULT NULL,
+        pi_appointment_id IN NUMBER   DEFAULT NULL,
+        pi_holiday_id     IN NUMBER   DEFAULT NULL,
+        pi_campaign_id    IN NUMBER   DEFAULT NULL,
+        pi_action_type    IN VARCHAR2 DEFAULT NULL,
+        pi_action_payload IN CLOB     DEFAULT NULL,
+        pi_dedupe_key     IN VARCHAR2 DEFAULT NULL
     );
 
     -- Job matutino: recordatorio diario admin/profesional (ventana 7-8 AM, TZ app)
@@ -169,6 +177,34 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         END IF;
         RETURN SUBSTR('[' || SUBSTR(v_org_label, 1, 80) || '] ' || v_body, 1, 4000);
     END fn_format_push_body;
+
+    FUNCTION fn_is_digest_process(pi_process_name IN VARCHAR2) RETURN BOOLEAN IS
+        v_name VARCHAR2(200) := UPPER(NVL(pi_process_name, ''));
+    BEGIN
+        RETURN INSTR(v_name, 'DIGEST') > 0;
+    END fn_is_digest_process;
+
+    FUNCTION fn_infer_inbox_ntype(
+        pi_ntype        IN VARCHAR2,
+        pi_process_name IN VARCHAR2
+    ) RETURN VARCHAR2 IS
+        v_type VARCHAR2(20) := UPPER(TRIM(pi_ntype));
+        v_name VARCHAR2(200) := UPPER(NVL(pi_process_name, ''));
+    BEGIN
+        IF v_type IN ('APPOINTMENT', 'PAYMENT', 'HOLIDAY', 'SYSTEM') THEN
+            RETURN v_type;
+        END IF;
+        IF INSTR(v_name, 'PAYMENT') > 0 THEN
+            RETURN 'PAYMENT';
+        END IF;
+        IF INSTR(v_name, 'HOLIDAY') > 0 THEN
+            RETURN 'HOLIDAY';
+        END IF;
+        IF INSTR(v_name, 'CAMPAIGN') > 0 OR INSTR(v_name, 'PUSH_CAMP') > 0 THEN
+            RETURN 'SYSTEM';
+        END IF;
+        RETURN 'APPOINTMENT';
+    END fn_infer_inbox_ntype;
 
     -- Función Privada: Validar inputs del Token FCM
     FUNCTION fn_validate_fcm_inputs(
@@ -422,7 +458,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         pi_appointment_id IN NUMBER,
         pi_title          IN VARCHAR2,
         pi_body           IN VARCHAR2,
-        pi_process_name   IN VARCHAR2
+        pi_process_name   IN VARCHAR2,
+        pi_ntype          IN VARCHAR2 DEFAULT NULL
     ) IS
         v_org_member_id    org_member.id_org_member%TYPE;
         v_platform_user_id platform_user.id_platform_user%TYPE;
@@ -431,6 +468,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         v_push_url         VARCHAR2(1000);
         v_push_body        VARCHAR2(4000);
         v_admin_role_id    NUMBER := pkg_aox_util.fn_rol('ADMIN');
+        v_inbox_type       VARCHAR2(20);
     BEGIN
         SELECT
             p.usr_id_user,
@@ -449,6 +487,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
 
         v_push_url  := fn_calendar_push_url(v_org_member_id);
         v_push_body := fn_format_push_body(v_org_name, pi_body);
+        v_inbox_type := fn_infer_inbox_ntype(pi_ntype, pi_process_name);
+
+        IF NOT fn_is_digest_process(pi_process_name) THEN
+            pkg_aox_inbox_api.pr_enqueue(
+                pi_org_id         => v_org_id,
+                pi_org_member_id  => v_org_member_id,
+                pi_ntype          => v_inbox_type,
+                pi_title          => pi_title,
+                pi_body           => pi_body,
+                pi_action_type    => 'OPEN_URL',
+                pi_action_url     => v_push_url,
+                pi_appointment_id => pi_appointment_id
+            );
+        END IF;
 
         FOR device IN (
             SELECT f.fcm_token
@@ -474,11 +526,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                AND m.platform_user_id <> v_platform_user_id
         ) LOOP
             pr_notify_org_member(
-                pi_org_member_id => admin_rec.id_org_member,
-                pi_title         => pi_title,
-                pi_body          => pi_body,
-                pi_url           => fn_calendar_push_url(admin_rec.id_org_member),
-                pi_process_name  => pi_process_name || '.ADMIN_FANOUT'
+                pi_org_member_id  => admin_rec.id_org_member,
+                pi_title          => pi_title,
+                pi_body           => pi_body,
+                pi_url            => fn_calendar_push_url(admin_rec.id_org_member),
+                pi_process_name   => pi_process_name || '.ADMIN_FANOUT',
+                pi_ntype          => v_inbox_type,
+                pi_appointment_id => pi_appointment_id
             );
         END LOOP;
     EXCEPTION
@@ -496,30 +550,59 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
     END pr_notify_professional_appointment;
 
     PROCEDURE pr_notify_org_member(
-        pi_org_member_id IN NUMBER,
-        pi_title         IN VARCHAR2,
-        pi_body          IN VARCHAR2,
-        pi_url           IN VARCHAR2,
-        pi_process_name  IN VARCHAR2
+        pi_org_member_id  IN NUMBER,
+        pi_title          IN VARCHAR2,
+        pi_body           IN VARCHAR2,
+        pi_url            IN VARCHAR2,
+        pi_process_name   IN VARCHAR2,
+        pi_ntype          IN VARCHAR2 DEFAULT NULL,
+        pi_appointment_id IN NUMBER   DEFAULT NULL,
+        pi_holiday_id     IN NUMBER   DEFAULT NULL,
+        pi_campaign_id    IN NUMBER   DEFAULT NULL,
+        pi_action_type    IN VARCHAR2 DEFAULT NULL,
+        pi_action_payload IN CLOB     DEFAULT NULL,
+        pi_dedupe_key     IN VARCHAR2 DEFAULT NULL
     ) IS
         v_platform_user_id platform_user.id_platform_user%TYPE;
+        v_org_id           organization.id_organization%TYPE;
         v_org_name         organization.name%TYPE;
         v_push_url         VARCHAR2(1000);
         v_push_body        VARCHAR2(4000);
+        v_inbox_type       VARCHAR2(20);
     BEGIN
         SELECT
             m.platform_user_id,
+            m.org_id_organization,
             o.name
         INTO
             v_platform_user_id,
+            v_org_id,
             v_org_name
         FROM org_member m
         INNER JOIN organization o ON o.id_organization = m.org_id_organization
         WHERE m.id_org_member = pi_org_member_id
           AND m.is_active = 1;
 
-        v_push_url  := NVL(NULLIF(TRIM(pi_url), ''), fn_calendar_push_url(pi_org_member_id));
-        v_push_body := fn_format_push_body(v_org_name, pi_body);
+        v_push_url   := NVL(NULLIF(TRIM(pi_url), ''), fn_calendar_push_url(pi_org_member_id));
+        v_push_body  := fn_format_push_body(v_org_name, pi_body);
+        v_inbox_type := fn_infer_inbox_ntype(pi_ntype, pi_process_name);
+
+        IF NOT fn_is_digest_process(pi_process_name) THEN
+            pkg_aox_inbox_api.pr_enqueue(
+                pi_org_id          => v_org_id,
+                pi_org_member_id   => pi_org_member_id,
+                pi_ntype           => v_inbox_type,
+                pi_title           => pi_title,
+                pi_body            => pi_body,
+                pi_action_type     => NVL(pi_action_type, 'OPEN_URL'),
+                pi_action_url      => v_push_url,
+                pi_action_payload  => pi_action_payload,
+                pi_appointment_id  => pi_appointment_id,
+                pi_holiday_id      => pi_holiday_id,
+                pi_campaign_id     => pi_campaign_id,
+                pi_dedupe_key      => pi_dedupe_key
+            );
+        END IF;
 
         FOR device IN (
             SELECT f.fcm_token

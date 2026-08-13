@@ -70,6 +70,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_user_api IS
                 p.display_name,
                 p.profile_slug,
                 p.phone_number,
+                p.profile_image_url AS professional_image_url,
                 s.name AS specialty_name
             FROM app_user u
             JOIN org_member m
@@ -101,6 +102,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_user_api IS
                 v_prof_obj.put('profile_slug'   , NVL(rec.profile_slug, ''));
                 v_prof_obj.put('phone_number'   , rec.phone_number);
                 v_prof_obj.put('specialty'      , NVL(rec.specialty_name, 'Sin especialidad'));
+                v_prof_obj.put('profile_image_url', NVL(rec.professional_image_url, ''));
                 v_user_obj.put('professional_profile', v_prof_obj);
             END IF;
 
