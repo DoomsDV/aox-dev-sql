@@ -57,6 +57,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_appointment_api IS
         po_response_body OUT CLOB
     );
 
+    -- Aprobar excepcion de horario (sale del sheet de conflictos; borde verde).
+    PROCEDURE pr_approve_schedule_exception(
+        pi_auth_header   IN  VARCHAR2,
+        pi_app_id        IN  NUMBER,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- Fase 4: subir un adjunto al historial de una cita (Premium: APPOINTMENT_HISTORY).
     -- El body es JSON: { "file_base64": "...", "filename": "...", "mime_type": "..." }
     PROCEDURE pr_upload_attachment(
@@ -122,6 +130,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 a.id_appointment, c.full_name, c.phone_number, a.start_time, a.end_time,
                 a.status, a.attendance_status, a.attendance_reply_at, a.pro_id_professional,
                 a.loc_id_location,
+                a.schedule_exception_approved, a.schedule_exception_start,
+                a.schedule_exception_end, a.schedule_exception_loc, a.schedule_exception_pro,
                 NVL(p.display_name, TRIM(u.first_name || ' ' || u.last_name)) AS professional_name,
                 s.name AS service_name, l.name AS location_name
             FROM appointment a
@@ -171,6 +181,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                AND TRUNC(rec.start_time) >= TRUNC(SYSDATE) THEN
                 DECLARE
                     v_misaligned_reason VARCHAR2(40);
+                    v_covers            NUMBER;
                 BEGIN
                     v_misaligned_reason := pkg_aox_util.fn_get_appointment_schedule_misaligned_reason(
                         rec.pro_id_professional,
@@ -178,15 +189,32 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                         rec.end_time,
                         rec.loc_id_location
                     );
-                    IF v_misaligned_reason IS NOT NULL THEN
+                    v_covers := pkg_aox_util.fn_schedule_exception_covers_slot(
+                        rec.schedule_exception_approved,
+                        rec.schedule_exception_pro,
+                        rec.schedule_exception_loc,
+                        rec.schedule_exception_start,
+                        rec.schedule_exception_end,
+                        rec.pro_id_professional,
+                        rec.loc_id_location,
+                        rec.start_time,
+                        rec.end_time
+                    );
+                    IF v_misaligned_reason IS NOT NULL AND v_covers = 1 THEN
+                        v_extended_props.put('schedule_misaligned', FALSE);
+                        v_extended_props.put('schedule_exception_approved', TRUE);
+                    ELSIF v_misaligned_reason IS NOT NULL THEN
                         v_extended_props.put('schedule_misaligned', TRUE);
                         v_extended_props.put('schedule_misaligned_reason', v_misaligned_reason);
+                        v_extended_props.put('schedule_exception_approved', FALSE);
                     ELSE
                         v_extended_props.put('schedule_misaligned', FALSE);
+                        v_extended_props.put('schedule_exception_approved', FALSE);
                     END IF;
                 END;
             ELSE
                 v_extended_props.put('schedule_misaligned', FALSE);
+                v_extended_props.put('schedule_exception_approved', FALSE);
             END IF;
 
             v_event_obj.put('extendedProps', v_extended_props);
@@ -269,6 +297,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 a.deposit_amount,
                 a.refund_status,
                 a.refund_amount,
+                a.schedule_exception_approved,
+                a.schedule_exception_start,
+                a.schedule_exception_end,
+                a.schedule_exception_loc,
+                a.schedule_exception_pro,
                 NVL(p.display_name, TRIM(u.first_name || ' ' || u.last_name)) AS professional_name,
                 s.name AS service_name,
                 l.name AS location_name
@@ -321,6 +354,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                AND TRUNC(rec.start_time) >= TRUNC(SYSDATE) THEN
                 DECLARE
                     v_misaligned_reason VARCHAR2(40);
+                    v_covers            NUMBER;
                 BEGIN
                     v_misaligned_reason := pkg_aox_util.fn_get_appointment_schedule_misaligned_reason(
                         rec.pro_id_professional,
@@ -328,15 +362,32 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                         rec.end_time,
                         rec.loc_id_location
                     );
-                    IF v_misaligned_reason IS NOT NULL THEN
+                    v_covers := pkg_aox_util.fn_schedule_exception_covers_slot(
+                        rec.schedule_exception_approved,
+                        rec.schedule_exception_pro,
+                        rec.schedule_exception_loc,
+                        rec.schedule_exception_start,
+                        rec.schedule_exception_end,
+                        rec.pro_id_professional,
+                        rec.loc_id_location,
+                        rec.start_time,
+                        rec.end_time
+                    );
+                    IF v_misaligned_reason IS NOT NULL AND v_covers = 1 THEN
+                        v_app_obj.put('schedule_misaligned', FALSE);
+                        v_app_obj.put('schedule_exception_approved', TRUE);
+                    ELSIF v_misaligned_reason IS NOT NULL THEN
                         v_app_obj.put('schedule_misaligned', TRUE);
                         v_app_obj.put('schedule_misaligned_reason', v_misaligned_reason);
+                        v_app_obj.put('schedule_exception_approved', FALSE);
                     ELSE
                         v_app_obj.put('schedule_misaligned', FALSE);
+                        v_app_obj.put('schedule_exception_approved', FALSE);
                     END IF;
                 END;
             ELSE
                 v_app_obj.put('schedule_misaligned', FALSE);
+                v_app_obj.put('schedule_exception_approved', FALSE);
             END IF;
 
             -- Historial (Fase 4): notas y adjuntos de la cita si el plan lo incluye.
@@ -447,6 +498,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         pi_org_id            IN  NUMBER,
         pi_role_id           IN  NUMBER,
         pi_actual_pro_id     IN  NUMBER,
+        pi_user_id           IN  NUMBER,
         pi_row_json          IN  json_object_t,
         po_new_id            OUT NUMBER,
         po_misaligned_reason OUT VARCHAR2
@@ -477,6 +529,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_ack_raw       VARCHAR2(20);
         v_notify_customer BOOLEAN := TRUE;
         v_notify_raw    VARCHAR2(20);
+        v_saved_reason  VARCHAR2(40);
+        v_write_exception BOOLEAN := FALSE;
+        v_write_exc_n   NUMBER := 0;
     BEGIN
         po_new_id := NULL;
         po_misaligned_reason := NULL;
@@ -688,6 +743,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             RETURN;
         END IF;
 
+        v_saved_reason := po_misaligned_reason;
+        v_write_exception := v_saved_reason IS NOT NULL AND v_acknowledge;
+        v_write_exc_n := CASE WHEN v_write_exception THEN 1 ELSE 0 END;
         po_misaligned_reason := NULL;
 
         -- Validación de solapamiento
@@ -737,7 +795,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             status,
             payment_status,
             deposit_amount,
-            public_manage_token
+            public_manage_token,
+            schedule_exception_approved,
+            schedule_exception_approved_at,
+            schedule_exception_approved_by,
+            schedule_exception_reason,
+            schedule_exception_start,
+            schedule_exception_end,
+            schedule_exception_loc,
+            schedule_exception_pro
         ) VALUES (
             pi_org_id,
             v_loc_id,
@@ -749,7 +815,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             CASE WHEN v_payment_status = 'PENDING' THEN 'PENDIENTE' ELSE 'CONFIRMADO' END,
             v_payment_status,
             v_deposit_amount,
-            LOWER(RAWTOHEX(SYS_GUID()) || RAWTOHEX(SYS_GUID()))
+            LOWER(RAWTOHEX(SYS_GUID()) || RAWTOHEX(SYS_GUID())),
+            CASE WHEN v_write_exc_n = 1 THEN 1 ELSE 0 END,
+            CASE WHEN v_write_exc_n = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+            CASE WHEN v_write_exc_n = 1 THEN pi_user_id ELSE NULL END,
+            CASE WHEN v_write_exc_n = 1 THEN v_saved_reason ELSE NULL END,
+            CASE WHEN v_write_exc_n = 1 THEN v_start_time ELSE NULL END,
+            CASE WHEN v_write_exc_n = 1 THEN v_end_time ELSE NULL END,
+            CASE WHEN v_write_exc_n = 1 THEN v_loc_id ELSE NULL END,
+            CASE WHEN v_write_exc_n = 1 THEN v_pro_id ELSE NULL END
         )
         RETURNING id_appointment INTO po_new_id;
 
@@ -853,6 +927,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             pi_org_id            => v_org_id,
             pi_role_id           => v_role_id,
             pi_actual_pro_id     => v_actual_pro_id,
+            pi_user_id           => v_user_id,
             pi_row_json          => v_json_req,
             po_new_id            => v_new_id,
             po_misaligned_reason => v_misaligned_reason
@@ -998,6 +1073,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                     pi_org_id            => v_org_id,
                     pi_role_id           => v_role_id,
                     pi_actual_pro_id     => v_actual_pro_id,
+                    pi_user_id           => v_user_id,
                     pi_row_json          => v_row_json,
                     po_new_id            => v_new_id,
                     po_misaligned_reason => v_misaligned_reason
@@ -1106,6 +1182,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_notify_customer  BOOLEAN := TRUE;
         v_notify_raw       VARCHAR2(20);
         v_misaligned_reason VARCHAR2(40);
+        v_old_exc_approved appointment.schedule_exception_approved%TYPE;
+        v_old_exc_start    appointment.schedule_exception_start%TYPE;
+        v_old_exc_end      appointment.schedule_exception_end%TYPE;
+        v_old_exc_loc      appointment.schedule_exception_loc%TYPE;
+        v_old_exc_pro      appointment.schedule_exception_pro%TYPE;
+        v_covers_new       NUMBER := 0;
+        v_write_exception  BOOLEAN := FALSE;
+        v_write_exc_n      NUMBER := 0;
+        v_ack_n            NUMBER := 0;
     BEGIN
         -- Identidad / autorización
         v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
@@ -1291,7 +1376,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             pro_id_professional,
             ser_id_service,
             payment_status,
-            deposit_amount
+            deposit_amount,
+            schedule_exception_approved,
+            schedule_exception_start,
+            schedule_exception_end,
+            schedule_exception_loc,
+            schedule_exception_pro
           INTO
             v_current_cus_id,
             v_old_status,
@@ -1301,7 +1391,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             v_old_pro_id,
             v_old_ser_id,
             v_old_pay_status,
-            v_old_deposit
+            v_old_deposit,
+            v_old_exc_approved,
+            v_old_exc_start,
+            v_old_exc_end,
+            v_old_exc_loc,
+            v_old_exc_pro
           FROM appointment
         WHERE id_appointment      = pi_app_id
           AND org_id_organization = v_org_id;
@@ -1388,8 +1483,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 v_end_time,
                 v_loc_id
             );
+            v_covers_new := pkg_aox_util.fn_schedule_exception_covers_slot(
+                v_old_exc_approved,
+                v_old_exc_pro,
+                v_old_exc_loc,
+                v_old_exc_start,
+                v_old_exc_end,
+                v_pro_id,
+                v_loc_id,
+                v_start_time,
+                v_end_time
+            );
 
-            IF v_misaligned_reason IS NOT NULL AND NOT v_acknowledge THEN
+            IF v_misaligned_reason IS NOT NULL AND NOT v_acknowledge AND v_covers_new = 0 THEN
                 po_status_code := pkg_aox_util.c_conflict_code;
                 v_response_json.put('status', 'error');
                 v_response_json.put('code', 'SCHEDULE_MISALIGNED');
@@ -1408,6 +1514,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 po_response_body := v_response_json.to_clob();
                 RETURN;
             END IF;
+
+            v_write_exception := v_misaligned_reason IS NOT NULL
+                                 AND (v_acknowledge OR v_covers_new = 1);
+            v_write_exc_n := CASE WHEN v_write_exception THEN 1 ELSE 0 END;
+            v_ack_n := CASE WHEN v_acknowledge THEN 1 ELSE 0 END;
         END IF;
 
         -- Validar solapamiento (excluyendo la misma cita)
@@ -1497,6 +1608,38 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                                        AND v_refund_status = 'AWAITING_ALIAS'
                                       THEN CURRENT_TIMESTAMP
                                       ELSE refund_requested_at
+                                    END,
+              schedule_exception_approved = CASE
+                                      WHEN v_write_exc_n = 1 THEN 1
+                                      ELSE schedule_exception_approved
+                                    END,
+              schedule_exception_approved_at = CASE
+                                      WHEN v_write_exc_n = 1 AND v_ack_n = 1 THEN CURRENT_TIMESTAMP
+                                      ELSE schedule_exception_approved_at
+                                    END,
+              schedule_exception_approved_by = CASE
+                                      WHEN v_write_exc_n = 1 AND v_ack_n = 1 THEN v_user_id
+                                      ELSE schedule_exception_approved_by
+                                    END,
+              schedule_exception_reason = CASE
+                                      WHEN v_write_exc_n = 1 THEN v_misaligned_reason
+                                      ELSE schedule_exception_reason
+                                    END,
+              schedule_exception_start = CASE
+                                      WHEN v_write_exc_n = 1 THEN v_start_time
+                                      ELSE schedule_exception_start
+                                    END,
+              schedule_exception_end = CASE
+                                      WHEN v_write_exc_n = 1 THEN v_end_time
+                                      ELSE schedule_exception_end
+                                    END,
+              schedule_exception_loc = CASE
+                                      WHEN v_write_exc_n = 1 THEN v_loc_id
+                                      ELSE schedule_exception_loc
+                                    END,
+              schedule_exception_pro = CASE
+                                      WHEN v_write_exc_n = 1 THEN v_pro_id
+                                      ELSE schedule_exception_pro
                                     END
         WHERE id_appointment      = pi_app_id
           AND org_id_organization = v_org_id;
@@ -1768,6 +1911,181 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 po_response_body => po_response_body
             );
     END pr_delete_appointment;
+
+    PROCEDURE pr_approve_schedule_exception(
+        pi_auth_header   IN  VARCHAR2,
+        pi_app_id        IN  NUMBER,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_user_id       NUMBER;
+        v_actual_pro_id NUMBER;
+        v_status        appointment.status%TYPE;
+        v_start_time    appointment.start_time%TYPE;
+        v_end_time      appointment.end_time%TYPE;
+        v_loc_id        appointment.loc_id_location%TYPE;
+        v_pro_id        appointment.pro_id_professional%TYPE;
+        v_exc_approved  appointment.schedule_exception_approved%TYPE;
+        v_exc_start     appointment.schedule_exception_start%TYPE;
+        v_exc_end       appointment.schedule_exception_end%TYPE;
+        v_exc_loc       appointment.schedule_exception_loc%TYPE;
+        v_exc_pro       appointment.schedule_exception_pro%TYPE;
+        v_reason        VARCHAR2(40);
+        v_covers        NUMBER;
+        v_response_json json_object_t := json_object_t();
+    BEGIN
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+
+        IF NVL(v_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+        END IF;
+
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
+        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            BEGIN
+                SELECT id_professional
+                  INTO v_actual_pro_id
+                  FROM professional
+                WHERE usr_id_user         = v_user_id
+                  AND org_id_organization = v_org_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20001, 'Perfil no asignado.');
+            END;
+        END IF;
+
+        BEGIN
+            SELECT
+                status,
+                start_time,
+                end_time,
+                loc_id_location,
+                pro_id_professional,
+                schedule_exception_approved,
+                schedule_exception_start,
+                schedule_exception_end,
+                schedule_exception_loc,
+                schedule_exception_pro
+              INTO
+                v_status,
+                v_start_time,
+                v_end_time,
+                v_loc_id,
+                v_pro_id,
+                v_exc_approved,
+                v_exc_start,
+                v_exc_end,
+                v_exc_loc,
+                v_exc_pro
+              FROM appointment
+             WHERE id_appointment      = pi_app_id
+               AND org_id_organization = v_org_id
+               AND (
+                    v_role_id != pkg_aox_util.fn_rol('PROFESIONAL')
+                    OR pro_id_professional = v_actual_pro_id
+               );
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(-20004, 'Cita no encontrada.');
+        END;
+
+        IF v_status NOT IN ('PENDIENTE', 'CONFIRMADO') THEN
+            RAISE_APPLICATION_ERROR(-20008, 'Solo se puede aprobar excepcion en citas pendientes o confirmadas.');
+        END IF;
+
+        v_covers := pkg_aox_util.fn_schedule_exception_covers_slot(
+            v_exc_approved,
+            v_exc_pro,
+            v_exc_loc,
+            v_exc_start,
+            v_exc_end,
+            v_pro_id,
+            v_loc_id,
+            v_start_time,
+            v_end_time
+        );
+
+        IF v_covers = 1 THEN
+            po_status_code := pkg_aox_util.c_success_ok_code;
+            v_response_json.put('status', 'success');
+            v_response_json.put('message', 'La excepcion de horario ya estaba aprobada.');
+            v_response_json.put('schedule_exception_approved', TRUE);
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        v_reason := pkg_aox_util.fn_get_appointment_schedule_misaligned_reason(
+            v_pro_id,
+            v_start_time,
+            v_end_time,
+            v_loc_id
+        );
+
+        IF v_reason IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20006, 'Esta cita ya coincide con la agenda actual.');
+        END IF;
+
+        UPDATE appointment
+           SET schedule_exception_approved    = 1,
+               schedule_exception_approved_at = CURRENT_TIMESTAMP,
+               schedule_exception_approved_by = v_user_id,
+               schedule_exception_reason      = v_reason,
+               schedule_exception_start       = v_start_time,
+               schedule_exception_end         = v_end_time,
+               schedule_exception_loc         = v_loc_id,
+               schedule_exception_pro         = v_pro_id,
+               updated_at                     = CURRENT_TIMESTAMP
+         WHERE id_appointment      = pi_app_id
+           AND org_id_organization = v_org_id;
+
+        IF SQL%ROWCOUNT = 0 THEN
+            RAISE_APPLICATION_ERROR(-20004, 'Cita no encontrada.');
+        END IF;
+
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('message', 'Advertencia descartada. La cita queda como excepcion aprobada.');
+        v_response_json.put('schedule_exception_approved', TRUE);
+        po_response_body := v_response_json.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            po_status_code := CASE
+                WHEN SQLCODE = pkg_aox_util.c_sqlcode_session THEN pkg_aox_util.c_unauthorized_code
+                WHEN SQLCODE = pkg_aox_util.c_sqlcode_forbidden THEN pkg_aox_util.c_forbidden_code
+                WHEN SQLCODE IN (-20004, -20009) THEN pkg_aox_util.c_not_found_code
+                WHEN SQLCODE IN (-20003, -20006, -20008) THEN pkg_aox_util.c_bad_request_code
+                ELSE pkg_aox_util.c_internal_error_code
+            END;
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'APPOINTMENTS_SCHEDULE_EXCEPTION',
+                pi_process_name    => 'PKG_AOX_APPOINTMENT_API.PR_APPROVE_SCHEDULE_EXCEPTION',
+                pi_http_method     => 'POST',
+                pi_endpoint        => '/appointments/:id/schedule-exception',
+                pi_org_id          => v_org_id,
+                pi_user_id         => v_user_id,
+                pi_status          => 'ERROR',
+                pi_status_code     => po_status_code,
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_request_params  => 'appointment_id=' || pi_app_id
+            );
+            pkg_aox_util.pr_build_api_error_response(
+                pi_status_code   => po_status_code,
+                pi_api_code      => pkg_aox_util.fn_resolve_api_code(po_status_code, SQLCODE, SQLERRM),
+                pi_message       => pkg_aox_util.fn_clean_sqlerrm(SQLERRM),
+                po_response_body => po_response_body
+            );
+    END pr_approve_schedule_exception;
 
     -- Función de Soporte: Parseo ISO a TIMESTAMP WITH TIME ZONE
     FUNCTION fn_parse_iso_date(pi_iso_str IN VARCHAR2) RETURN TIMESTAMP WITH TIME ZONE IS

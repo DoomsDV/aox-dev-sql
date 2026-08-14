@@ -196,6 +196,21 @@ CREATE OR REPLACE package pkg_aox_util as
     ) return number;
 
     /**
+     * 1 si hay excepcion de agenda aprobada y la huella coincide con el slot actual.
+     */
+    function fn_schedule_exception_covers_slot (
+        pi_approved  in number,
+        pi_exc_pro   in number,
+        pi_exc_loc   in number,
+        pi_exc_start in timestamp,
+        pi_exc_end   in timestamp,
+        pi_pro       in number,
+        pi_loc       in number,
+        pi_start     in timestamp,
+        pi_end       in timestamp
+    ) return number;
+
+    /**
      * Cuenta citas futuras PENDIENTE/CONFIRMADO que quedarian desalineadas
      * si se aplicara la plantilla semanal enviada en pi_new_schedules.
      */
@@ -820,6 +835,34 @@ CREATE OR REPLACE package body pkg_aox_util as
             else 0
         end;
     end fn_is_appointment_schedule_aligned;
+
+    function fn_schedule_exception_covers_slot (
+        pi_approved  in number,
+        pi_exc_pro   in number,
+        pi_exc_loc   in number,
+        pi_exc_start in timestamp,
+        pi_exc_end   in timestamp,
+        pi_pro       in number,
+        pi_loc       in number,
+        pi_start     in timestamp,
+        pi_end       in timestamp
+    ) return number is
+    begin
+        if nvl(pi_approved, 0) <> 1 then
+            return 0;
+        end if;
+        if pi_exc_pro is null or pi_exc_loc is null
+           or pi_exc_start is null or pi_exc_end is null then
+            return 0;
+        end if;
+        if pi_exc_pro = pi_pro
+           and pi_exc_loc = pi_loc
+           and pi_exc_start = pi_start
+           and pi_exc_end = pi_end then
+            return 1;
+        end if;
+        return 0;
+    end fn_schedule_exception_covers_slot;
 
     function fn_appt_fits_new_template_json (
         pi_pro_id        in number,

@@ -270,8 +270,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                        MAX(a.start_time) AS last_appointment_at
                   FROM appointment a
                  WHERE a.org_id_organization = v_org_id
-                   AND a.status IN ('CONFIRMADO', 'COMPLETADO')
-                   AND a.start_time < CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP)
+                   AND (
+                        a.status = 'COMPLETADO'
+                     OR (
+                            a.status = 'CONFIRMADO'
+                        AND a.start_time < CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP)
+                        )
+                   )
                    AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
                  GROUP BY a.cus_id_customer, a.org_id_organization
             ) agg
@@ -423,8 +428,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
 
         SELECT
             NVL(SUM(CASE
-                WHEN a.status IN ('CONFIRMADO', 'COMPLETADO')
-                 AND a.start_time < v_now_local
+                WHEN a.status = 'COMPLETADO'
+                  OR (a.status = 'CONFIRMADO' AND a.start_time < v_now_local)
                 THEN 1 ELSE 0
             END), 0),
             NVL(SUM(CASE
@@ -437,8 +442,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                 THEN 1 ELSE 0
             END), 0),
             NVL(SUM(CASE
-                WHEN a.status IN ('CONFIRMADO', 'COMPLETADO')
-                 AND a.start_time < v_now_local
+                WHEN a.status = 'COMPLETADO'
+                  OR (a.status = 'CONFIRMADO' AND a.start_time < v_now_local)
                 THEN NVL(s.price, 0) ELSE 0
             END), 0)
           INTO
@@ -484,8 +489,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
              WHERE a.cus_id_customer     = pi_cus_id
                AND a.org_id_organization = v_org_id
                AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
-               AND a.status IN ('CONFIRMADO', 'COMPLETADO')
-               AND a.start_time < v_now_local
+               AND (
+                    a.status = 'COMPLETADO'
+                 OR (a.status = 'CONFIRMADO' AND a.start_time < v_now_local)
+               )
              ORDER BY a.start_time DESC
              FETCH FIRST 1 ROW ONLY
         ) LOOP
@@ -584,7 +591,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
 
         v_stats_obj.put('pending_appointments', v_pending_arr);
 
-        -- Historial de citas atendidas (últimas N) para la pestaña del perfil.
+        -- Historial: COMPLETADO siempre (aunque el horario sea futuro) y CONFIRMADO ya ocurrido.
         FOR rec IN (
             SELECT
                 a.id_appointment,
@@ -601,8 +608,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
              WHERE a.cus_id_customer     = pi_cus_id
                AND a.org_id_organization = v_org_id
                AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
-               AND a.status IN ('CONFIRMADO', 'COMPLETADO')
-               AND a.start_time < v_now_local
+               AND (
+                    a.status = 'COMPLETADO'
+                 OR (a.status = 'CONFIRMADO' AND a.start_time < v_now_local)
+               )
              ORDER BY a.start_time DESC
              FETCH FIRST c_history_limit ROWS ONLY
         ) LOOP
@@ -637,8 +646,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
              WHERE a.cus_id_customer     = pi_cus_id
                AND a.org_id_organization = v_org_id
                AND (v_effective_pro_id IS NULL OR a.pro_id_professional = v_effective_pro_id)
-               AND a.status IN ('CONFIRMADO', 'COMPLETADO')
-               AND a.start_time < v_now_local
+               AND (
+                    a.status = 'COMPLETADO'
+                 OR (a.status = 'CONFIRMADO' AND a.start_time < v_now_local)
+               )
              GROUP BY s.id_service, s.name
              ORDER BY COUNT(*) DESC, s.name ASC
              FETCH FIRST 5 ROWS ONLY
@@ -657,14 +668,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         IF v_analytics_enabled = 1 THEN
             SELECT
                 NVL(SUM(CASE
-                    WHEN a.status IN ('CONFIRMADO', 'COMPLETADO')
-                     AND a.start_time < v_now_local
+                    WHEN (a.status = 'COMPLETADO'
+                       OR (a.status = 'CONFIRMADO' AND a.start_time < v_now_local))
                      AND a.start_time >= TRUNC(v_now_local, 'YYYY')
                     THEN NVL(s.price, 0) ELSE 0
                 END), 0),
                 NVL(SUM(CASE
-                    WHEN a.status IN ('CONFIRMADO', 'COMPLETADO')
-                     AND a.start_time < v_now_local
+                    WHEN (a.status = 'COMPLETADO'
+                       OR (a.status = 'CONFIRMADO' AND a.start_time < v_now_local))
                      AND a.start_time >= TRUNC(v_now_local, 'YYYY')
                     THEN 1 ELSE 0
                 END), 0),
