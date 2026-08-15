@@ -781,6 +781,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_loc_ids_arr     json_array_t;
         v_loc_obj         json_object_t;
         v_pro_obj         json_object_t;
+        v_service_names_arr json_array_t;
 
         v_org_id          NUMBER;
         v_org_slug        VARCHAR2(100);
@@ -971,6 +972,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_loc_ids_arr.append(loc_id_rec.id_location);
             END LOOP;
             v_pro_obj.put('location_ids', v_loc_ids_arr);
+
+            v_service_names_arr := json_array_t();
+            FOR srv_rec IN (
+                SELECT s.name
+                  FROM service s
+                  JOIN professional_service ps ON s.id_service = ps.ser_id_service
+                 WHERE ps.pro_id_professional = pro_rec.id_professional
+                   AND s.org_id_organization = v_org_id
+                   AND s.is_active = 1
+                   AND s.name IS NOT NULL
+                   AND TRIM(s.name) IS NOT NULL
+                 ORDER BY LOWER(s.name)
+                 FETCH FIRST 3 ROWS ONLY
+            ) LOOP
+                v_service_names_arr.append(srv_rec.name);
+            END LOOP;
+            v_pro_obj.put('service_names', v_service_names_arr);
 
             v_professionals_arr.append(v_pro_obj);
         END LOOP;
