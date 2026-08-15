@@ -161,6 +161,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_slot_arr      json_array_t  := json_array_t();
         v_reminder_arr  json_array_t  := json_array_t();
         v_cancel_arr    json_array_t  := json_array_t();
+        v_specialty_arr json_array_t  := json_array_t();
         v_item          json_object_t;
     begin
         for rec in (
@@ -202,9 +203,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             v_cancel_arr.append(v_item);
         end loop;
 
+        for rec in (
+            select id_org_specialty, name
+              from org_specialty
+             where is_active = 1
+             order by name, id_org_specialty
+        ) loop
+            v_item := json_object_t();
+            v_item.put('id', rec.id_org_specialty);
+            v_item.put('label', rec.name);
+            v_specialty_arr.append(v_item);
+        end loop;
+
         v_catalogs.put('slot_intervals', v_slot_arr);
         v_catalogs.put('reminder_hours', v_reminder_arr);
         v_catalogs.put('cancel_wait_hours', v_cancel_arr);
+        v_catalogs.put('org_specialties', v_specialty_arr);
         po_org_obj.put('catalogs', v_catalogs);
     end pr_put_ref_catalogs;
 
@@ -308,6 +322,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_org_id                  number;
         v_id_organization         organization.id_organization%type;
         v_name                    organization.name%type;
+        v_id_org_specialty        organization.org_spe_id_specialty%type;
 
         -- variables de settings
         v_profile_slug            workspace_setting.profile_slug%type;
@@ -344,6 +359,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         select
             o.id_organization,
             o.name,
+            o.org_spe_id_specialty,
             ws.profile_slug,
             ws.description,
             ws.public_whatsapp,
@@ -365,6 +381,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         into
             v_id_organization,
             v_name,
+            v_id_org_specialty,
             v_profile_slug,
             v_description,
             v_public_whatsapp,
@@ -407,6 +424,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
 
         v_org_obj.put('id_organization'         , v_id_organization);
         v_org_obj.put('name'                    , v_name);
+        if v_id_org_specialty is not null then
+            v_org_obj.put('id_org_specialty', v_id_org_specialty);
+        else
+            v_org_obj.put_null('id_org_specialty');
+        end if;
         v_org_obj.put('profile_slug'            , v_profile_slug);
         v_org_obj.put('description'             , v_description);
         v_org_obj.put('public_whatsapp'         , v_public_whatsapp);
@@ -472,6 +494,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_response_json                 json_object_t := json_object_t();
 
         v_name                          organization.name%type;
+        v_id_org_specialty              organization.org_spe_id_specialty%type;
         v_profile_slug                  workspace_setting.profile_slug%type;
         v_description                   workspace_setting.description%type;
         v_public_whatsapp               workspace_setting.public_whatsapp%type;
@@ -494,6 +517,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
 
         v_has_unanswered_alert_action   pls_integer := 0;
         v_has_name                      pls_integer := 0;
+        v_has_id_org_specialty          pls_integer := 0;
         v_has_profile_slug              pls_integer := 0;
         v_has_description               pls_integer := 0;
         v_has_public_whatsapp           pls_integer := 0;
@@ -546,6 +570,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
 
         if v_json_req.has('name') THEN
             v_has_name := 1;
+        end if;
+        if v_json_req.has('id_org_specialty') then
+            v_id_org_specialty := fn_get_optional_number(v_json_req, 'id_org_specialty');
+            if v_id_org_specialty is not null and v_id_org_specialty > 0 then
+                v_has_id_org_specialty := 1;
+            end if;
         end if;
         if v_json_req.has('profile_slug') THEN
             v_has_profile_slug := 1;
@@ -890,10 +920,29 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             v_has_cwh_id_cancel_wait := 1;
         end if;
 
-        -- 1. Actualizar Nombre de la Organización (Datos Core)
-        if v_has_name = 1 then
+        if v_has_id_org_specialty = 1 then
+            declare
+                v_spec_ok pls_integer := 0;
+            begin
+                select count(*)
+                  into v_spec_ok
+                  from org_specialty
+                 where id_org_specialty = v_id_org_specialty
+                   and is_active = 1;
+                if v_spec_ok = 0 then
+                    raise_application_error(-20005, 'La categoría del negocio no es válida.');
+                end if;
+            end;
+        end if;
+
+        -- 1. Actualizar Nombre / categoría de la Organización (Datos Core)
+        if v_has_name = 1 or v_has_id_org_specialty = 1 then
             update organization
-               set name             = v_name
+               set name = case when v_has_name = 1 then v_name else name end,
+                   org_spe_id_specialty = case
+                       when v_has_id_org_specialty = 1 then v_id_org_specialty
+                       else org_spe_id_specialty
+                   end
              where id_organization  = v_org_id;
 
             if sql%rowcount = 0 then

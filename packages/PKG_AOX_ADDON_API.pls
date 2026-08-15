@@ -6,8 +6,8 @@ CREATE OR REPLACE PACKAGE pkg_aox_addon_api IS
     ) RETURN VARCHAR2;
 
     FUNCTION fn_addon_eligible(
-        pi_org_id        IN NUMBER,
-        pi_audience_code IN VARCHAR2
+        pi_org_id   IN NUMBER,
+        pi_addon_id IN NUMBER
     ) RETURN NUMBER;
 
     PROCEDURE pr_list_addons(
@@ -85,23 +85,55 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
     END fn_org_specialty_code;
 
     FUNCTION fn_addon_eligible(
-        pi_org_id        IN NUMBER,
-        pi_audience_code IN VARCHAR2
+        pi_org_id   IN NUMBER,
+        pi_addon_id IN NUMBER
     ) RETURN NUMBER IS
-        v_spec org_specialty.code%TYPE;
+        v_active   NUMBER := 0;
+        v_bridge   NUMBER := 0;
+        v_spec_id  organization.org_spe_id_specialty%TYPE;
     BEGIN
-        IF pi_audience_code IS NULL OR TRIM(pi_audience_code) IS NULL THEN
+        IF NVL(pi_org_id, 0) <= 0 OR NVL(pi_addon_id, 0) <= 0 THEN
+            RETURN 0;
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_active
+          FROM org_addon
+         WHERE org_id_organization = pi_org_id
+           AND rad_id_addon = pi_addon_id
+           AND status = 'ACTIVE';
+        IF v_active > 0 THEN
             RETURN 1;
         END IF;
 
-        -- Preview (kill-switch off): cualquier org puede activar para probar.
-        IF pkg_aox_subscription_api.fn_addons_billing_live = 0 THEN
+        SELECT COUNT(*)
+          INTO v_bridge
+          FROM ref_addon_specialty
+         WHERE rad_id_addon = pi_addon_id;
+        IF v_bridge = 0 THEN
             RETURN 1;
         END IF;
 
-        v_spec := fn_org_specialty_code(pi_org_id);
-        IF v_spec IS NOT NULL
-           AND UPPER(TRIM(v_spec)) = UPPER(TRIM(pi_audience_code)) THEN
+        BEGIN
+            SELECT org_spe_id_specialty
+              INTO v_spec_id
+              FROM organization
+             WHERE id_organization = pi_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RETURN 0;
+        END;
+
+        IF v_spec_id IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_bridge
+          FROM ref_addon_specialty
+         WHERE rad_id_addon = pi_addon_id
+           AND osp_id_org_specialty = v_spec_id;
+        IF v_bridge > 0 THEN
             RETURN 1;
         END IF;
 
@@ -160,7 +192,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         ELSE
             v_item.put('audience_code', pi_audience_code);
         END IF;
-        v_item.put('eligible', fn_addon_eligible(pi_org_id, pi_audience_code));
+        v_item.put('eligible', fn_addon_eligible(pi_org_id, pi_id_addon));
         v_item.put('is_active_for_org', CASE WHEN pi_org_status = 'ACTIVE' THEN 1 ELSE 0 END);
         IF pi_grant_type IS NULL THEN
             v_item.put_null('grant_type');
@@ -254,10 +286,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
-        v_org_id        NUMBER;
-        v_response_json json_object_t := json_object_t();
-        v_data          json_object_t := json_object_t();
-        v_items         json_array_t  := json_array_t();
+        v_org_id         NUMBER;
+        v_response_json  json_object_t := json_object_t();
+        v_data           json_object_t := json_object_t();
+        v_items          json_array_t  := json_array_t();
+        v_active_items   json_array_t  := json_array_t();
+        v_available_items json_array_t := json_array_t();
+        v_item           json_object_t;
     BEGIN
         pr_assert_admin(pi_auth_header);
         v_org_id := fn_require_org_id(pi_auth_header);
@@ -281,26 +316,35 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
              WHERE ra.is_active = 1
              ORDER BY ra.sort_order, ra.id_addon
         ) LOOP
-            v_items.append(
-                fn_build_addon_item(
-                    pi_org_id         => v_org_id,
-                    pi_id_addon       => rec.id_addon,
-                    pi_code           => rec.code,
-                    pi_name           => rec.name,
-                    pi_short_desc     => rec.short_description,
-                    pi_feature_code   => rec.feature_code,
-                    pi_price_amount   => rec.price_amount,
-                    pi_currency       => rec.currency,
-                    pi_billing_period => rec.billing_period,
-                    pi_audience_code  => rec.audience_code,
-                    pi_org_status     => rec.org_status,
-                    pi_grant_type     => rec.grant_type
-                )
+            IF fn_addon_eligible(v_org_id, rec.id_addon) = 0 THEN
+                CONTINUE;
+            END IF;
+            v_item := fn_build_addon_item(
+                pi_org_id         => v_org_id,
+                pi_id_addon       => rec.id_addon,
+                pi_code           => rec.code,
+                pi_name           => rec.name,
+                pi_short_desc     => rec.short_description,
+                pi_feature_code   => rec.feature_code,
+                pi_price_amount   => rec.price_amount,
+                pi_currency       => rec.currency,
+                pi_billing_period => rec.billing_period,
+                pi_audience_code  => rec.audience_code,
+                pi_org_status     => rec.org_status,
+                pi_grant_type     => rec.grant_type
             );
+            v_items.append(v_item);
+            IF rec.org_status = 'ACTIVE' THEN
+                v_active_items.append(v_item);
+            ELSE
+                v_available_items.append(v_item);
+            END IF;
         END LOOP;
 
         v_data.put('addons_billing_live', pkg_aox_subscription_api.fn_addons_billing_live);
         v_data.put('items', v_items);
+        v_data.put('active_items', v_active_items);
+        v_data.put('available_items', v_available_items);
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response_json.put('status', 'success');
@@ -320,7 +364,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         v_org_id         NUMBER;
         v_code           VARCHAR2(30);
         v_id_addon       ref_addon.id_addon%TYPE;
-        v_audience_code  ref_addon.audience_code%TYPE;
         v_price_amount   ref_addon.price_amount%TYPE;
         v_currency       ref_addon.currency%TYPE;
         v_org_status     org_addon.status%TYPE;
@@ -332,11 +375,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
 
         BEGIN
             SELECT id_addon,
-                   audience_code,
                    price_amount,
                    currency
               INTO v_id_addon,
-                   v_audience_code,
                    v_price_amount,
                    v_currency
               FROM ref_addon
@@ -350,10 +391,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
                 );
         END;
 
-        IF fn_addon_eligible(v_org_id, v_audience_code) = 0 THEN
+        IF fn_addon_eligible(v_org_id, v_id_addon) = 0 THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_forbidden,
-                'Este complemento está disponible para clínicas odontológicas.'
+                'Este complemento no está disponible para el rubro de tu organización.'
             );
         END IF;
 
