@@ -223,7 +223,7 @@ USING (
     SELECT 1 AS id_addon,
            'ODONTOGRAM_3D' AS code,
            'Odontograma 3D' AS name,
-           'Ficha clinica interactiva y evolucion de tratamientos. Pronto con soporte 3D avanzado.' AS short_description,
+           'Ficha clinica interactiva 3D y evolucion de tratamientos.' AS short_description,
            'ODONTOGRAM_3D' AS feature_code,
            100000 AS price_amount,
            'PYG' AS currency,

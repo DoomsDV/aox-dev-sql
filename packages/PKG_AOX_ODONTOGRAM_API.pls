@@ -16,6 +16,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_odontogram_api IS
         po_response_body OUT CLOB
     );
 
+    PROCEDURE pr_void_event(
+        pi_auth_header   IN  VARCHAR2,
+        pi_customer_id   IN  NUMBER,
+        pi_event_id      IN  NUMBER,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
 END pkg_aox_odontogram_api;
 /
 
@@ -236,11 +244,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
                                e.face_distal,
                                ROW_NUMBER() OVER (
                                    PARTITION BY e.tooth_fdi
-                                   ORDER BY e.created_at DESC, e.id_event DESC
+                                   ORDER BY CASE e.finding_code
+                                                WHEN 'EXTRACTION' THEN 0
+                                                WHEN 'CROWN' THEN 1
+                                                ELSE 2
+                                            END,
+                                            e.created_at DESC,
+                                            e.id_event DESC
                                ) AS rn
                           FROM customer_odontogram_event e
                          WHERE e.org_id_organization = v_org_id
                            AND e.cus_id_customer = pi_customer_id
+                           AND e.deleted_at IS NULL
                        )
                  WHERE rn = 1
                  ORDER BY tooth_fdi
@@ -268,6 +283,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
                   FROM customer_odontogram_event
                  WHERE org_id_organization = v_org_id
                    AND cus_id_customer = pi_customer_id
+                   AND deleted_at IS NULL
                  ORDER BY created_at DESC, id_event DESC
                  FETCH FIRST 100 ROWS ONLY
             ) LOOP
@@ -368,7 +384,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_distal     := fn_json_01(v_faces, 'distal');
         v_face_sum   := v_occlusal + v_vestibular + v_palatal + v_mesial + v_distal;
 
-        IF v_finding <> 'EXTRACTION' AND v_face_sum < 1 THEN
+        -- Corona recubre toda la pieza; Extracción no tiene caras.
+        IF v_finding IN ('EXTRACTION', 'CROWN') THEN
+            v_occlusal   := 0;
+            v_vestibular := 0;
+            v_palatal    := 0;
+            v_mesial     := 0;
+            v_distal     := 0;
+        ELSIF v_face_sum < 1 THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_validation,
                 'Indicá al menos una cara afectada.'
@@ -417,6 +440,48 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         WHEN OTHERS THEN
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_add_event;
+
+    PROCEDURE pr_void_event(
+        pi_auth_header   IN  VARCHAR2,
+        pi_customer_id   IN  NUMBER,
+        pi_event_id      IN  NUMBER,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_user_id       NUMBER;
+        v_response_json json_object_t := json_object_t();
+    BEGIN
+        v_org_id  := fn_require_org_id(pi_auth_header);
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        pr_assert_customer_in_org(v_org_id, pi_customer_id);
+
+        pkg_aox_subscription_api.pr_assert_org_has_feature(v_org_id, c_feature);
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
+        IF NVL(pi_event_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Evento inválido.');
+        END IF;
+
+        UPDATE /*+ no_parallel */ customer_odontogram_event
+           SET deleted_at = CURRENT_TIMESTAMP,
+               deleted_by_user = v_user_id
+         WHERE id_event = pi_event_id
+           AND org_id_organization = v_org_id
+           AND cus_id_customer = pi_customer_id
+           AND deleted_at IS NULL;
+
+        IF SQL%ROWCOUNT = 0 THEN
+            RAISE_APPLICATION_ERROR(-20004, 'Registro de odontograma no encontrado.');
+        END IF;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        po_response_body := v_response_json.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_void_event;
 
 END pkg_aox_odontogram_api;
 /

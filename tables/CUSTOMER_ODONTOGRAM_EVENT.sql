@@ -12,15 +12,18 @@ CREATE TABLE customer_odontogram_event (
   finding_code        VARCHAR2(20)                NOT NULL,
   notes               VARCHAR2(2000)              NULL,
   created_by_user     NUMBER                      NULL,
-  created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
+  created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  deleted_at          TIMESTAMP(6) WITH TIME ZONE NULL,
+  deleted_by_user     NUMBER                      NULL
 )
 /
 
-PROMPT CREATE INDEX idx_odoevt_org_cus ON customer_odontogram_event (org_id_organization, cus_id_customer, created_at)
+PROMPT CREATE INDEX idx_odoevt_org_cus ON customer_odontogram_event (org_id_organization, cus_id_customer, deleted_at, created_at)
 CREATE INDEX idx_odoevt_org_cus
   ON customer_odontogram_event (
     org_id_organization,
     cus_id_customer,
+    deleted_at,
     created_at
   )
 /
@@ -80,3 +83,5 @@ COMMENT ON TABLE customer_odontogram_event IS 'Bitacora clinica del odontograma 
 COMMENT ON COLUMN customer_odontogram_event.tooth_fdi IS 'Notacion FDI adulto: 11-18, 21-28, 31-38, 41-48.';
 COMMENT ON COLUMN customer_odontogram_event.face_palatal IS 'Cara palatina (superior) o lingual (inferior).';
 COMMENT ON COLUMN customer_odontogram_event.created_by_user IS 'platform_user_id del JWT que registro el hallazgo.';
+COMMENT ON COLUMN customer_odontogram_event.deleted_at IS 'Soft delete. NULL = activo. Nunca se borra la fila.';
+COMMENT ON COLUMN customer_odontogram_event.deleted_by_user IS 'platform_user_id del JWT que anulo el hallazgo.';
