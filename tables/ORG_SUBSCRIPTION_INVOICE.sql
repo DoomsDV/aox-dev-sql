@@ -6,6 +6,7 @@ CREATE TABLE org_subscription_invoice (
   invoice_type        VARCHAR2(20)                DEFAULT 'SUBSCRIPTION' NOT NULL,
   pln_id_plan         NUMBER                      NULL,
   sad_id_storage_addon NUMBER                     NULL,
+  rad_id_addon        NUMBER                     NULL,
   description         VARCHAR2(255)               NULL,
   amount              NUMBER                      NOT NULL,
   gross_amount        NUMBER                      NULL,
@@ -56,7 +57,7 @@ ALTER TABLE org_subscription_invoice
 PROMPT ALTER TABLE org_subscription_invoice ADD CONSTRAINT chk_orginv_type CHECK
 ALTER TABLE org_subscription_invoice
   ADD CONSTRAINT chk_orginv_type CHECK (
-    invoice_type IN ('SUBSCRIPTION', 'STORAGE_ADDON')
+    invoice_type IN ('SUBSCRIPTION', 'STORAGE_ADDON', 'MODULE_ADDON')
   )
 /
 
@@ -110,8 +111,18 @@ ALTER TABLE org_subscription_invoice
   )
 /
 
-COMMENT ON TABLE org_subscription_invoice IS 'Facturacion de plan y addons de storage (separado de payment_transaction, que corresponde a senas de citas).';
+PROMPT ALTER TABLE org_subscription_invoice ADD CONSTRAINT fk_orginv_module_addon FOREIGN KEY
+ALTER TABLE org_subscription_invoice
+  ADD CONSTRAINT fk_orginv_module_addon FOREIGN KEY (
+    rad_id_addon
+  ) REFERENCES ref_addon (
+    id_addon
+  )
+/
+
+COMMENT ON TABLE org_subscription_invoice IS 'Facturacion de plan, storage addons y complementos de modulo (separado de payment_transaction / senas SIPAP).';
 COMMENT ON COLUMN org_subscription_invoice.sad_id_storage_addon IS 'Addon de storage asociado (facturas STORAGE_ADDON mid-cycle / prorrateo).';
+COMMENT ON COLUMN org_subscription_invoice.rad_id_addon IS 'Complemento de modulo (invoice_type MODULE_ADDON). Sin writes hasta ADDONS_BILLING_LIVE.';
 COMMENT ON COLUMN org_subscription_invoice.gross_amount IS 'Monto antes de descontar saldo a favor.';
 COMMENT ON COLUMN org_subscription_invoice.credit_applied IS 'Gs de saldo a favor aplicados (se consumen al pasar a PAID).';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_status IS 'Ciclo de emision de Factura Electronica SIFEN: NONE (no aplica/no configurado) | PENDING (webhook enviado al firmador) | SENT_PENDING_KUDE (FE aprobada, esperando PDF) | SENT (email con KuDE enviado) | FAILED.';

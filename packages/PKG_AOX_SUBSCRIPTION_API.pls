@@ -20,6 +20,8 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_api IS
         pi_feature_code IN VARCHAR2
     ) RETURN NUMBER;
 
+    FUNCTION fn_addons_billing_live RETURN NUMBER; -- 1 if app_parameter ADDONS_BILLING_LIVE is '1'
+
     /**
      * Estado efectivo de la suscripción, calculado en el momento:
      * TRIAL, TRIAL_EXPIRED, ACTIVE, PAST_DUE, READ_ONLY, CANCELED, FOUNDER, NONE.
@@ -90,13 +92,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         return to_char(pi_ts, c_iso_fmt);
     end fn_ts_to_iso;
 
+    function fn_addons_billing_live return number is
+    begin
+        return case
+            when nvl(trim(fn_get_parameter('ADDONS_BILLING_LIVE')), '0') = '1' then 1
+            else 0
+        end;
+    end fn_addons_billing_live;
+
     function fn_org_has_feature(
         pi_org_id       in number,
         pi_feature_code in varchar2
     ) return number is
         v_count number;
+        v_code  varchar2(50) := upper(trim(pi_feature_code));
     begin
-        if nvl(pi_org_id, 0) <= 0 or pi_feature_code is null then
+        if nvl(pi_org_id, 0) <= 0 or v_code is null then
             return 0;
         end if;
 
@@ -106,8 +117,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
           join ref_plan_feature f
             on f.pln_id_plan = s.pln_id_plan
          where s.org_id_organization = pi_org_id
-           and f.feature_code = upper(trim(pi_feature_code))
+           and f.feature_code = v_code
            and f.is_enabled = 1;
+
+        if v_count > 0 then
+            return 1;
+        end if;
+
+        select count(*)
+          into v_count
+          from org_addon oa
+          join ref_addon ra
+            on ra.id_addon = oa.rad_id_addon
+         where oa.org_id_organization = pi_org_id
+           and oa.status = 'ACTIVE'
+           and ra.feature_code = v_code
+           and ra.is_active = 1;
 
         return case when v_count > 0 then 1 else 0 end;
     exception
@@ -264,8 +289,24 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         pi_org_id       in number,
         pi_feature_code in varchar2
     ) is
+        v_addon_count number := 0;
+        v_code        varchar2(50) := upper(trim(pi_feature_code));
     begin
         if fn_org_has_feature(pi_org_id, pi_feature_code) = 0 then
+            if v_code is not null then
+                select count(*)
+                  into v_addon_count
+                  from ref_addon
+                 where feature_code = v_code;
+            end if;
+
+            if v_addon_count > 0 then
+                raise_application_error(
+                    pkg_aox_util.c_sqlcode_forbidden,
+                    'Esta funcionalidad es un complemento. Activalo desde Complementos.'
+                );
+            end if;
+
             raise_application_error(
                 pkg_aox_util.c_sqlcode_forbidden,
                 'Esta funcionalidad no está incluida en tu plan actual. ' ||
@@ -377,6 +418,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         v_sub_obj           json_object_t := json_object_t();
         v_plan_obj          json_object_t := json_object_t();
         v_storage_obj       json_object_t := json_object_t();
+        v_addon_features    json_array_t  := json_array_t();
     begin
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
@@ -454,6 +496,21 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         v_data.put('plan'        , v_plan_obj);
         v_data.put('storage'     , v_storage_obj);
         pr_put_features(v_plan_id, v_data);
+
+        v_data.put('addons_billing_live', fn_addons_billing_live);
+
+        for rec in (
+            select ra.feature_code
+              from org_addon oa
+              join ref_addon ra
+                on ra.id_addon = oa.rad_id_addon
+             where oa.org_id_organization = v_org_id
+               and oa.status = 'ACTIVE'
+             order by ra.feature_code
+        ) loop
+            v_addon_features.append(rec.feature_code);
+        end loop;
+        v_data.put('addon_features', v_addon_features);
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response_json.put('status', 'success');

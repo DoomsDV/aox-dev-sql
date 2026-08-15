@@ -181,6 +181,15 @@ PROMPT [41b/43] org_payment_card (Pagopar pago-recurrente / catastro de tarjetas
 PROMPT [41c/43] org_billing_profile (datos fiscales suscripcion Hasel)
 @@tables\ORG_BILLING_PROFILE.sql
 
+PROMPT [41d] ref_addon (complementos mensuales / tienda)
+@@tables\REF_ADDON.sql
+
+PROMPT [41e] org_addon
+@@tables\ORG_ADDON.sql
+
+PROMPT [41f] customer_odontogram_event
+@@tables\CUSTOMER_ODONTOGRAM_EVENT.sql
+
 PROMPT --- Historial por cita + adjuntos (Fase 4) ---
 PROMPT [42/44] appointment_session_record
 @@tables\APPOINTMENT_SESSION_RECORD.sql
@@ -283,6 +292,36 @@ WHEN NOT MATCHED THEN
   VALUES (s.id_storage_addon, s.code, s.name, s.extra_bytes, s.price_amount, s.currency, s.billing_period, s.is_active, s.sort_order);
 COMMIT;
 
+MERGE INTO app_parameter t
+USING (
+  SELECT 'ADDONS_BILLING_LIVE' AS param_key, '0' AS param_value,
+         '1=cobrar complementos (Pagopar). 0=activar PREVIEW sin cobro.' AS description
+    FROM dual
+) s
+ON (t.param_key = s.param_key)
+WHEN NOT MATCHED THEN
+  INSERT (param_key, param_value, description) VALUES (s.param_key, s.param_value, s.description);
+COMMIT;
+
+MERGE INTO ref_addon t
+USING (
+  SELECT 1 AS id_addon, 'ODONTOGRAM_3D' AS code, 'Odontograma 3D' AS name,
+         'Ficha clinica interactiva y evolucion de tratamientos. Pronto con soporte 3D avanzado.' AS short_description,
+         'ODONTOGRAM_3D' AS feature_code, 100000 AS price_amount, 'PYG' AS currency,
+         'MONTHLY' AS billing_period, 1 AS is_active, 1 AS sort_order, 'DENTAL' AS audience_code
+    FROM dual
+) s
+ON (t.id_addon = s.id_addon)
+WHEN MATCHED THEN UPDATE SET
+  t.code = s.code, t.name = s.name, t.short_description = s.short_description,
+  t.feature_code = s.feature_code, t.price_amount = s.price_amount, t.currency = s.currency,
+  t.billing_period = s.billing_period, t.is_active = s.is_active, t.sort_order = s.sort_order,
+  t.audience_code = s.audience_code
+WHEN NOT MATCHED THEN
+  INSERT (id_addon, code, name, short_description, feature_code, price_amount, currency, billing_period, is_active, sort_order, audience_code)
+  VALUES (s.id_addon, s.code, s.name, s.short_description, s.feature_code, s.price_amount, s.currency, s.billing_period, s.is_active, s.sort_order, s.audience_code);
+COMMIT;
+
 PROMPT --- Cargar datos semilla (role, app_parameter, org_specialty) manualmente si aplica ---
 
 --------------------------------------------------------------------------------
@@ -336,6 +375,8 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 @@packages\PKG_AOX_PAGOPAR_API.pls
 -- Facturacion comercial de suscripcion (Fase 5): depende de SUBSCRIPTION_API + PAGOPAR_API.
 @@packages\PKG_AOX_SUBSCRIPTION_BILLING_API.pls
+@@packages\PKG_AOX_ADDON_API.pls
+@@packages\PKG_AOX_ODONTOGRAM_API.pls
 @@packages\PKG_AOX_USER_API.pls
 @@packages\PKG_AOX_WORKSPACE_API.pls
 @@packages\PKG_AOX_PROFESSIONAL_API.pls

@@ -1061,6 +1061,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                ends_at = NVL(ends_at, systimestamp)
          WHERE org_id_organization = pi_org_id
            AND status = 'ACTIVE';
+
+        UPDATE /*+ no_parallel */ org_addon
+           SET status      = 'CANCELED',
+               canceled_at = NVL(canceled_at, systimestamp),
+               updated_at  = systimestamp
+         WHERE org_id_organization = pi_org_id
+           AND status = 'ACTIVE';
     END pr_cancel_active_addons_no_credit;
 
     PROCEDURE pr_apply_due_pending_plan(pi_org_id IN NUMBER) IS
