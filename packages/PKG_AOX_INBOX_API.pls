@@ -45,6 +45,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_inbox_api IS
     );
 
     -- Proximo feriado del pais de la org (ventana ~15 dias) sin cierre configurado.
+    -- Conservado por API; el inbox encola el aviso al listar (campanita).
     PROCEDURE pr_upcoming_holiday_hint(
         pi_auth_header   IN  VARCHAR2,
         po_status_code   OUT NUMBER,
@@ -205,6 +206,122 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
             );
     END pr_enqueue;
 
+    -- Encola en la campanita el proximo feriado sin cierre (admin/recepcion).
+    -- Idempotente por dedupe_key; no envia push (eso queda en el job diario).
+    PROCEDURE pr_ensure_upcoming_holiday_inbox(
+        pi_org_id    IN NUMBER,
+        pi_member_id IN NUMBER,
+        pi_role_id   IN NUMBER
+    ) IS
+        v_country    VARCHAR2(2);
+        v_today      DATE;
+        v_until      DATE;
+        v_id         NUMBER;
+        v_name       VARCHAR2(120);
+        v_date       DATE;
+        v_days       NUMBER;
+        v_closure    VARCHAR2(200);
+        v_title      VARCHAR2(500);
+        v_body       VARCHAR2(4000);
+        v_url        VARCHAR2(1000);
+        v_payload    CLOB;
+        v_base       VARCHAR2(500);
+        v_when       VARCHAR2(400);
+        v_admin      NUMBER := pkg_aox_util.fn_rol('ADMIN');
+        v_recep      NUMBER := pkg_aox_util.fn_rol('RECEPCIONISTA');
+    BEGIN
+        IF pi_org_id IS NULL OR pi_org_id <= 0 OR pi_member_id IS NULL OR pi_member_id <= 0 THEN
+            RETURN;
+        END IF;
+        IF pi_role_id NOT IN (v_admin, v_recep) THEN
+            RETURN;
+        END IF;
+
+        SELECT NVL(o.country_code, 'PY')
+          INTO v_country
+          FROM organization o
+         WHERE o.id_organization = pi_org_id;
+
+        v_today := fn_today_app;
+        v_until := v_today + fn_hint_days;
+
+        SELECT
+            h.id_holiday,
+            h.name,
+            h.holiday_date,
+            h.holiday_date - v_today
+          INTO
+            v_id,
+            v_name,
+            v_date,
+            v_days
+          FROM ref_holiday h
+         WHERE h.is_active = 1
+           AND h.country_code = v_country
+           AND h.holiday_date BETWEEN v_today AND v_until
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM location_closure c
+                 WHERE c.org_id_organization = pi_org_id
+                   AND c.start_date <= h.holiday_date
+                   AND c.end_date   >= h.holiday_date
+           )
+         ORDER BY h.holiday_date ASC
+         FETCH FIRST 1 ROW ONLY;
+
+        v_closure := v_name;
+        IF v_days = 0 THEN
+            v_when := 'Hoy es el feriado de ' || v_name || '.';
+        ELSIF v_days = 1 THEN
+            v_when := 'Mañana es el feriado de ' || v_name || '.';
+        ELSE
+            v_when := 'Faltan ' || v_days || ' días para el feriado de ' || v_name || '.';
+        END IF;
+
+        v_title := 'Feriado próximo';
+        v_body := v_when
+               || ' Recuerda configurar los horarios de tu sucursal o crear un cierre general si no vas a atender.';
+
+        SELECT json_object(
+                   'name'        VALUE v_name,
+                   'id_holiday'  VALUE v_id,
+                   'start_date'  VALUE TO_CHAR(v_date, 'YYYY-MM-DD'),
+                   'end_date'    VALUE TO_CHAR(v_date, 'YYYY-MM-DD'),
+                   'is_full_day' VALUE 1,
+                   'apply_all'   VALUE 1
+                   RETURNING CLOB
+               )
+          INTO v_payload
+          FROM dual;
+
+        v_base := RTRIM(NVL(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://hasel.app'), '/');
+        v_url := v_base || '/panel/locations?org_member_id=' || pi_member_id
+              || '&open_org_closure=1'
+              || '&name=' || REPLACE(REPLACE(REPLACE(v_closure, '%', '%25'), '&', '%26'), ' ', '%20')
+              || '&id_holiday=' || v_id
+              || '&start=' || TO_CHAR(v_date, 'YYYY-MM-DD')
+              || '&end=' || TO_CHAR(v_date, 'YYYY-MM-DD')
+              || '&full_day=1&apply_all=1';
+
+        pr_enqueue(
+            pi_org_id          => pi_org_id,
+            pi_org_member_id   => pi_member_id,
+            pi_ntype           => 'HOLIDAY',
+            pi_title           => v_title,
+            pi_body            => v_body,
+            pi_action_type     => 'OPEN_CLOSURE',
+            pi_action_url      => v_url,
+            pi_action_payload  => v_payload,
+            pi_holiday_id      => v_id,
+            pi_dedupe_key      => 'HOLIDAY:' || pi_org_id || ':' || v_id || ':' || pi_member_id
+        );
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            NULL;
+        WHEN OTHERS THEN
+            NULL;
+    END pr_ensure_upcoming_holiday_inbox;
+
     PROCEDURE pr_list(
         pi_auth_header   IN  VARCHAR2,
         pi_limit         IN  NUMBER DEFAULT 50,
@@ -222,6 +339,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
     BEGIN
         v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+
+        pr_ensure_upcoming_holiday_inbox(
+            pi_org_id    => v_org_id,
+            pi_member_id => v_member_id,
+            pi_role_id   => pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header)
+        );
 
         v_limit := NVL(pi_limit, 50);
         IF v_limit < 1 THEN
@@ -314,6 +437,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
     BEGIN
         v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+
+        pr_ensure_upcoming_holiday_inbox(
+            pi_org_id    => v_org_id,
+            pi_member_id => v_member_id,
+            pi_role_id   => pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header)
+        );
 
         SELECT COUNT(*)
           INTO v_count
@@ -474,7 +603,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
                 RETURN;
         END;
 
-        v_closure := 'Feriado Nacional: ' || v_name;
+        v_closure := v_name;
         v_data := json_object_t();
         v_data.put('id_holiday', v_id);
         v_data.put('name', v_name);
@@ -511,7 +640,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
              WHERE is_active = 1
                AND holiday_date = v_target
         ) LOOP
-            v_closure := 'Feriado Nacional: ' || h.name;
+            v_closure := h.name;
             v_date_label := TO_CHAR(h.holiday_date, 'DD/MM');
             v_title := 'Se acerca un feriado nacional';
             v_body := 'Se acerca un feriado nacional: ' || h.name || ' el ' || v_date_label
@@ -519,6 +648,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
 
             SELECT json_object(
                        'name'        VALUE v_closure,
+                       'id_holiday'  VALUE h.id_holiday,
                        'start_date'  VALUE TO_CHAR(h.holiday_date, 'YYYY-MM-DD'),
                        'end_date'    VALUE TO_CHAR(h.holiday_date, 'YYYY-MM-DD'),
                        'is_full_day' VALUE 1,
@@ -550,6 +680,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
                     v_url := v_base || '/panel/locations?org_member_id=' || mem.id_org_member
                           || '&open_org_closure=1'
                           || '&name=' || REPLACE(REPLACE(REPLACE(v_closure, '%', '%25'), '&', '%26'), ' ', '%20')
+                          || '&id_holiday=' || h.id_holiday
                           || '&start=' || TO_CHAR(h.holiday_date, 'YYYY-MM-DD')
                           || '&end=' || TO_CHAR(h.holiday_date, 'YYYY-MM-DD')
                           || '&full_day=1&apply_all=1';

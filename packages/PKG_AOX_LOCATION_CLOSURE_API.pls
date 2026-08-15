@@ -20,6 +20,13 @@ CREATE OR REPLACE PACKAGE pkg_aox_location_closure_api IS
         po_response_body OUT CLOB
     );
 
+    -- Feriados oficiales (ref_holiday) + motivos personalizados ya usados.
+    PROCEDURE pr_list_closure_motives(
+        pi_auth_header   IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- Crear cierre: una sucursal, location_ids[], o apply_all_locations=1 (todas activas).
     -- Si pi_location_id es NULL sin location_ids, se exige apply_all_locations = 1.
     PROCEDURE pr_create_closure(
@@ -270,6 +277,166 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
             );
     END pr_list_org_closures;
 
+    PROCEDURE pr_apply_holiday_motive(
+        pi_org_id      IN     NUMBER,
+        pio_holiday_id IN OUT NUMBER,
+        pio_name       IN OUT VARCHAR2,
+        pi_start_date  IN     DATE,
+        pi_end_date    IN     DATE
+    ) IS
+        v_country VARCHAR2(2);
+        v_hname   VARCHAR2(120);
+        v_hdate   DATE;
+        v_count   NUMBER;
+        v_lookup  VARCHAR2(120);
+    BEGIN
+        SELECT NVL(o.country_code, 'PY')
+          INTO v_country
+          FROM organization o
+         WHERE o.id_organization = pi_org_id;
+
+        IF pio_holiday_id IS NOT NULL THEN
+            BEGIN
+                SELECT h.name, h.holiday_date
+                  INTO v_hname, v_hdate
+                  FROM ref_holiday h
+                 WHERE h.id_holiday = pio_holiday_id
+                   AND h.is_active = 1
+                   AND h.country_code = v_country;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20002, 'Feriado inválido.');
+            END;
+            pio_name := v_hname;
+        ELSE
+            v_lookup := TRIM(pio_name);
+            IF UPPER(v_lookup) LIKE 'FERIADO NACIONAL:%' THEN
+                v_lookup := TRIM(SUBSTR(v_lookup, INSTR(v_lookup, ':') + 1));
+            END IF;
+
+            BEGIN
+                SELECT h.id_holiday, h.name, h.holiday_date
+                  INTO pio_holiday_id, v_hname, v_hdate
+                  FROM ref_holiday h
+                 WHERE h.is_active = 1
+                   AND h.country_code = v_country
+                   AND UPPER(h.name) = UPPER(v_lookup)
+                   AND h.holiday_date BETWEEN pi_start_date AND pi_end_date
+                 ORDER BY h.holiday_date
+                 FETCH FIRST 1 ROW ONLY;
+                pio_name := v_hname;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    pio_holiday_id := NULL;
+                    RETURN;
+            END;
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_count
+          FROM location_closure c
+         WHERE c.org_id_organization = pi_org_id
+           AND c.start_date <= v_hdate
+           AND c.end_date   >= v_hdate;
+
+        IF v_count > 0 THEN
+            RAISE_APPLICATION_ERROR(-20002, 'Ya existe un cierre para este feriado.');
+        END IF;
+    END pr_apply_holiday_motive;
+
+    PROCEDURE pr_list_closure_motives(
+        pi_auth_header   IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_country       VARCHAR2(2);
+        v_from_date     DATE;
+        v_response_json json_object_t := json_object_t();
+        v_data          json_object_t := json_object_t();
+        v_holidays      json_array_t  := json_array_t();
+        v_customs       json_array_t  := json_array_t();
+        v_item          json_object_t;
+    BEGIN
+        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        SELECT NVL(o.country_code, 'PY')
+          INTO v_country
+          FROM organization o
+         WHERE o.id_organization = v_org_id;
+
+        v_from_date := fn_today_app - 30;
+
+        FOR rec IN (
+            SELECT
+                h.id_holiday,
+                h.name,
+                h.holiday_date,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                          FROM location_closure c
+                         WHERE c.org_id_organization = v_org_id
+                           AND c.start_date <= h.holiday_date
+                           AND c.end_date   >= h.holiday_date
+                    ) THEN 1
+                    ELSE 0
+                END AS already_closed
+              FROM ref_holiday h
+             WHERE h.is_active = 1
+               AND h.country_code = v_country
+               AND h.holiday_date >= v_from_date
+             ORDER BY h.holiday_date ASC, h.name ASC
+        ) LOOP
+            v_item := json_object_t();
+            v_item.put('id_holiday', rec.id_holiday);
+            v_item.put('name', rec.name);
+            v_item.put('holiday_date', TO_CHAR(rec.holiday_date, 'YYYY-MM-DD'));
+            v_item.put('already_closed', rec.already_closed);
+            v_holidays.append(v_item);
+        END LOOP;
+
+        FOR rec IN (
+            SELECT DISTINCT c.name
+              FROM location_closure c
+             WHERE c.org_id_organization = v_org_id
+               AND TRIM(c.name) IS NOT NULL
+               AND UPPER(TRIM(c.name)) NOT LIKE 'FERIADO NACIONAL:%'
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM ref_holiday h
+                     WHERE h.is_active = 1
+                       AND h.country_code = v_country
+                       AND UPPER(h.name) = UPPER(TRIM(c.name))
+               )
+             ORDER BY 1
+        ) LOOP
+            v_customs.append(rec.name);
+        END LOOP;
+
+        v_data.put('holidays', v_holidays);
+        v_data.put('custom_names', v_customs);
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data', v_data);
+        po_response_body := v_response_json.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            po_status_code := CASE
+                WHEN SQLCODE = pkg_aox_util.c_sqlcode_session   THEN pkg_aox_util.c_unauthorized_code
+                WHEN SQLCODE = pkg_aox_util.c_sqlcode_forbidden THEN pkg_aox_util.c_forbidden_code
+                WHEN SQLCODE = -20002                           THEN pkg_aox_util.c_bad_request_code
+                ELSE pkg_aox_util.c_internal_error_code
+            END;
+            pkg_aox_util.pr_build_api_error_response(
+                pi_status_code   => po_status_code,
+                pi_api_code      => pkg_aox_util.fn_resolve_api_code(po_status_code, SQLCODE, SQLERRM),
+                pi_message       => pkg_aox_util.fn_clean_sqlerrm(SQLERRM),
+                po_response_body => po_response_body
+            );
+    END pr_list_closure_motives;
+
     PROCEDURE pr_create_closure(
         pi_auth_header   IN  VARCHAR2,
         pi_location_id   IN  NUMBER,
@@ -297,6 +464,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         v_seen           json_object_t := json_object_t();
         v_key            VARCHAR2(40);
         v_active_count   NUMBER;
+        v_holiday_id     NUMBER;
     BEGIN
         pr_assert_manager(pi_auth_header);
         v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
@@ -322,6 +490,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         IF v_end_date < v_start_date THEN
             RAISE_APPLICATION_ERROR(-20002, 'La fecha de fin no puede ser anterior a la de inicio.');
         END IF;
+
+        v_holiday_id := NULL;
+        IF v_json_req.has('id_holiday') THEN
+            BEGIN
+                v_holiday_id := TRUNC(v_json_req.get_number('id_holiday'));
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_holiday_id := NULL;
+            END;
+        END IF;
+        IF v_holiday_id IS NOT NULL AND v_holiday_id <= 0 THEN
+            v_holiday_id := NULL;
+        END IF;
+
+        pr_apply_holiday_motive(
+            pi_org_id      => v_org_id,
+            pio_holiday_id => v_holiday_id,
+            pio_name       => v_name,
+            pi_start_date  => v_start_date,
+            pi_end_date    => v_end_date
+        );
 
         IF v_json_req.has('is_full_day') THEN
             v_is_full_day := v_json_req.get_number('is_full_day');
