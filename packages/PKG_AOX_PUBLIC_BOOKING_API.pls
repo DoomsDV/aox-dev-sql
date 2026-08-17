@@ -1864,11 +1864,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_requires_alias  NUMBER;
         v_locations_arr   json_array_t;
         v_loc_obj         json_object_t;
+        v_includes_arr    json_array_t;
+        v_history_arr     json_array_t;
+        v_hist_obj        json_object_t;
+        v_history_count   NUMBER;
+        v_include_src     VARCHAR2(2000);
+        v_include_pos     PLS_INTEGER;
+        v_include_line    VARCHAR2(2000);
+        v_last_rec        VARCHAR2(4000);
     BEGIN
         FOR rec IN (
             SELECT
                 a.id_appointment,
                 a.org_id_organization,
+                a.cus_id_customer,
                 a.loc_id_location,
                 a.pro_id_professional,
                 a.ser_id_service,
@@ -1888,6 +1897,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 s.name AS service_name,
                 s.duration_minutes,
                 s.image_url AS service_image_url,
+                s.public_includes,
                 NVL(p.display_name, TRIM(pu.first_name || ' ' || pu.last_name)) AS professional_name,
                 p.profile_slug AS professional_slug,
                 NVL(NULLIF(TRIM(p.profile_image_url), ''), NULLIF(TRIM(pu.profile_image_url), '')) AS professional_image_url,
@@ -1949,6 +1959,87 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_locations_arr.append(v_loc_obj);
             END LOOP;
             v_data_obj.put('locations', v_locations_arr);
+
+            v_includes_arr := json_array_t();
+            v_include_src := REPLACE(NVL(rec.public_includes, ''), CHR(13), '');
+            WHILE v_include_src IS NOT NULL LOOP
+                v_include_pos := INSTR(v_include_src, CHR(10));
+                IF v_include_pos = 0 THEN
+                    v_include_line := TRIM(v_include_src);
+                    v_include_src := NULL;
+                ELSE
+                    v_include_line := TRIM(SUBSTR(v_include_src, 1, v_include_pos - 1));
+                    v_include_src := SUBSTR(v_include_src, v_include_pos + 1);
+                END IF;
+                IF v_include_line IS NOT NULL THEN
+                    v_includes_arr.append(v_include_line);
+                END IF;
+            END LOOP;
+            v_data_obj.put('service_includes', v_includes_arr);
+
+            SELECT COUNT(*)
+              INTO v_history_count
+              FROM appointment a
+             WHERE a.cus_id_customer = rec.cus_id_customer
+               AND a.pro_id_professional = rec.pro_id_professional
+               AND a.org_id_organization = rec.org_id_organization
+               AND a.id_appointment <> rec.id_appointment
+               AND (
+                    a.status = 'COMPLETADO'
+                    OR (a.status = 'CONFIRMADO' AND a.start_time < SYSTIMESTAMP)
+               );
+            v_data_obj.put('visit_history_count', v_history_count);
+
+            v_history_arr := json_array_t();
+            FOR hist IN (
+                SELECT
+                    a.start_time,
+                    s.name AS service_name,
+                    a.status
+                  FROM appointment a
+                  JOIN service s ON s.id_service = a.ser_id_service
+                 WHERE a.cus_id_customer = rec.cus_id_customer
+                   AND a.pro_id_professional = rec.pro_id_professional
+                   AND a.org_id_organization = rec.org_id_organization
+                   AND a.id_appointment <> rec.id_appointment
+                   AND (
+                        a.status = 'COMPLETADO'
+                        OR (a.status = 'CONFIRMADO' AND a.start_time < SYSTIMESTAMP)
+                   )
+                 ORDER BY a.start_time DESC
+                 FETCH FIRST 50 ROWS ONLY
+            ) LOOP
+                v_hist_obj := json_object_t();
+                v_hist_obj.put('start_time', TO_CHAR(hist.start_time, 'YYYY-MM-DD"T"HH24:MI:SS'));
+                v_hist_obj.put('service_name', hist.service_name);
+                v_hist_obj.put('status', hist.status);
+                v_history_arr.append(v_hist_obj);
+            END LOOP;
+            v_data_obj.put('visit_history', v_history_arr);
+
+            v_last_rec := NULL;
+            IF pkg_aox_subscription_api.fn_org_has_feature(rec.org_id_organization, 'APPOINTMENT_HISTORY') = 1 THEN
+                BEGIN
+                    SELECT SUBSTR(TRIM(r.recommendations), 1, 4000)
+                      INTO v_last_rec
+                      FROM appointment_session_record r
+                      JOIN appointment a ON a.id_appointment = r.app_id_appointment
+                     WHERE a.cus_id_customer = rec.cus_id_customer
+                       AND a.pro_id_professional = rec.pro_id_professional
+                       AND a.org_id_organization = rec.org_id_organization
+                       AND a.status = 'COMPLETADO'
+                       AND TRIM(r.recommendations) IS NOT NULL
+                     ORDER BY a.start_time DESC
+                     FETCH FIRST 1 ROW ONLY;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        v_last_rec := NULL;
+                END;
+            END IF;
+            IF v_last_rec IS NOT NULL THEN
+                v_data_obj.put('last_recommendations', v_last_rec);
+            END IF;
+
             IF rec.deposit_amount IS NOT NULL THEN
                 v_data_obj.put('deposit_amount', rec.deposit_amount);
             END IF;

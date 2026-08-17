@@ -125,6 +125,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
                 hide_public_price,
                 hidden_public_price_label,
                 image_url,
+                public_includes,
                 is_active,
                 created_at,
                 requires_deposit,
@@ -153,6 +154,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             ELSE
                 v_service_obj.put('image_url', '');
             END IF;
+            v_service_obj.put('public_includes' , NVL(rec.public_includes, ''));
             v_service_obj.put('is_active'       , rec.is_active);
             v_service_obj.put('requires_deposit', rec.requires_deposit);
             v_service_obj.put('deposit_type'    , rec.deposit_type);
@@ -209,6 +211,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_img_mime          VARCHAR2(100);
         v_img_blob          BLOB;
         v_image_url         service.image_url%TYPE;
+        v_public_includes   service.public_includes%TYPE;
     BEGIN
         -- 1. Validar Token y obtener Organización
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
@@ -231,6 +234,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
                 EXCEPTION
                     WHEN OTHERS THEN
                         v_hidden_public_price_label := NULL;
+                END;
+            END IF;
+            IF v_json_req.has('public_includes') THEN
+                BEGIN
+                    v_public_includes := NULLIF(TRIM(v_json_req.get_string('public_includes')), '');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_public_includes := NULL;
                 END;
             END IF;
             IF v_json_req.has('is_active') THEN v_is_active := v_json_req.get_number('is_active'); ELSE v_is_active := 1; END IF;
@@ -298,6 +309,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             v_error := json_object_t(); v_error.put('field', 'hidden_public_price_label'); v_error.put('message', 'El texto personalizado no puede superar 80 caracteres.'); v_validation_errors.append(v_error);
         END IF;
 
+        IF v_public_includes IS NOT NULL AND LENGTH(v_public_includes) > 2000 THEN
+            v_error := json_object_t(); v_error.put('field', 'public_includes'); v_error.put('message', 'Qué incluye no puede superar 2000 caracteres.'); v_validation_errors.append(v_error);
+        END IF;
+
         IF v_requires_deposit IS NOT NULL AND v_requires_deposit NOT IN (0, 1) THEN
             v_error := json_object_t(); v_error.put('field', 'requires_deposit'); v_error.put('message', 'requires_deposit debe ser 0 o 1.'); v_validation_errors.append(v_error);
         END IF;
@@ -333,6 +348,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
           price,
           hide_public_price,
           hidden_public_price_label,
+          public_includes,
           is_active,
           requires_deposit,
           deposit_type,
@@ -345,6 +361,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
           v_price,
           NVL(v_hide_public_price, 0),
           v_hidden_public_price_label,
+          v_public_includes,
           v_is_active,
           NVL(v_requires_deposit, 0),
           v_deposit_type,
@@ -411,6 +428,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_deposit_type     service.deposit_type%TYPE;
         v_deposit_value    service.deposit_value%TYPE;
         v_image_url        service.image_url%TYPE;
+        v_public_includes  service.public_includes%TYPE;
         v_created_at       service.created_at%TYPE;
     begin
         -- 1. Validar Token y obtener Organización
@@ -430,6 +448,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
               requires_deposit,
               deposit_type,
               deposit_value,
+              public_includes,
               created_at
             into
               v_id_service,
@@ -443,6 +462,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
               v_requires_deposit,
               v_deposit_type,
               v_deposit_value,
+              v_public_includes,
               v_created_at
             from service
             where id_service          = pi_service_id
@@ -465,6 +485,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             v_service_obj.put('requires_deposit' , v_requires_deposit);
             v_service_obj.put('deposit_type'     , v_deposit_type);
             v_service_obj.put('deposit_value'    , v_deposit_value);
+            v_service_obj.put('public_includes'  , NVL(v_public_includes, ''));
             v_service_obj.put('created_at'       , TO_CHAR(v_created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
 
             po_status_code := pkg_aox_util.c_success_ok_code; -- OK
@@ -517,6 +538,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_img_blob          BLOB;
         v_clear_image       NUMBER := 0;
         v_image_url         service.image_url%TYPE;
+        v_public_includes   service.public_includes%TYPE;
+        v_has_public_includes PLS_INTEGER := 0;
     begin
         -- 1. Validar Token y obtener Organización
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
@@ -539,6 +562,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
                 EXCEPTION
                     WHEN OTHERS THEN
                         v_hidden_public_price_label := NULL;
+                END;
+            END IF;
+            IF v_json_req.has('public_includes') THEN
+                v_has_public_includes := 1;
+                BEGIN
+                    v_public_includes := NULLIF(TRIM(v_json_req.get_string('public_includes')), '');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_public_includes := NULL;
                 END;
             END IF;
             IF v_json_req.has('is_active') THEN v_is_active := v_json_req.get_number('is_active'); END IF;
@@ -623,6 +655,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             v_error := json_object_t(); v_error.put('field', 'hidden_public_price_label'); v_error.put('message', 'El texto personalizado no puede superar 80 caracteres.'); v_validation_errors.append(v_error);
         END IF;
 
+        IF v_public_includes IS NOT NULL AND LENGTH(v_public_includes) > 2000 THEN
+            v_error := json_object_t(); v_error.put('field', 'public_includes'); v_error.put('message', 'Qué incluye no puede superar 2000 caracteres.'); v_validation_errors.append(v_error);
+        END IF;
+
         IF v_requires_deposit IS NOT NULL AND v_requires_deposit NOT IN (0, 1) THEN
             v_error := json_object_t(); v_error.put('field', 'requires_deposit'); v_error.put('message', 'requires_deposit debe ser 0 o 1.'); v_validation_errors.append(v_error);
         END IF;
@@ -659,6 +695,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             hidden_public_price_label = CASE
                 WHEN v_has_hidden_label = 1 THEN v_hidden_public_price_label
                 ELSE hidden_public_price_label
+            END,
+            public_includes   = CASE
+                WHEN v_has_public_includes = 1 THEN v_public_includes
+                ELSE public_includes
             END,
             is_active         = nvl(v_is_active, is_active), -- si no envían is_active, conserva el actual
             requires_deposit  = NVL(v_requires_deposit, requires_deposit),

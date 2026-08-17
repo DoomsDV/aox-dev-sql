@@ -8,6 +8,7 @@ CREATE TABLE service (
   hide_public_price   NUMBER(1,0)                 DEFAULT 0 NOT NULL,
   hidden_public_price_label VARCHAR2(80)          NULL,
   image_url           VARCHAR2(1000)              NULL,
+  public_includes     VARCHAR2(2000)              NULL,
   image_size_bytes    NUMBER                      DEFAULT 0 NOT NULL,
   is_active           NUMBER(1,0)                 DEFAULT 1 NOT NULL,
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
