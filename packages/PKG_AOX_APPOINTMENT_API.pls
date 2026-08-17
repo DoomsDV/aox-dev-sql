@@ -297,6 +297,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 a.deposit_amount,
                 a.refund_status,
                 a.refund_amount,
+                a.cancel_reason,
                 a.schedule_exception_approved,
                 a.schedule_exception_start,
                 a.schedule_exception_end,
@@ -336,6 +337,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             v_app_obj.put('refund_status', NVL(rec.refund_status, 'NONE'));
             IF rec.refund_amount IS NOT NULL THEN
                 v_app_obj.put('refund_amount', rec.refund_amount);
+            END IF;
+            IF rec.cancel_reason IS NOT NULL THEN
+                v_app_obj.put('cancel_reason', rec.cancel_reason);
             END IF;
             v_app_obj.put(
                 'attendance_confirmed',

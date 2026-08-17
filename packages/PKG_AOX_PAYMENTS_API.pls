@@ -47,6 +47,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_payments_api IS
     );
 
     -- Job: expira holds SIPAP (y legacy Pagopar) con payment_expires_at vencido.
+    -- Marca cancel_reason=DEPOSIT_EXPIRED y refund_status=NOT_APPLICABLE.
     PROCEDURE pr_expire_pending_payments;
 
     -- Fase D: renunciar reembolso (WAIVED) con motivo.
@@ -123,6 +124,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_now    TIMESTAMP WITH TIME ZONE := CURRENT_TIMESTAMP;
         v_month_start TIMESTAMP WITH TIME ZONE;
     BEGIN
+        IF v_preset IN ('all', 'none', 'any') THEN
+            po_from := NULL;
+            po_to   := NULL;
+            RETURN;
+        END IF;
+
         v_month_start := CAST(
             TRUNC(CAST(v_now AS TIMESTAMP), 'MM') AS TIMESTAMP WITH TIME ZONE
         );
@@ -264,7 +271,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         END IF;
         pr_assert_deposit_feature(v_org_id);
 
-        pr_resolve_date_range(pi_date_preset, pi_date_from, pi_date_to, v_from, v_to);
+        IF v_filter = 'all' THEN
+            v_from := NULL;
+            v_to   := NULL;
+        ELSE
+            pr_resolve_date_range(pi_date_preset, pi_date_from, pi_date_to, v_from, v_to);
+        END IF;
         v_offset := (v_page - 1) * v_limit;
 
         -- Badge: comprobantes por revisar + reembolsos PENDING.
@@ -297,11 +309,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                 (
                     v_filter = 'refunded'
                 AND a.refund_status IN ('PENDING', 'SENT', 'AWAITING_ALIAS', 'WAIVED')
-                AND NVL(a.refund_requested_at, NVL(pt.receipt_uploaded_at, pt.created_at)) BETWEEN v_from AND v_to
+                AND (v_from IS NULL OR NVL(a.refund_requested_at, NVL(pt.receipt_uploaded_at, pt.created_at)) BETWEEN v_from AND v_to)
                 )
              OR (
                     v_filter <> 'refunded'
-                AND NVL(pt.receipt_uploaded_at, pt.created_at) BETWEEN v_from AND v_to
+                AND (v_from IS NULL OR NVL(pt.receipt_uploaded_at, pt.created_at) BETWEEN v_from AND v_to)
                     AND (
                         v_filter = 'all'
                      OR (
@@ -377,11 +389,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                     (
                         v_filter = 'refunded'
                     AND a.refund_status IN ('PENDING', 'SENT', 'AWAITING_ALIAS', 'WAIVED')
-                    AND NVL(a.refund_requested_at, NVL(pt.receipt_uploaded_at, pt.created_at)) BETWEEN v_from AND v_to
+                    AND (v_from IS NULL OR NVL(a.refund_requested_at, NVL(pt.receipt_uploaded_at, pt.created_at)) BETWEEN v_from AND v_to)
                     )
                  OR (
                         v_filter <> 'refunded'
-                    AND NVL(pt.receipt_uploaded_at, pt.created_at) BETWEEN v_from AND v_to
+                    AND (v_from IS NULL OR NVL(pt.receipt_uploaded_at, pt.created_at) BETWEEN v_from AND v_to)
                     AND (
                             v_filter = 'all'
                          OR (
@@ -847,8 +859,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         ) LOOP
             UPDATE appointment
                SET payment_status = 'EXPIRED',
-                   status = 'CANCELADO',
-                   updated_at = CURRENT_TIMESTAMP
+                   status         = 'CANCELADO',
+                   cancel_reason  = 'DEPOSIT_EXPIRED',
+                   refund_status  = 'NOT_APPLICABLE',
+                   updated_at     = CURRENT_TIMESTAMP
              WHERE id_appointment = rec.id_appointment
                AND payment_status = 'PENDING';
 
