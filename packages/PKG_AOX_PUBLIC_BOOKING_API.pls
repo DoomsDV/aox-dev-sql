@@ -176,6 +176,153 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         END;
     END fn_calc_customer_refund;
 
+    -- Motivo cuando hay seña pagada pero el preview de reembolso es 0.
+    FUNCTION fn_no_refund_reason(
+        pi_policy         IN VARCHAR2,
+        pi_deposit_amount IN NUMBER,
+        pi_start_time     IN TIMESTAMP,
+        pi_refund_amount  IN NUMBER
+    ) RETURN VARCHAR2 IS
+        v_hours NUMBER;
+    BEGIN
+        IF NVL(pi_refund_amount, 0) > 0 OR NVL(pi_deposit_amount, 0) <= 0 THEN
+            RETURN NULL;
+        END IF;
+
+        v_hours := (CAST(pi_start_time AS DATE) - CAST(CURRENT_TIMESTAMP AS DATE)) * 24;
+
+        IF v_hours <= 24 THEN
+            RETURN 'WITHIN_24H';
+        END IF;
+
+        IF UPPER(TRIM(NVL(pi_policy, 'STRICT'))) = 'STRICT' THEN
+            RETURN 'POLICY_STRICT';
+        END IF;
+
+        RETURN NULL;
+    END fn_no_refund_reason;
+
+    FUNCTION fn_sipap_digits(pi_raw IN VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN REGEXP_REPLACE(NVL(pi_raw, ''), '[^0-9]', '');
+    END fn_sipap_digits;
+
+    -- DV oficial SET (Pa_Calcular_Dv_11_A): pesos 2..11 ciclicos.
+    FUNCTION fn_sipap_ruc_dv(pi_base IN VARCHAR2) RETURN NUMBER IS
+        v_digits VARCHAR2(40);
+        v_total  PLS_INTEGER := 0;
+        v_peso   PLS_INTEGER := 2;
+        v_resto  PLS_INTEGER;
+    BEGIN
+        v_digits := fn_sipap_digits(pi_base);
+        IF v_digits IS NULL OR LENGTH(v_digits) NOT BETWEEN 5 AND 8 THEN
+            RETURN NULL;
+        END IF;
+
+        FOR i IN REVERSE 1 .. LENGTH(v_digits) LOOP
+            v_total := v_total + TO_NUMBER(SUBSTR(v_digits, i, 1)) * v_peso;
+            v_peso  := CASE WHEN v_peso >= 11 THEN 2 ELSE v_peso + 1 END;
+        END LOOP;
+
+        v_resto := MOD(v_total, 11);
+        RETURN CASE WHEN v_resto > 1 THEN 11 - v_resto ELSE 0 END;
+    END fn_sipap_ruc_dv;
+
+    -- Normaliza alias SIPAP (celular PY / CI / RUC / email) o -20002.
+    FUNCTION fn_normalize_sipap_alias(pi_raw IN VARCHAR2) RETURN VARCHAR2 IS
+        v_raw     VARCHAR2(200) := TRIM(pi_raw);
+        v_email   VARCHAR2(200);
+        v_digits  VARCHAR2(40);
+        v_local   VARCHAR2(40);
+        v_base    VARCHAR2(40);
+        v_dv      NUMBER;
+        v_expected NUMBER;
+    BEGIN
+        IF v_raw IS NULL OR LENGTH(v_raw) = 0 THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Ingresa un alias SIPAP valido: celular paraguayo, CI, RUC o email.'
+            );
+        END IF;
+
+        IF INSTR(v_raw, '@') > 0 THEN
+            v_email := LOWER(REGEXP_REPLACE(v_raw, '\s+', ''));
+            IF LENGTH(v_email) BETWEEN 6 AND 100
+               AND REGEXP_LIKE(v_email, '^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$')
+            THEN
+                RETURN v_email;
+            END IF;
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Ingresa un email valido. Ej: nombre@correo.com'
+            );
+        END IF;
+
+        v_digits := fn_sipap_digits(v_raw);
+        IF v_digits IS NULL OR LENGTH(v_digits) = 0 THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Ingresa un alias SIPAP valido: celular paraguayo, CI, RUC o email.'
+            );
+        END IF;
+
+        -- Misma normalizacion que parseParaguayMobilePhone (TS).
+        IF v_digits LIKE '00595%' THEN
+            v_digits := SUBSTR(v_digits, 3);
+        END IF;
+        IF v_digits LIKE '5950%' THEN
+            v_digits := '595' || SUBSTR(v_digits, 5);
+        END IF;
+
+        IF REGEXP_LIKE(v_digits, '^5959[0-9]{8}$') THEN
+            RETURN '0' || SUBSTR(v_digits, 4);
+        END IF;
+        IF REGEXP_LIKE(v_digits, '^09[0-9]{8}$') THEN
+            RETURN v_digits;
+        END IF;
+        IF REGEXP_LIKE(v_digits, '^9[0-9]{8}$') THEN
+            RETURN '0' || v_digits;
+        END IF;
+
+        v_local := CASE
+            WHEN v_digits LIKE '595%' THEN SUBSTR(v_digits, 4)
+            ELSE v_digits
+        END;
+        IF REGEXP_LIKE(v_digits, '^09[0-9]{0,8}$')
+           OR REGEXP_LIKE(v_local, '^9[0-9]{8}$')
+        THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Ingresa un celular paraguayo valido. Ej: 0981 123 456'
+            );
+        END IF;
+
+        IF LENGTH(v_digits) BETWEEN 6 AND 9 THEN
+            v_base := SUBSTR(v_digits, 1, LENGTH(v_digits) - 1);
+            v_dv := TO_NUMBER(SUBSTR(v_digits, -1));
+            v_expected := fn_sipap_ruc_dv(v_base);
+            IF v_expected IS NOT NULL AND v_expected = v_dv THEN
+                RETURN v_base || '-' || TO_CHAR(v_dv);
+            END IF;
+        END IF;
+
+        IF LENGTH(v_digits) >= 9 THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Ingresa un RUC paraguayo valido. Ej: 80012345-6'
+            );
+        END IF;
+
+        IF REGEXP_LIKE(v_digits, '^[0-9]{5,8}$') AND NOT REGEXP_LIKE(v_digits, '^0+$') THEN
+            RETURN v_digits;
+        END IF;
+
+        RAISE_APPLICATION_ERROR(
+            pkg_aox_util.c_sqlcode_validation,
+            'Ingresa un alias SIPAP valido: celular paraguayo, CI, RUC o email.'
+        );
+    END fn_normalize_sipap_alias;
+
     FUNCTION fn_new_hasel_reference RETURN VARCHAR2 IS
     BEGIN
         RETURN 'HASEL-' || DBMS_RANDOM.STRING('X', 8);
@@ -2103,6 +2250,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_preview.put('policy_code', rec.policy_code_snapshot);
                 v_preview.put('policy_label', fn_policy_label(rec.policy_code_snapshot));
                 v_preview.put('policy_summary', fn_policy_summary(rec.policy_code_snapshot));
+                DECLARE
+                    v_no_refund_reason VARCHAR2(30);
+                BEGIN
+                    v_no_refund_reason := fn_no_refund_reason(
+                        rec.policy_code_snapshot,
+                        rec.deposit_amount,
+                        rec.start_time,
+                        v_refund_preview
+                    );
+                    IF v_no_refund_reason IS NOT NULL THEN
+                        v_preview.put('no_refund_reason', v_no_refund_reason);
+                    END IF;
+                END;
                 v_data_obj.put('refund_preview', v_preview);
             END IF;
 
@@ -2393,12 +2553,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         IF NVL(v_pay_status, 'NONE') IN ('PAID', 'PAID_TRANSFER') AND NVL(v_deposit, 0) > 0 THEN
             v_refund_amount := fn_calc_customer_refund(v_policy, v_deposit, v_start_time);
             IF v_refund_amount > 0 THEN
-                IF v_refund_alias IS NULL OR LENGTH(TRIM(v_refund_alias)) < 3 THEN
-                    RAISE_APPLICATION_ERROR(
-                        pkg_aox_util.c_sqlcode_validation,
-                        'Para recibir el reembolso indica tu alias SIPAP.'
-                    );
-                END IF;
+                v_refund_alias := fn_normalize_sipap_alias(v_refund_alias);
                 v_refund_status := 'PENDING';
             ELSE
                 v_refund_status := 'NOT_APPLICABLE';
@@ -2536,9 +2691,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
 
         v_json := json_object_t.parse(pi_body);
         v_alias := SUBSTR(TRIM(v_json.get_string('refund_alias')), 1, 100);
-        IF v_alias IS NULL OR LENGTH(v_alias) < 3 THEN
-            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Indica un alias SIPAP valido.');
-        END IF;
+        v_alias := fn_normalize_sipap_alias(v_alias);
 
         SELECT a.id_appointment,
                a.pro_id_professional,

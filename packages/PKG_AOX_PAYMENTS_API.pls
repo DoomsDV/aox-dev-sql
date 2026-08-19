@@ -5,7 +5,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_payments_api IS
     PROCEDURE pr_list_payments(
         pi_auth_header   IN  VARCHAR2,
         pi_status_filter IN  VARCHAR2 DEFAULT 'all',
-        pi_date_preset   IN  VARCHAR2 DEFAULT 'this_month',
+        pi_date_preset   IN  VARCHAR2 DEFAULT 'all',
         pi_date_from     IN  VARCHAR2 DEFAULT NULL,
         pi_date_to       IN  VARCHAR2 DEFAULT NULL,
         pi_page          IN  NUMBER   DEFAULT 1,
@@ -120,7 +120,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         po_from        OUT TIMESTAMP WITH TIME ZONE,
         po_to          OUT TIMESTAMP WITH TIME ZONE
     ) IS
-        v_preset VARCHAR2(30) := LOWER(TRIM(NVL(pi_date_preset, 'this_month')));
+        v_preset VARCHAR2(30) := LOWER(TRIM(NVL(pi_date_preset, 'all')));
         v_now    TIMESTAMP WITH TIME ZONE := CURRENT_TIMESTAMP;
         v_month_start TIMESTAMP WITH TIME ZONE;
     BEGIN
@@ -149,7 +149,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                 po_to := v_now;
             END IF;
         ELSE
-            -- this_month (default)
+            -- this_month
             po_from := v_month_start;
             po_to   := v_now;
         END IF;
@@ -243,7 +243,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
     PROCEDURE pr_list_payments(
         pi_auth_header   IN  VARCHAR2,
         pi_status_filter IN  VARCHAR2 DEFAULT 'all',
-        pi_date_preset   IN  VARCHAR2 DEFAULT 'this_month',
+        pi_date_preset   IN  VARCHAR2 DEFAULT 'all',
         pi_date_from     IN  VARCHAR2 DEFAULT NULL,
         pi_date_to       IN  VARCHAR2 DEFAULT NULL,
         pi_page          IN  NUMBER   DEFAULT 1,
@@ -271,12 +271,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         END IF;
         pr_assert_deposit_feature(v_org_id);
 
-        IF v_filter = 'all' THEN
-            v_from := NULL;
-            v_to   := NULL;
-        ELSE
-            pr_resolve_date_range(pi_date_preset, pi_date_from, pi_date_to, v_from, v_to);
-        END IF;
+        pr_resolve_date_range(pi_date_preset, pi_date_from, pi_date_to, v_from, v_to);
         v_offset := (v_page - 1) * v_limit;
 
         -- Badge: comprobantes por revisar + reembolsos PENDING.
