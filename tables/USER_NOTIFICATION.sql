@@ -13,6 +13,7 @@ CREATE TABLE user_notification (
   holiday_id           NUMBER                      NULL,
   campaign_id          NUMBER                      NULL,
   read_at              TIMESTAMP(6) WITH TIME ZONE NULL,
+  deleted_at           TIMESTAMP(6) WITH TIME ZONE NULL,
   created_at           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   dedupe_key           VARCHAR2(200)               NULL
 )
@@ -120,7 +121,21 @@ CREATE INDEX idx_unotif_member_unread
   )
 /
 
+PROMPT CREATE INDEX idx_unotif_member_deleted
+CREATE INDEX idx_unotif_member_deleted
+  ON user_notification (
+    org_member_id,
+    deleted_at
+  )
+  INITRANS  20
+  STORAGE (
+    NEXT       1024 K
+  )
+/
+
 COMMENT ON TABLE user_notification IS 'Inbox in-app (campanita). Independiente de FCM/push.';
 /
 COMMENT ON COLUMN user_notification.dedupe_key IS 'Clave opcional anti-duplicado, p.ej. HOLIDAY:org:holiday:member.';
+/
+COMMENT ON COLUMN user_notification.deleted_at IS 'Soft delete. NULL = visible. Conserva dedupe_key para que el feriado no reaparezca.';
 /

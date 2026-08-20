@@ -10,6 +10,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_payments_api IS
         pi_date_to       IN  VARCHAR2 DEFAULT NULL,
         pi_page          IN  NUMBER   DEFAULT 1,
         pi_limit         IN  NUMBER   DEFAULT 50,
+        pi_sort_dir      IN  VARCHAR2 DEFAULT 'desc',
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
@@ -248,11 +249,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         pi_date_to       IN  VARCHAR2 DEFAULT NULL,
         pi_page          IN  NUMBER   DEFAULT 1,
         pi_limit         IN  NUMBER   DEFAULT 50,
+        pi_sort_dir      IN  VARCHAR2 DEFAULT 'desc',
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
         v_org_id        NUMBER;
         v_filter        VARCHAR2(30) := LOWER(TRIM(NVL(pi_status_filter, 'all')));
+        v_sort_dir      VARCHAR2(4) := CASE
+                                          WHEN LOWER(TRIM(NVL(pi_sort_dir, 'desc'))) = 'asc' THEN 'asc'
+                                          ELSE 'desc'
+                                      END;
         v_from          TIMESTAMP WITH TIME ZONE;
         v_to            TIMESTAMP WITH TIME ZONE;
         v_page          NUMBER := GREATEST(NVL(pi_page, 1), 1);
@@ -412,7 +418,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                     )
                  )
                )
-             ORDER BY sort_ts DESC
+             ORDER BY
+                   CASE WHEN v_sort_dir = 'asc' THEN a.start_time END ASC NULLS LAST,
+                   CASE WHEN v_sort_dir = 'desc' THEN a.start_time END DESC NULLS LAST,
+                   pt.id_transaction DESC
              OFFSET v_offset ROWS FETCH NEXT v_limit ROWS ONLY
         ) LOOP
             DECLARE

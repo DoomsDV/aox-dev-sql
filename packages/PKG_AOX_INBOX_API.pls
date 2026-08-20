@@ -44,6 +44,19 @@ CREATE OR REPLACE PACKAGE pkg_aox_inbox_api IS
         po_response_body OUT CLOB
     );
 
+    PROCEDURE pr_dismiss(
+        pi_auth_header      IN  VARCHAR2,
+        pi_notification_id  IN  NUMBER,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB
+    );
+
+    PROCEDURE pr_dismiss_all(
+        pi_auth_header   IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- Proximo feriado del pais de la org (ventana ~15 dias) sin cierre configurado.
     -- Conservado por API; el inbox encola el aviso al listar (campanita).
     PROCEDURE pr_upcoming_holiday_hint(
@@ -358,6 +371,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
           FROM user_notification n
          WHERE n.org_member_id = v_member_id
            AND n.org_id_organization = v_org_id
+           AND n.deleted_at IS NULL
            AND n.read_at IS NULL;
 
         FOR rec IN (
@@ -377,6 +391,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
               FROM user_notification n
              WHERE n.org_member_id = v_member_id
                AND n.org_id_organization = v_org_id
+               AND n.deleted_at IS NULL
              ORDER BY n.created_at DESC
              FETCH FIRST v_limit ROWS ONLY
         ) LOOP
@@ -449,6 +464,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
           FROM user_notification n
          WHERE n.org_member_id = v_member_id
            AND n.org_id_organization = v_org_id
+           AND n.deleted_at IS NULL
            AND n.read_at IS NULL;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
@@ -484,7 +500,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
            SET n.read_at = NVL(n.read_at, CURRENT_TIMESTAMP)
          WHERE n.id_notification = pi_notification_id
            AND n.org_member_id = v_member_id
-           AND n.org_id_organization = v_org_id;
+           AND n.org_id_organization = v_org_id
+           AND n.deleted_at IS NULL;
 
         v_updated := SQL%ROWCOUNT;
         IF v_updated = 0 THEN
@@ -519,6 +536,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
            SET n.read_at = CURRENT_TIMESTAMP
          WHERE n.org_member_id = v_member_id
            AND n.org_id_organization = v_org_id
+           AND n.deleted_at IS NULL
            AND n.read_at IS NULL;
 
         v_updated := SQL%ROWCOUNT;
@@ -532,6 +550,81 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
         WHEN OTHERS THEN
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_mark_all_read;
+
+    PROCEDURE pr_dismiss(
+        pi_auth_header      IN  VARCHAR2,
+        pi_notification_id  IN  NUMBER,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB
+    ) IS
+        v_org_id    NUMBER;
+        v_member_id NUMBER;
+        v_updated   NUMBER := 0;
+        v_response  json_object_t := json_object_t();
+        v_data      json_object_t := json_object_t();
+    BEGIN
+        v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+
+        IF pi_notification_id IS NULL OR pi_notification_id <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Notificacion invalida.');
+        END IF;
+
+        UPDATE /*+ no_parallel */ user_notification n
+           SET n.deleted_at = NVL(n.deleted_at, CURRENT_TIMESTAMP),
+               n.read_at    = NVL(n.read_at, CURRENT_TIMESTAMP)
+         WHERE n.id_notification = pi_notification_id
+           AND n.org_member_id = v_member_id
+           AND n.org_id_organization = v_org_id
+           AND n.deleted_at IS NULL;
+
+        v_updated := SQL%ROWCOUNT;
+        IF v_updated = 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Notificacion no encontrada.');
+        END IF;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_data.put('id_notification', pi_notification_id);
+        v_response.put('status', 'success');
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_dismiss;
+
+    PROCEDURE pr_dismiss_all(
+        pi_auth_header   IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id    NUMBER;
+        v_member_id NUMBER;
+        v_updated   NUMBER := 0;
+        v_response  json_object_t := json_object_t();
+        v_data      json_object_t := json_object_t();
+    BEGIN
+        v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+
+        UPDATE /*+ no_parallel */ user_notification n
+           SET n.deleted_at = CURRENT_TIMESTAMP,
+               n.read_at    = NVL(n.read_at, CURRENT_TIMESTAMP)
+         WHERE n.org_member_id = v_member_id
+           AND n.org_id_organization = v_org_id
+           AND n.deleted_at IS NULL;
+
+        v_updated := SQL%ROWCOUNT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_data.put('updated', v_updated);
+        v_response.put('status', 'success');
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_dismiss_all;
 
     PROCEDURE pr_upcoming_holiday_hint(
         pi_auth_header   IN  VARCHAR2,

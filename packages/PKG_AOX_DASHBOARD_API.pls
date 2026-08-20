@@ -277,6 +277,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_prof_id          NUMBER := -1;
         v_is_admin         BOOLEAN := FALSE;
         v_total_clients    NUMBER := 0;
+        v_new_clients      NUMBER := 0;
+        v_active_clients   NUMBER := 0;
+        v_upcoming_clients NUMBER := 0;
 
         v_now_local        TIMESTAMP;
         v_month_start      TIMESTAMP;
@@ -393,13 +396,54 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
               INTO v_total_clients
               FROM customer
              WHERE org_id_organization = v_org_id;
+
+            SELECT COUNT(*)
+              INTO v_new_clients
+              FROM customer
+             WHERE org_id_organization = v_org_id
+               AND CAST(created_at AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP) >= v_month_start
+               AND CAST(created_at AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP) < v_next_month_start;
         ELSE
             SELECT COUNT(DISTINCT a.cus_id_customer)
               INTO v_total_clients
               FROM appointment a
              WHERE a.org_id_organization = v_org_id
                AND a.pro_id_professional = v_prof_id;
+
+            SELECT COUNT(DISTINCT a.cus_id_customer)
+              INTO v_new_clients
+              FROM appointment a
+             WHERE a.org_id_organization = v_org_id
+               AND a.pro_id_professional = v_prof_id
+               AND a.start_time >= v_month_start
+               AND a.start_time < v_next_month_start
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM appointment prev
+                     WHERE prev.org_id_organization = a.org_id_organization
+                       AND prev.pro_id_professional = a.pro_id_professional
+                       AND prev.cus_id_customer     = a.cus_id_customer
+                       AND prev.start_time          < v_month_start
+               );
         END IF;
+
+        SELECT COUNT(DISTINCT a.cus_id_customer)
+          INTO v_active_clients
+          FROM appointment a
+         WHERE a.org_id_organization = v_org_id
+           AND (v_is_admin OR a.pro_id_professional = v_prof_id)
+           AND a.status IN ('CONFIRMADO', 'COMPLETADO')
+           AND a.start_time >= v_month_start
+           AND a.start_time < v_now_local;
+
+        SELECT COUNT(DISTINCT a.cus_id_customer)
+          INTO v_upcoming_clients
+          FROM appointment a
+         WHERE a.org_id_organization = v_org_id
+           AND (v_is_admin OR a.pro_id_professional = v_prof_id)
+           AND a.status IN ('PENDIENTE', 'CONFIRMADO')
+           AND a.start_time >= v_now_local
+           AND a.start_time < v_now_local + NUMTODSINTERVAL(7, 'DAY');
 
         IF v_month_count > 0 THEN
             v_avg_ticket := ROUND(v_month_rev / v_month_count);
@@ -479,6 +523,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         END IF;
         v_data_obj.put('pending_expected_revenue', v_pending_expected);
         v_data_obj.put('total_clients'           , v_total_clients);
+        v_data_obj.put('new_clients_month'       , v_new_clients);
+        v_data_obj.put('active_clients_month'    , v_active_clients);
+        v_data_obj.put('upcoming_clients_7d'     , v_upcoming_clients);
         v_data_obj.put('top_services'            , v_top_services_arr);
         v_data_obj.put('by_professional'         , v_by_prof_arr);
         v_data_obj.put('generated_at_local'      , TO_CHAR(v_now_local, 'YYYY-MM-DD"T"HH24:MI:SS'));
