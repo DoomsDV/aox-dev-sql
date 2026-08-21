@@ -11,6 +11,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_payments_api IS
         pi_page          IN  NUMBER   DEFAULT 1,
         pi_limit         IN  NUMBER   DEFAULT 50,
         pi_sort_dir      IN  VARCHAR2 DEFAULT 'desc',
+        pi_sort_by       IN  VARCHAR2 DEFAULT 'date',
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
@@ -250,6 +251,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         pi_page          IN  NUMBER   DEFAULT 1,
         pi_limit         IN  NUMBER   DEFAULT 50,
         pi_sort_dir      IN  VARCHAR2 DEFAULT 'desc',
+        pi_sort_by       IN  VARCHAR2 DEFAULT 'date',
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
@@ -258,6 +260,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_sort_dir      VARCHAR2(4) := CASE
                                           WHEN LOWER(TRIM(NVL(pi_sort_dir, 'desc'))) = 'asc' THEN 'asc'
                                           ELSE 'desc'
+                                      END;
+        v_sort_by       VARCHAR2(8) := CASE
+                                          WHEN LOWER(TRIM(NVL(pi_sort_by, 'date'))) = 'price' THEN 'price'
+                                          ELSE 'date'
                                       END;
         v_from          TIMESTAMP WITH TIME ZONE;
         v_to            TIMESTAMP WITH TIME ZONE;
@@ -419,8 +425,24 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                  )
                )
              ORDER BY
-                   CASE WHEN v_sort_dir = 'asc' THEN a.start_time END ASC NULLS LAST,
-                   CASE WHEN v_sort_dir = 'desc' THEN a.start_time END DESC NULLS LAST,
+                   CASE WHEN v_sort_by = 'date' AND v_sort_dir = 'asc' THEN a.start_time END ASC NULLS LAST,
+                   CASE WHEN v_sort_by = 'date' AND v_sort_dir = 'desc' THEN a.start_time END DESC NULLS LAST,
+                   CASE
+                       WHEN v_sort_by = 'price' AND v_sort_dir = 'asc' THEN
+                           CASE
+                               WHEN v_filter = 'refunded' AND a.refund_amount IS NOT NULL
+                               THEN a.refund_amount
+                               ELSE pt.amount
+                           END
+                   END ASC NULLS LAST,
+                   CASE
+                       WHEN v_sort_by = 'price' AND v_sort_dir = 'desc' THEN
+                           CASE
+                               WHEN v_filter = 'refunded' AND a.refund_amount IS NOT NULL
+                               THEN a.refund_amount
+                               ELSE pt.amount
+                           END
+                   END DESC NULLS LAST,
                    pt.id_transaction DESC
              OFFSET v_offset ROWS FETCH NEXT v_limit ROWS ONLY
         ) LOOP
