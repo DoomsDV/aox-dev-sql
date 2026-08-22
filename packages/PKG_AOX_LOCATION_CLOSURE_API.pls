@@ -27,6 +27,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_location_closure_api IS
         po_response_body OUT CLOB
     );
 
+    -- Eliminar un motivo personalizado y todos los cierres de la org con ese nombre.
+    PROCEDURE pr_delete_custom_motive(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- Crear cierre: una sucursal, location_ids[], o apply_all_locations=1 (todas activas).
     -- Si pi_location_id es NULL sin location_ids, se exige apply_all_locations = 1.
     PROCEDURE pr_create_closure(
@@ -397,7 +405,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         END LOOP;
 
         FOR rec IN (
-            SELECT DISTINCT c.name
+            SELECT
+                TRIM(c.name) AS name,
+                COUNT(*)     AS closure_count
               FROM location_closure c
              WHERE c.org_id_organization = v_org_id
                AND TRIM(c.name) IS NOT NULL
@@ -409,9 +419,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
                        AND h.country_code = v_country
                        AND UPPER(h.name) = UPPER(TRIM(c.name))
                )
+             GROUP BY TRIM(c.name)
              ORDER BY 1
         ) LOOP
-            v_customs.append(rec.name);
+            v_item := json_object_t();
+            v_item.put('name', rec.name);
+            v_item.put('closure_count', rec.closure_count);
+            v_customs.append(v_item);
         END LOOP;
 
         v_data.put('holidays', v_holidays);
@@ -753,6 +767,91 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
                 po_response_body => po_response_body
             );
     END pr_delete_closure;
+
+    PROCEDURE pr_delete_custom_motive(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_country       VARCHAR2(2);
+        v_json_req      json_object_t;
+        v_name          VARCHAR2(120);
+        v_holiday_count NUMBER := 0;
+        v_deleted       NUMBER := 0;
+        v_response_json json_object_t := json_object_t();
+    BEGIN
+        pr_assert_manager(pi_auth_header);
+        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        BEGIN
+            v_json_req := json_object_t.parse(pi_body);
+        EXCEPTION
+            WHEN OTHERS THEN RAISE_APPLICATION_ERROR(-20002, 'JSON inválido o malformado.');
+        END;
+
+        v_name := TRIM(v_json_req.get_string('name'));
+        IF v_name IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20002, 'El nombre del motivo es obligatorio.');
+        END IF;
+        IF UPPER(v_name) LIKE 'FERIADO NACIONAL:%' THEN
+            RAISE_APPLICATION_ERROR(-20002, 'No se puede eliminar un feriado nacional desde motivos personalizados.');
+        END IF;
+
+        SELECT NVL(o.country_code, 'PY')
+          INTO v_country
+          FROM organization o
+         WHERE o.id_organization = v_org_id;
+
+        SELECT COUNT(*)
+          INTO v_holiday_count
+          FROM ref_holiday h
+         WHERE h.is_active = 1
+           AND h.country_code = v_country
+           AND UPPER(h.name) = UPPER(v_name);
+
+        IF v_holiday_count > 0 THEN
+            RAISE_APPLICATION_ERROR(-20002, 'No se puede eliminar un feriado oficial.');
+        END IF;
+
+        DELETE FROM location_closure
+         WHERE org_id_organization = v_org_id
+           AND UPPER(TRIM(name)) = UPPER(v_name);
+
+        v_deleted := SQL%ROWCOUNT;
+
+        IF v_deleted = 0 THEN
+            po_status_code := pkg_aox_util.c_not_found_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'No hay cierres con ese motivo personalizado.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('message', 'Motivo personalizado eliminado.');
+        v_response_json.put('deleted_count', v_deleted);
+        po_response_body := v_response_json.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            po_status_code := CASE
+                WHEN SQLCODE = pkg_aox_util.c_sqlcode_session   THEN pkg_aox_util.c_unauthorized_code
+                WHEN SQLCODE = pkg_aox_util.c_sqlcode_forbidden THEN pkg_aox_util.c_forbidden_code
+                WHEN SQLCODE = -20002                           THEN pkg_aox_util.c_bad_request_code
+                ELSE pkg_aox_util.c_internal_error_code
+            END;
+            pkg_aox_util.pr_build_api_error_response(
+                pi_status_code   => po_status_code,
+                pi_api_code      => pkg_aox_util.fn_resolve_api_code(po_status_code, SQLCODE, SQLERRM),
+                pi_message       => pkg_aox_util.fn_clean_sqlerrm(SQLERRM),
+                po_response_body => po_response_body
+            );
+    END pr_delete_custom_motive;
 
 END pkg_aox_location_closure_api;
 /
