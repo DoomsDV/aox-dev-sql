@@ -24,6 +24,12 @@ CREATE OR REPLACE PACKAGE pkg_aox_odontogram_api IS
         po_response_body OUT CLOB
     );
 
+    PROCEDURE pr_get_catalog(
+        pi_auth_header   IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
 END pkg_aox_odontogram_api;
 /
 
@@ -155,6 +161,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
     FUNCTION fn_tooth_json(
         pi_tooth_fdi      IN NUMBER,
         pi_finding_code   IN VARCHAR2,
+        pi_clinical_phase IN VARCHAR2,
         pi_notes          IN VARCHAR2,
         pi_created_at     IN TIMESTAMP WITH TIME ZONE,
         pi_occlusal       IN NUMBER,
@@ -167,6 +174,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
     BEGIN
         v_obj.put('tooth_fdi', pi_tooth_fdi);
         v_obj.put('finding_code', pi_finding_code);
+        v_obj.put('clinical_phase', pi_clinical_phase);
         IF pi_notes IS NULL THEN
             v_obj.put_null('notes');
         ELSE
@@ -183,6 +191,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         pi_id_event       IN NUMBER,
         pi_tooth_fdi      IN NUMBER,
         pi_finding_code   IN VARCHAR2,
+        pi_clinical_phase IN VARCHAR2,
         pi_notes          IN VARCHAR2,
         pi_created_at     IN TIMESTAMP WITH TIME ZONE,
         pi_occlusal       IN NUMBER,
@@ -194,12 +203,43 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_obj json_object_t;
     BEGIN
         v_obj := fn_tooth_json(
-            pi_tooth_fdi, pi_finding_code, pi_notes, pi_created_at,
+            pi_tooth_fdi, pi_finding_code, pi_clinical_phase, pi_notes, pi_created_at,
             pi_occlusal, pi_vestibular, pi_palatal, pi_mesial, pi_distal
         );
         v_obj.put('id_event', pi_id_event);
         RETURN v_obj;
     END fn_event_json;
+
+    FUNCTION fn_catalog_json RETURN json_array_t IS
+        v_catalog json_array_t := json_array_t();
+    BEGIN
+        FOR rec IN (
+            SELECT finding_code,
+                   label,
+                   clinical_phase,
+                   needs_faces,
+                   display_color,
+                   priority_rank,
+                   visual_kind
+              FROM ref_odontogram_finding
+             WHERE is_active = 1
+             ORDER BY sort_order, finding_code
+        ) LOOP
+            DECLARE
+                v_item json_object_t := json_object_t();
+            BEGIN
+                v_item.put('code', rec.finding_code);
+                v_item.put('label', rec.label);
+                v_item.put('clinical_phase', rec.clinical_phase);
+                v_item.put('needs_faces', rec.needs_faces);
+                v_item.put('color', rec.display_color);
+                v_item.put('priority_rank', rec.priority_rank);
+                v_item.put('visual_kind', rec.visual_kind);
+                v_catalog.append(v_item);
+            END;
+        END LOOP;
+        RETURN v_catalog;
+    END fn_catalog_json;
 
     PROCEDURE pr_get_chart(
         pi_auth_header   IN  VARCHAR2,
@@ -224,6 +264,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
                 SELECT id_event,
                        tooth_fdi,
                        finding_code,
+                       clinical_phase,
                        notes,
                        created_at,
                        face_occlusal,
@@ -235,6 +276,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
                         SELECT e.id_event,
                                e.tooth_fdi,
                                e.finding_code,
+                               e.clinical_phase,
                                e.notes,
                                e.created_at,
                                e.face_occlusal,
@@ -244,15 +286,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
                                e.face_distal,
                                ROW_NUMBER() OVER (
                                    PARTITION BY e.tooth_fdi
-                                   ORDER BY CASE e.finding_code
-                                                WHEN 'EXTRACTION' THEN 0
-                                                WHEN 'CROWN' THEN 1
-                                                ELSE 2
-                                            END,
+                                   ORDER BY NVL(r.priority_rank, 50),
                                             e.created_at DESC,
                                             e.id_event DESC
                                ) AS rn
                           FROM customer_odontogram_event e
+                          LEFT JOIN ref_odontogram_finding r
+                            ON r.finding_code = e.finding_code
                          WHERE e.org_id_organization = v_org_id
                            AND e.cus_id_customer = pi_customer_id
                            AND e.deleted_at IS NULL
@@ -262,7 +302,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
             ) LOOP
                 v_teeth.append(
                     fn_tooth_json(
-                        rec.tooth_fdi, rec.finding_code, rec.notes, rec.created_at,
+                        rec.tooth_fdi, rec.finding_code, rec.clinical_phase, rec.notes, rec.created_at,
                         rec.face_occlusal, rec.face_vestibular, rec.face_palatal,
                         rec.face_mesial, rec.face_distal
                     )
@@ -273,6 +313,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
                 SELECT id_event,
                        tooth_fdi,
                        finding_code,
+                       clinical_phase,
                        notes,
                        created_at,
                        face_occlusal,
@@ -285,11 +326,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
                    AND cus_id_customer = pi_customer_id
                    AND deleted_at IS NULL
                  ORDER BY created_at DESC, id_event DESC
-                 FETCH FIRST 100 ROWS ONLY
+                 FETCH FIRST 500 ROWS ONLY
             ) LOOP
                 v_events.append(
                     fn_event_json(
-                        rec.id_event, rec.tooth_fdi, rec.finding_code, rec.notes, rec.created_at,
+                        rec.id_event, rec.tooth_fdi, rec.finding_code, rec.clinical_phase,
+                        rec.notes, rec.created_at,
                         rec.face_occlusal, rec.face_vestibular, rec.face_palatal,
                         rec.face_mesial, rec.face_distal
                     )
@@ -300,6 +342,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_data.put('entitled', v_entitled);
         v_data.put('teeth', v_teeth);
         v_data.put('events', v_events);
+        v_data.put('catalog', fn_catalog_json());
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response_json.put('status', 'success');
@@ -323,7 +366,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_faces         json_object_t;
         v_response_json json_object_t := json_object_t();
         v_tooth_fdi     NUMBER;
-        v_finding       VARCHAR2(20);
+        v_finding       VARCHAR2(40);
+        v_clinical      VARCHAR2(20);
         v_notes         VARCHAR2(2000);
         v_occlusal      NUMBER := 0;
         v_vestibular    NUMBER := 0;
@@ -332,6 +376,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_distal        NUMBER := 0;
         v_id_event      NUMBER;
         v_created_at    TIMESTAMP WITH TIME ZONE;
+        v_needs_faces   NUMBER := 0;
         v_face_sum      NUMBER;
     BEGIN
         v_org_id  := fn_require_org_id(pi_auth_header);
@@ -370,12 +415,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
             );
         END IF;
 
-        IF v_finding IS NULL OR v_finding NOT IN ('CARIES', 'RESTORATION', 'EXTRACTION', 'CROWN') THEN
+        IF v_finding IS NULL THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_validation,
                 'finding_code inválido.'
             );
         END IF;
+
+        BEGIN
+            SELECT clinical_phase, needs_faces
+              INTO v_clinical, v_needs_faces
+              FROM ref_odontogram_finding
+             WHERE finding_code = v_finding
+               AND is_active = 1;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(
+                    pkg_aox_util.c_sqlcode_validation,
+                    'finding_code inválido.'
+                );
+        END;
 
         v_occlusal   := fn_json_01(v_faces, 'occlusal');
         v_vestibular := fn_json_01(v_faces, 'vestibular');
@@ -384,8 +443,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_distal     := fn_json_01(v_faces, 'distal');
         v_face_sum   := v_occlusal + v_vestibular + v_palatal + v_mesial + v_distal;
 
-        -- Corona recubre toda la pieza; Extracción no tiene caras.
-        IF v_finding IN ('EXTRACTION', 'CROWN') THEN
+        -- Hallazgos sin caras (extracción, corona) no persisten caras marcadas.
+        IF v_needs_faces = 0 THEN
             v_occlusal   := 0;
             v_vestibular := 0;
             v_palatal    := 0;
@@ -408,6 +467,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
             face_mesial,
             face_distal,
             finding_code,
+            clinical_phase,
             notes,
             created_by_user
         ) VALUES (
@@ -420,6 +480,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
             v_mesial,
             v_distal,
             v_finding,
+            v_clinical,
             v_notes,
             v_user_id
         )
@@ -431,7 +492,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_response_json.put(
             'data',
             fn_event_json(
-                v_id_event, v_tooth_fdi, v_finding, v_notes, v_created_at,
+                v_id_event, v_tooth_fdi, v_finding, v_clinical, v_notes, v_created_at,
                 v_occlusal, v_vestibular, v_palatal, v_mesial, v_distal
             )
         );
@@ -482,6 +543,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         WHEN OTHERS THEN
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_void_event;
+
+    PROCEDURE pr_get_catalog(
+        pi_auth_header   IN  VARCHAR2,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_response_json json_object_t := json_object_t();
+        v_data          json_object_t := json_object_t();
+    BEGIN
+        v_org_id := fn_require_org_id(pi_auth_header);
+        v_data.put('catalog', fn_catalog_json());
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data', v_data);
+        po_response_body := v_response_json.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_get_catalog;
 
 END pkg_aox_odontogram_api;
 /

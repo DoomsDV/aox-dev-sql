@@ -190,6 +190,9 @@ PROMPT [41e] org_addon
 PROMPT [41e2] ref_addon_specialty (puente addon↔rubro)
 @@tables\REF_ADDON_SPECIALTY.sql
 
+PROMPT [41e3] ref_odontogram_finding (catalogo odontograma)
+@@tables\REF_ODONTOGRAM_FINDING.sql
+
 PROMPT [41f] customer_odontogram_event
 @@tables\CUSTOMER_ODONTOGRAM_EVENT.sql
 

@@ -9,7 +9,8 @@ CREATE TABLE customer_odontogram_event (
   face_palatal        NUMBER(1,0)                 DEFAULT 0 NOT NULL,
   face_mesial         NUMBER(1,0)                 DEFAULT 0 NOT NULL,
   face_distal         NUMBER(1,0)                 DEFAULT 0 NOT NULL,
-  finding_code        VARCHAR2(20)                NOT NULL,
+  finding_code        VARCHAR2(40)                NOT NULL,
+  clinical_phase      VARCHAR2(20)                DEFAULT 'FINDING' NOT NULL,
   notes               VARCHAR2(2000)              NULL,
   created_by_user     NUMBER                      NULL,
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -43,10 +44,19 @@ ALTER TABLE customer_odontogram_event
   )
 /
 
-PROMPT ALTER TABLE customer_odontogram_event ADD CONSTRAINT chk_odoevt_finding CHECK
+PROMPT ALTER TABLE customer_odontogram_event ADD CONSTRAINT fk_odoevt_finding FOREIGN KEY
 ALTER TABLE customer_odontogram_event
-  ADD CONSTRAINT chk_odoevt_finding CHECK (
-    finding_code IN ('CARIES', 'RESTORATION', 'EXTRACTION', 'CROWN')
+  ADD CONSTRAINT fk_odoevt_finding FOREIGN KEY (
+    finding_code
+  ) REFERENCES ref_odontogram_finding (
+    finding_code
+  )
+/
+
+PROMPT ALTER TABLE customer_odontogram_event ADD CONSTRAINT chk_odoevt_clinical_phase CHECK
+ALTER TABLE customer_odontogram_event
+  ADD CONSTRAINT chk_odoevt_clinical_phase CHECK (
+    clinical_phase IN ('FINDING', 'PREEXISTING', 'PLAN')
   )
 /
 
@@ -82,6 +92,7 @@ ALTER TABLE customer_odontogram_event
 COMMENT ON TABLE customer_odontogram_event IS 'Bitacora clinica del odontograma (aislada del historial de citas). El estado vivo se deriva del ultimo evento por pieza.';
 COMMENT ON COLUMN customer_odontogram_event.tooth_fdi IS 'Notacion FDI adulto: 11-18, 21-28, 31-38, 41-48.';
 COMMENT ON COLUMN customer_odontogram_event.face_palatal IS 'Cara palatina (superior) o lingual (inferior).';
+COMMENT ON COLUMN customer_odontogram_event.clinical_phase IS 'Fase clinica: FINDING, PREEXISTING o PLAN.';
 COMMENT ON COLUMN customer_odontogram_event.created_by_user IS 'platform_user_id del JWT que registro el hallazgo.';
 COMMENT ON COLUMN customer_odontogram_event.deleted_at IS 'Soft delete. NULL = activo. Nunca se borra la fila.';
 COMMENT ON COLUMN customer_odontogram_event.deleted_by_user IS 'platform_user_id del JWT que anulo el hallazgo.';
