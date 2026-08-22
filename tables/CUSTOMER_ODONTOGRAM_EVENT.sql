@@ -89,7 +89,7 @@ ALTER TABLE customer_odontogram_event
   ) ON DELETE CASCADE
 /
 
-COMMENT ON TABLE customer_odontogram_event IS 'Bitacora clinica del odontograma (aislada del historial de citas). El estado vivo se deriva del ultimo evento por pieza.';
+COMMENT ON TABLE customer_odontogram_event IS 'Bitacora clinica del odontograma (aislada del historial de citas). El estado vivo por pieza se deriva por priority_rank del catalogo y luego created_at DESC.';
 COMMENT ON COLUMN customer_odontogram_event.tooth_fdi IS 'Notacion FDI adulto: 11-18, 21-28, 31-38, 41-48.';
 COMMENT ON COLUMN customer_odontogram_event.face_palatal IS 'Cara palatina (superior) o lingual (inferior).';
 COMMENT ON COLUMN customer_odontogram_event.clinical_phase IS 'Fase clinica: FINDING, PREEXISTING o PLAN.';
