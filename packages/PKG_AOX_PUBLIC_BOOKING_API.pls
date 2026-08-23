@@ -2019,6 +2019,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_include_pos     PLS_INTEGER;
         v_include_line    VARCHAR2(2000);
         v_last_rec        VARCHAR2(4000);
+        v_tx_ocr_status   payment_transaction.ocr_status%TYPE;
+        v_tx_reject_reason payment_transaction.reject_reason%TYPE;
+        v_tx_reference    payment_transaction.payment_reference%TYPE;
+        v_tx_reviewed_at  payment_transaction.reviewed_at%TYPE;
     BEGIN
         FOR rec IN (
             SELECT
@@ -2032,6 +2036,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 a.end_time,
                 a.status,
                 a.payment_status,
+                a.payment_expires_at,
                 a.deposit_amount,
                 a.policy_code_snapshot,
                 a.refund_status,
@@ -2082,6 +2087,45 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_data_obj.put('start_time'          , TO_CHAR(rec.start_time, 'YYYY-MM-DD"T"HH24:MI:SS'));
             v_data_obj.put('end_time'            , TO_CHAR(rec.end_time, 'YYYY-MM-DD"T"HH24:MI:SS'));
             v_data_obj.put('payment_status'      , rec.payment_status);
+
+            -- Seña pendiente: exponer estado del comprobante (ocr_status/reject_reason/
+            -- payment_reference/payment_expires_at) y datos SIPAP para que /r/[token]
+            -- pueda ofrecer "subir/resubir comprobante" sin un segundo fetch.
+            IF NVL(rec.payment_status, 'NONE') = 'PENDING' AND NVL(rec.deposit_amount, 0) > 0 THEN
+                v_tx_ocr_status    := NULL;
+                v_tx_reject_reason := NULL;
+                v_tx_reference     := NULL;
+                v_tx_reviewed_at   := NULL;
+                BEGIN
+                    SELECT pt.ocr_status, pt.reject_reason, pt.payment_reference, pt.reviewed_at
+                      INTO v_tx_ocr_status, v_tx_reject_reason, v_tx_reference, v_tx_reviewed_at
+                      FROM (
+                            SELECT /*+ no_parallel */
+                                   pt.ocr_status, pt.reject_reason, pt.payment_reference, pt.reviewed_at
+                              FROM payment_transaction pt
+                             WHERE pt.app_id_appointment = rec.id_appointment
+                               AND pt.provider = 'sipap'
+                             ORDER BY pt.id_transaction DESC
+                             FETCH FIRST 1 ROW ONLY
+                           ) pt;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        NULL;
+                END;
+
+                v_data_obj.put('ocr_status', v_tx_ocr_status);
+                v_data_obj.put('payment_reference', v_tx_reference);
+                IF v_tx_ocr_status = 'MISMATCH' AND v_tx_reviewed_at IS NOT NULL THEN
+                    v_data_obj.put('reject_reason', v_tx_reject_reason);
+                END IF;
+                IF rec.payment_expires_at IS NOT NULL THEN
+                    v_data_obj.put(
+                        'payment_expires_at',
+                        TO_CHAR(rec.payment_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                    );
+                END IF;
+                v_data_obj.put('deposit_settings', fn_public_deposit_settings(rec.org_id_organization));
+            END IF;
 
             -- Sucursales activas de la organizacion (evita el 2do fetch a
             -- getPublicProfileWithOrds que hacia el frontend solo para esto).
@@ -2975,7 +3019,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                receipt_url         = v_url,
                receipt_mime_type   = v_mime,
                receipt_uploaded_at = CURRENT_TIMESTAMP,
-               ocr_status          = 'PENDING'
+               ocr_status          = 'PENDING',
+               reject_reason       = NULL,
+               reviewed_at         = NULL,
+               reviewed_by         = NULL
          WHERE id_transaction = v_tx_id;
 
         v_is_image := v_mime LIKE 'image/%';
