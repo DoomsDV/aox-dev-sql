@@ -182,7 +182,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         pi_reject_reason     IN VARCHAR2,
         pi_refund_status     IN VARCHAR2 DEFAULT NULL,
         pi_refund_amount     IN NUMBER DEFAULT NULL,
-        pi_refund_alias      IN VARCHAR2 DEFAULT NULL
+        pi_refund_alias      IN VARCHAR2 DEFAULT NULL,
+        pi_reviewed_at       IN TIMESTAMP WITH TIME ZONE DEFAULT NULL
     ) RETURN json_object_t IS
         v_obj json_object_t := json_object_t();
         v_ui_status VARCHAR2(30);
@@ -199,6 +200,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
             v_ui_status := 'refund_waived';
         ELSIF pi_payment_status IN ('PAID', 'PAID_TRANSFER') OR NVL(pi_ocr_status, 'X') = 'MATCH' THEN
             v_ui_status := 'approved';
+        ELSIF pi_reviewed_at IS NOT NULL AND NVL(pi_ocr_status, 'X') = 'MISMATCH' THEN
+            -- Staff ya rechazo este comprobante (distinto de un MISMATCH automatico del OCR,
+            -- que nunca setea reviewed_at). La re-subida limpia reviewed_at/ocr_status.
+            v_ui_status := 'rejected';
         ELSIF fn_is_pending_review(pi_receipt_url, pi_ocr_status, pi_payment_status) = 1 THEN
             v_ui_status := 'pending';
         ELSE
@@ -234,6 +239,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_obj.put('receipt_uploaded_at', fn_iso_ts(pi_receipt_at));
         v_obj.put('created_at', fn_iso_ts(pi_created_at));
         v_obj.put('reject_reason', pi_reject_reason);
+        v_obj.put('reviewed_at', fn_iso_ts(pi_reviewed_at));
         v_obj.put('refund_status', v_refund_st);
         IF pi_refund_amount IS NOT NULL THEN
             v_obj.put('refund_amount', pi_refund_amount);
@@ -297,6 +303,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                AND pt.receipt_url IS NOT NULL
                AND pt.payment_status = 'PENDING'
                AND NVL(pt.ocr_status, 'PENDING') IN ('PENDING', 'MISMATCH', 'MANUAL_REVIEW', 'FAILED')
+               AND NOT (pt.reviewed_at IS NOT NULL AND pt.ocr_status = 'MISMATCH')
             UNION
             SELECT pt.id_transaction
               FROM payment_transaction pt
@@ -328,6 +335,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                         AND pt.receipt_url IS NOT NULL
                         AND pt.payment_status = 'PENDING'
                         AND NVL(pt.ocr_status, 'PENDING') IN ('PENDING', 'MISMATCH', 'MANUAL_REVIEW', 'FAILED')
+                        AND NOT (pt.reviewed_at IS NOT NULL AND pt.ocr_status = 'MISMATCH')
                      )
                      OR (
                             v_filter = 'approved'
@@ -370,6 +378,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                    pt.receipt_uploaded_at,
                    pt.created_at,
                    pt.reject_reason,
+                   pt.reviewed_at,
                    a.refund_status,
                    a.refund_amount,
                    a.refund_alias,
@@ -408,6 +417,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                             AND pt.receipt_url IS NOT NULL
                             AND pt.payment_status = 'PENDING'
                             AND NVL(pt.ocr_status, 'PENDING') IN ('PENDING', 'MISMATCH', 'MANUAL_REVIEW', 'FAILED')
+                            AND NOT (pt.reviewed_at IS NOT NULL AND pt.ocr_status = 'MISMATCH')
                          )
                          OR (
                                 v_filter = 'approved'
@@ -471,7 +481,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                     rec.reject_reason,
                     rec.refund_status,
                     rec.refund_amount,
-                    rec.refund_alias
+                    rec.refund_alias,
+                    rec.reviewed_at
                 );
                 v_item.put('refund_claim_open', CASE WHEN rec.open_claims > 0 THEN 1 ELSE 0 END);
                 IF NVL(rec.refund_status, 'NONE') = 'PENDING' THEN
@@ -539,6 +550,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                AND pt.receipt_url IS NOT NULL
                AND pt.payment_status = 'PENDING'
                AND NVL(pt.ocr_status, 'PENDING') IN ('PENDING', 'MISMATCH', 'MANUAL_REVIEW', 'FAILED')
+               AND NOT (pt.reviewed_at IS NOT NULL AND pt.ocr_status = 'MISMATCH')
             UNION
             SELECT pt.id_transaction
               FROM payment_transaction pt
@@ -727,6 +739,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                reject_reason  = v_reason,
                ocr_checked_at = CURRENT_TIMESTAMP
          WHERE id_transaction = pi_transaction_id;
+
+        -- Extiende el hold para que el cliente tenga una ventana real de resubir
+        -- el comprobante, sin importar cuanto tardo el negocio en revisar.
+        UPDATE appointment
+           SET payment_expires_at = CURRENT_TIMESTAMP
+               + NUMTODSINTERVAL(NVL(TO_NUMBER(fn_get_parameter('SIPAP_PAYMENT_PENDING_MINUTES')), 60), 'MINUTE')
+         WHERE id_appointment = v_app_id
+           AND payment_status = 'PENDING';
 
         COMMIT;
 
