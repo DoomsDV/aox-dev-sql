@@ -144,29 +144,31 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_atc_chat IS
         v_arr := json_array_t.parse(v_chunks_json);
 
         IF v_arr.get_size() = 0 THEN
-            RETURN 'Todavia no hay documentos de ayuda cargados, o no encontre informacion relevante. Subi manuales PDF/DOCX desde APEX para habilitar el asistente ATC.';
+            RETURN 'Todavia no tengo esa informacion. Si queres, reformula la pregunta o consulta otro tema de Hasel.';
         END IF;
 
         DBMS_LOB.CREATETEMPORARY(v_context, TRUE);
 
         FOR i IN 0 .. v_arr.get_size() - 1 LOOP
             v_item := TREAT(v_arr.get(i) AS json_object_t);
-            v_piece := '[' || NVL(v_item.get_string('file_name'), 'doc')
-                    || ' #' || NVL(TO_CHAR(v_item.get_number('chunk_index')), '?')
-                    || ']' || CHR(10)
-                    || v_item.get_clob('chunk_text')
-                    || CHR(10) || CHR(10);
+            v_piece := v_item.get_clob('chunk_text') || CHR(10) || CHR(10);
             DBMS_LOB.APPEND(v_context, v_piece);
         END LOOP;
 
-        v_system := 'Sos el asistente de Atencion al Cliente (ATC) de Hasel. '
-                 || 'Responde en espanol, claro y breve. Usa SOLO el contexto de documentos provisto. '
-                 || 'Si el contexto no alcanza, dilo explicitamente. No inventes funciones ni datos. '
-                 || 'Formatea la respuesta en Markdown: listas numeradas o con viñetas cuando haya pasos, '
-                 || 'negritas para acciones o botones de la UI, y parrafos cortos. '
-                 || 'No uses bloques de codigo salvo que el usuario lo pida.';
+        v_system := 'Sos el asistente de atencion al cliente de Hasel. '
+                 || 'Tono: neutral y amable; cercano pero profesional. Sin slang, sin ironia y sin sonar robotico. '
+                 || 'Responde en espanol, claro y breve. Usa SOLO la informacion de referencia. '
+                 || 'Si no alcanza, dilo con naturalidad y ofrece el paso mas cercano. No inventes funciones ni datos. '
+                 || 'Formato compacto: Markdown simple, listas cortas, negritas para botones de la UI, parrafos de 1 o 2 oraciones. '
+                 || 'Entre PC y movil usa una lista o una linea en blanco. Entre viñetas no dejes renglones vacios. '
+                 || 'No uses headings ## si una negrita alcanza. No uses bloques de codigo salvo que el usuario lo pida. '
+                 || 'Hablá solo de como se usa Hasel en la pantalla. '
+                 || 'No menciones calendarios de terceros ni sincronizacion externa. '
+                 || 'No expliques como esta construido Hasel ni uses nombres tecnicos internos. '
+                 || 'Si preguntan por integraciones o por el funcionamiento interno, volve a como se usa la pantalla. '
+                 || 'No cites fuentes ni digas que leiste un documento.';
 
-        v_user := 'Contexto de documentos:' || CHR(10) || v_context
+        v_user := 'Informacion de referencia:' || CHR(10) || v_context
                || CHR(10) || 'Pregunta del usuario:' || CHR(10) || pi_question;
 
         v_answer := fn_call_azure_chat(v_system, v_user);
@@ -187,7 +189,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_atc_chat IS
                 pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
                 pi_prompt          => pi_question
             );
-            RETURN 'Tuvimos un problema procesando tu pregunta. Detalle: ' || SQLERRM;
+            RETURN 'Tuvimos un problema procesando tu pregunta. Probá de nuevo en un momento.';
     END fn_answer_question;
 
 END pkg_aox_atc_chat;
