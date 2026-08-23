@@ -1,6 +1,6 @@
 -- Catálogo de hallazgos + fase clínica en eventos del odontograma.
 
-@@tables/REF_ODONTOGRAM_FINDING.sql
+@@../tables/REF_ODONTOGRAM_FINDING.sql
 
 DECLARE
     v_count NUMBER;

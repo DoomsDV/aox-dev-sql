@@ -53,7 +53,7 @@ BEGIN
           audience_type       VARCHAR2(20)                NOT NULL,
           role_id             NUMBER                      NULL,
           send_at             TIMESTAMP(6) WITH TIME ZONE NULL,
-          status              VARCHAR2(20)                DEFAULT ''DRAFT'' NOT NULL,
+          status              VARCHAR2(20)                DEFAULT 'DRAFT' NOT NULL,
           scheduler_job_name  VARCHAR2(128)               NULL,
           is_enabled          NUMBER(1,0)                 DEFAULT 1 NOT NULL,
           sent_at             TIMESTAMP(6) WITH TIME ZONE NULL,
@@ -63,14 +63,14 @@ BEGIN
           updated_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
           CONSTRAINT pk_push_campaign PRIMARY KEY (id_campaign),
           CONSTRAINT uq_push_camp_job_name UNIQUE (scheduler_job_name),
-          CONSTRAINT chk_push_camp_audience CHECK (audience_type IN (''ALL_ACTIVE'', ''ROLE'')),
+          CONSTRAINT chk_push_camp_audience CHECK (audience_type IN ('ALL_ACTIVE', 'ROLE')),
           CONSTRAINT chk_push_camp_status CHECK (
-            status IN (''DRAFT'', ''SCHEDULED'', ''SENDING'', ''SENT'', ''CANCELLED'', ''DISABLED'', ''ERROR'')
+            status IN ('DRAFT', 'SCHEDULED', 'SENDING', 'SENT', 'CANCELLED', 'DISABLED', 'ERROR')
           ),
           CONSTRAINT chk_push_camp_enabled CHECK (is_enabled IN (0, 1)),
           CONSTRAINT chk_push_camp_role_req CHECK (
-            (audience_type = ''ALL_ACTIVE'' AND role_id IS NULL)
-            OR (audience_type = ''ROLE'' AND role_id IS NOT NULL)
+            (audience_type = 'ALL_ACTIVE' AND role_id IS NULL)
+            OR (audience_type = 'ROLE' AND role_id IS NOT NULL)
           ),
           CONSTRAINT fk_push_camp_role FOREIGN KEY (role_id) REFERENCES role (id_role)
         )
@@ -137,12 +137,12 @@ BEGIN
           fcm_token        VARCHAR2(1000)              NULL,
           resolved_title   VARCHAR2(500)               NULL,
           resolved_body    VARCHAR2(4000)              NULL,
-          status           VARCHAR2(20)                DEFAULT ''PENDING'' NOT NULL,
+          status           VARCHAR2(20)                DEFAULT 'PENDING' NOT NULL,
           error_message    VARCHAR2(4000)              NULL,
           sent_at          TIMESTAMP(6) WITH TIME ZONE NULL,
           created_at       TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
           CONSTRAINT pk_push_campaign_delivery PRIMARY KEY (id_delivery),
-          CONSTRAINT chk_push_deliv_status CHECK (status IN (''PENDING'', ''SENT'', ''FAILED'')),
+          CONSTRAINT chk_push_deliv_status CHECK (status IN ('PENDING', 'SENT', 'FAILED')),
           CONSTRAINT fk_push_deliv_camp FOREIGN KEY (id_campaign)
             REFERENCES push_campaign (id_campaign) ON DELETE CASCADE,
           CONSTRAINT fk_push_deliv_pu FOREIGN KEY (platform_user_id)

@@ -45,7 +45,7 @@ END;
 /
 
 BEGIN
-    EXECUTE IMMEDIATE q'[UPDATE organization SET country_code = ''PY'' WHERE country_code IS NULL]';
+    EXECUTE IMMEDIATE q'[UPDATE organization SET country_code = 'PY' WHERE country_code IS NULL]';
 END;
 /
 
@@ -126,7 +126,7 @@ BEGIN
           ntype                VARCHAR2(20)                NOT NULL,
           title                VARCHAR2(500)               NOT NULL,
           body                 VARCHAR2(4000)              NULL,
-          action_type          VARCHAR2(30)                DEFAULT ''OPEN_URL'' NOT NULL,
+          action_type          VARCHAR2(30)                DEFAULT 'OPEN_URL' NOT NULL,
           action_url           VARCHAR2(1000)              NULL,
           action_payload       CLOB                        NULL,
           appointment_id       NUMBER                      NULL,
@@ -144,8 +144,8 @@ BEGIN
             REFERENCES appointment (id_appointment) ON DELETE SET NULL,
           CONSTRAINT fk_unotif_holiday FOREIGN KEY (holiday_id)
             REFERENCES ref_holiday (id_holiday) ON DELETE SET NULL,
-          CONSTRAINT chk_unotif_ntype CHECK (ntype IN (''APPOINTMENT'', ''PAYMENT'', ''HOLIDAY'', ''SYSTEM'')),
-          CONSTRAINT chk_unotif_action CHECK (action_type IN (''OPEN_URL'', ''OPEN_CLOSURE'')),
+          CONSTRAINT chk_unotif_ntype CHECK (ntype IN ('APPOINTMENT', 'PAYMENT', 'HOLIDAY', 'SYSTEM')),
+          CONSTRAINT chk_unotif_action CHECK (action_type IN ('OPEN_URL', 'OPEN_CLOSURE')),
           CONSTRAINT uq_unotif_dedupe UNIQUE (dedupe_key)
         )
     ]';
