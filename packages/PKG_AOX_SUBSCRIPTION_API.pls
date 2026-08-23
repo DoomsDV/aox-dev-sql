@@ -23,6 +23,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_api IS
     FUNCTION fn_addons_billing_live RETURN NUMBER; -- 1 if app_parameter ADDONS_BILLING_LIVE is '1'
 
     /**
+     * ¿El cobro de suscripción Hasel está habilitado? (1/0), según app_parameter
+     * BILLING_ENABLED. Mientras esté en 0 no se cobra: las organizaciones nuevas
+     * nacen FOUNDER exentas en vez de arrancar el trial de 14 días, que las dejaría
+     * en solo lectura sin tener dónde pagar.
+     */
+    FUNCTION fn_billing_enabled RETURN NUMBER;
+
+    /**
      * Estado efectivo de la suscripción, calculado en el momento:
      * TRIAL, TRIAL_EXPIRED, ACTIVE, PAST_DUE, READ_ONLY, CANCELED, FOUNDER, NONE.
      */
@@ -99,6 +107,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
             else 0
         end;
     end fn_addons_billing_live;
+
+    function fn_billing_enabled return number is
+    begin
+        return case
+            when nvl(trim(fn_get_parameter('BILLING_ENABLED')), '0') = '1' then 1
+            else 0
+        end;
+    end fn_billing_enabled;
 
     function fn_org_has_feature(
         pi_org_id       in number,
@@ -332,6 +348,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
     procedure pr_ensure_trial_subscription(
         pi_org_id in number
     ) is
+        v_billing_on number := fn_billing_enabled;
     begin
         if nvl(pi_org_id, 0) <= 0 then
             return;
@@ -350,13 +367,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         )
         select /*+ no_parallel */ pi_org_id,
                c_plan_id_premium,
-               'TRIAL',
-               0,
-               0,
+               case when v_billing_on = 1 then 'TRIAL' else 'FOUNDER' end,
+               case when v_billing_on = 1 then 0 else 1 end,
+               case when v_billing_on = 1 then 0 else 1 end,
                0,
                (select storage_limit_bytes from ref_plan where id_plan = c_plan_id_premium),
-               systimestamp,
-               systimestamp + numtodsinterval(c_trial_days, 'DAY')
+               case when v_billing_on = 1 then systimestamp end,
+               case when v_billing_on = 1 then systimestamp + numtodsinterval(c_trial_days, 'DAY') end
           from dual
          where not exists (
                  select 1
