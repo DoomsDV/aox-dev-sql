@@ -895,13 +895,28 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
     BEGIN
         -- Expira holds web SIPAP (reserve_for_deposit) y checkout Pagopar legacy abandonado.
         -- Requiere payment_expires_at: las citas PENDING del panel manual no lo tienen.
+        -- El reloj se congela si ya hay un comprobante subido esperando revision del
+        -- negocio (MANUAL_REVIEW/FAILED/MISMATCH automatico sin reviewed_at): no es justo
+        -- cancelarle el turno al cliente porque el negocio tardo en revisar. Si el negocio
+        -- rechaza explicitamente (reviewed_at seteado por pr_reject_payment), esa misma
+        -- rutina ya extiende payment_expires_at y el appointment vuelve a quedar sujeto a
+        -- expiracion con el plazo nuevo.
         FOR rec IN (
-            SELECT id_appointment, org_id_organization, deposit_amount, pagopar_hash
-              FROM appointment
-             WHERE payment_status = 'PENDING'
-               AND payment_expires_at IS NOT NULL
-               AND payment_expires_at < CURRENT_TIMESTAMP
-               AND status = 'PENDIENTE'
+            SELECT a.id_appointment, a.org_id_organization, a.deposit_amount, a.pagopar_hash
+              FROM appointment a
+             WHERE a.payment_status = 'PENDING'
+               AND a.payment_expires_at IS NOT NULL
+               AND a.payment_expires_at < CURRENT_TIMESTAMP
+               AND a.status = 'PENDIENTE'
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM payment_transaction pt
+                     WHERE pt.app_id_appointment = a.id_appointment
+                       AND pt.provider = 'sipap'
+                       AND pt.payment_status = 'PENDING'
+                       AND pt.receipt_uploaded_at IS NOT NULL
+                       AND NOT (pt.ocr_status = 'MISMATCH' AND pt.reviewed_at IS NOT NULL)
+               )
         ) LOOP
             UPDATE appointment
                SET payment_status = 'EXPIRED',
