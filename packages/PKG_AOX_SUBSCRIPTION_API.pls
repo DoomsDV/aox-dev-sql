@@ -529,6 +529,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         end loop;
         v_data.put('addon_features', v_addon_features);
 
+        -- Rubro de la org (ej. DENTAL). Lo consume el panel para no mostrar
+        -- módulos de nicho (odontograma) en un salón, spa, etc.
+        -- Query directo: no llamar pkg_aox_addon_api acá (ese paquete ya
+        -- depende de este y un ciclo rompería el compile).
+        declare
+            v_spec_code org_specialty.code%type;
+        begin
+            select os.code
+              into v_spec_code
+              from organization o
+              left join org_specialty os
+                on os.id_org_specialty = o.org_spe_id_specialty
+             where o.id_organization = v_org_id;
+
+            v_data.put('org_specialty_code', nvl(v_spec_code, ''));
+        exception
+            when no_data_found then
+                v_data.put('org_specialty_code', '');
+        end;
+
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response_json.put('status', 'success');
         v_response_json.put('data'  , v_data);
