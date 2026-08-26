@@ -94,7 +94,7 @@ No hay que intentar "corregirlo": son objetos fuera del repo.
 
 **Solo en desarrollo** (no están en `aox-dev/`): columna `PROFESSIONAL.DELETED_AT`, paquete `PKG_OCI_BRIDGE`, job `JOB_REVOKE_EXPIRED_SESSIONS_JOB`, job `JOB_EXPIRE_PAGOPAR_PAYMENTS` (reemplazado por `HASEL_EXPIRE_PENDING_PAYMENTS`).
 
-**Solo en producción** (legacy anterior a Hasel): tablas `DEPT`, `EMP`, `EMPLEADOS`, `DEPARTAMENTOS`, `DEPARTAMENTOS_ERR$`, `TMP_HASEL_MAINT_PKG_BACKUP`, `AOX_LOG_WEBHOOK_META`; función `JS_GET_IVA`; módulo MLE y perfiles de traducción SQL.
+**Solo en producción** (legacy anterior a Hasel): tablas `DEPT`, `EMP`, `EMPLEADOS`, `DEPARTAMENTOS`, `DEPARTAMENTOS_ERR$`, `TMP_HASEL_MAINT_PKG_BACKUP`; función `JS_GET_IVA`; módulo MLE y perfiles de traducción SQL. `AOX_LOG_WEBHOOK_META` pasó a versionarse en `aox-dev/` (`20260826_webhook_meta_log.sql`).
 
 Descontando eso, la huella MD5 de columnas por tabla coincide entre ambos entornos en todo el esquema del repo, y los dos tienen 126 templates ORDS.
 

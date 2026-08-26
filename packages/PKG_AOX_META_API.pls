@@ -85,6 +85,11 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
         pi_payload IN VARCHAR2
     );
 
+    -- Registra el JSON crudo de cada POST del webhook WABA de Meta.
+    PROCEDURE pr_log_webhook_meta (
+        pi_payload IN CLOB
+    );
+
     /**
      * Verifica X-Hub-Signature-256 (HMAC-SHA256 del body crudo con META_APP_SECRET).
      * Header esperado: "sha256=<hex>".
@@ -1282,7 +1287,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
                    status              = 'CONFIRMADO',
                    updated_at          = CURRENT_TIMESTAMP
              WHERE id_appointment = pi_appointment_id
-               AND status <> 'CANCELADO';
+               AND status <> 'CANCELADO'
+               AND NVL(attendance_status, 'NOT_REQUESTED') <> 'CONFIRMED';
             v_rows_updated := SQL%ROWCOUNT;
 
             IF v_rows_updated > 0 THEN
@@ -1310,7 +1316,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
                    cancel_reason       = 'CUSTOMER_DECLINED_ATTENDANCE',
                    updated_at          = CURRENT_TIMESTAMP
              WHERE id_appointment = pi_appointment_id
-               AND status <> 'CANCELADO';
+               AND status <> 'CANCELADO'
+               AND NVL(attendance_status, 'NOT_REQUESTED') <> 'DECLINED';
             v_rows_updated := SQL%ROWCOUNT;
 
             IF v_rows_updated > 0 THEN
@@ -1581,6 +1588,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         WHEN OTHERS THEN
             RETURN 0;
     END fn_verify_webhook_signature;
+
+    PROCEDURE pr_log_webhook_meta (
+        pi_payload IN CLOB
+    ) IS
+        PRAGMA AUTONOMOUS_TRANSACTION;
+    BEGIN
+        INSERT /*+ no_parallel */ INTO aox_log_webhook_meta (payload)
+        VALUES (pi_payload);
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+    END pr_log_webhook_meta;
 
 END pkg_aox_meta_api;
 /

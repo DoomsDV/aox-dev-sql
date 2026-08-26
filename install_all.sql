@@ -127,6 +127,9 @@ PROMPT [32/36] aox_ai_log
 PROMPT [33/36] aox_whatsapp_template_log
 @@tables\AOX_WHATSAPP_TEMPLATE_LOG.sql
 
+PROMPT [33b] aox_log_webhook_meta
+@@tables\AOX_LOG_WEBHOOK_META.sql
+
 PROMPT [34/36] aox_push_fcm_log
 @@tables\AOX_PUSH_FCM_LOG.sql
 

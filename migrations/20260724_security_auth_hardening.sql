@@ -100,6 +100,8 @@ END;
 
 -- ---------------------------------------------------------------------------
 -- WhatsApp POST: require X-Hub-Signature-256
+-- El handler de este script queda reemplazado por 20260826_webhook_meta_log.sql
+-- (log autonomous, body BLOB, parametro HEADER X-Hub-Signature-256).
 -- ---------------------------------------------------------------------------
 BEGIN
     ORDS.define_handler(
