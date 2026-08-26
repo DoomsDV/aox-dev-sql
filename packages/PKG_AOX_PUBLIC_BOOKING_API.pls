@@ -2644,7 +2644,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 || TO_CHAR(v_start_time, 'HH24:MI')
                 || '. Reembolso pendiente: Gs. ' || TO_CHAR(v_refund_amount, 'FM999G999G999');
         ELSIF v_refund_status = 'NOT_APPLICABLE' AND NVL(v_pay_status, 'NONE') IN ('PAID', 'PAID_TRANSFER') THEN
-            v_msg := 'Reserva cancelada. Segun la politica de seña, no corresponde reembolso.';
+            v_msg := 'Reserva cancelada. Según la política de seña, no corresponde reembolso.';
             v_fcm_body := NVL(TRIM(v_cus_name), 'Un cliente') || ' cancelo su cita del '
                 || TO_CHAR(v_start_time, 'DD/MM/YYYY') || ' a las '
                 || TO_CHAR(v_start_time, 'HH24:MI');
@@ -2976,7 +2976,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         END IF;
 
         IF v_expires_at IS NOT NULL AND v_expires_at < CURRENT_TIMESTAMP THEN
-            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El tiempo para pagar la seña ya expiro.');
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El tiempo para pagar la seña ya expiró.');
         END IF;
 
         BEGIN

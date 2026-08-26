@@ -84,7 +84,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         IF pkg_aox_subscription_api.fn_org_has_feature(pi_org_id, 'DEPOSIT_COLLECTION') <> 1 THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_forbidden,
-                'Tu plan no incluye cobro de senas.'
+                'Tu plan no incluye cobro de señas.'
             );
         END IF;
     END pr_assert_deposit_feature;

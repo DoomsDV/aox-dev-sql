@@ -31,7 +31,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_org_integration_api IS
     c_provider_pagopar CONSTANT VARCHAR2(50) := 'pagopar';
     c_gone_code        CONSTANT NUMBER := 410;
     c_msg_pagopar_gone CONSTANT VARCHAR2(220) :=
-        'Pagopar del comercio fue deprecado para senas. Configura transferencia SIPAP en Ajustes > Pagos. Pagopar queda solo para la suscripcion Hasel.';
+        'Pagopar del comercio fue deprecado para señas. Configurá transferencia SIPAP en Ajustes → Pagos. Pagopar queda solo para la suscripción Hasel.';
 
     PROCEDURE pr_assert_admin(
         pi_auth_header IN VARCHAR2

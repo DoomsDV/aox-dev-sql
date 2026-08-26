@@ -350,7 +350,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
                 v_response_json.put('status', 'error');
                 v_response_json.put(
                     'message',
-                    'Las senas estan suspendidas por 3 strikes de reembolso. Contacta a soporte Hasel.'
+                    'Las señas están suspendidas por 3 strikes de reembolso. Contactá a soporte Hasel.'
                 );
                 po_response_body := v_response_json.to_clob();
                 RETURN;
@@ -361,7 +361,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
                 v_response_json.put('status', 'error');
                 v_response_json.put(
                     'message',
-                    'Elegi una politica de cancelacion (Flexible, Moderada o Estricta) para habilitar senas.'
+                    'Elegí una política de cancelación (Flexible, Moderada o Estricta) para habilitar señas.'
                 );
                 po_response_body := v_response_json.to_clob();
                 RETURN;

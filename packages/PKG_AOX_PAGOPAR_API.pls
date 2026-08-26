@@ -113,7 +113,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_pagopar_api IS
 
     c_gone_code CONSTANT NUMBER := 410;
     c_msg_deposit_gone CONSTANT VARCHAR2(200) :=
-        'El cobro de senas por Pagopar fue deprecado. Usa transferencia SIPAP (Ajustes > Pagos).';
+        'El cobro de señas por Pagopar fue deprecado. Usá transferencia SIPAP (Ajustes → Pagos).';
 
     PROCEDURE pr_respond_gone(
         po_status_code   OUT NUMBER,

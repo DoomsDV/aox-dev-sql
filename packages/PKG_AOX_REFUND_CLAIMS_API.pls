@@ -311,7 +311,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_claims_api IS
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
         IF pkg_aox_subscription_api.fn_org_has_feature(v_org_id, 'DEPOSIT_COLLECTION') <> 1 THEN
-            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Tu plan no incluye cobro de senas.');
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Tu plan no incluye cobro de señas.');
         END IF;
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
