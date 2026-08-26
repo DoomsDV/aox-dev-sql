@@ -62,6 +62,48 @@ END pkg_aox_service_api;
 PROMPT CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api
 CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
 
+    -- NULL = no filtrar (admin/recepcionista)
+    -- -1   = profesional sin ficha: listar vacío / denegar get
+    -- >0   = filtrar por professional_service
+    FUNCTION fn_scope_pro_id(
+        pi_auth_header IN VARCHAR2,
+        pi_org_id      IN NUMBER
+    ) RETURN NUMBER IS
+        v_role_id NUMBER;
+        v_user_id NUMBER;
+        v_pro_id  NUMBER;
+    BEGIN
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        IF v_role_id <> pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            RETURN NULL;
+        END IF;
+
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        BEGIN
+            SELECT id_professional
+              INTO v_pro_id
+              FROM professional
+             WHERE usr_id_user = v_user_id
+               AND org_id_organization = pi_org_id;
+            RETURN v_pro_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RETURN -1;
+        END;
+    END fn_scope_pro_id;
+
+    PROCEDURE pr_assert_admin(pi_auth_header IN VARCHAR2) IS
+        v_role_id NUMBER;
+    BEGIN
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        IF v_role_id <> pkg_aox_util.fn_rol('ADMIN') THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_forbidden,
+                'Solo un administrador puede gestionar servicios.'
+            );
+        END IF;
+    END pr_assert_admin;
+
     -- Procedimiento: Listar Servicios (GET)
     PROCEDURE pr_list_services(
         pi_auth_header   IN  VARCHAR2,
@@ -73,6 +115,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         po_response_body OUT CLOB
     ) IS
         v_org_id        NUMBER;
+        v_pro_id        NUMBER;
         v_response_json json_object_t := json_object_t();
         v_services_arr  json_array_t  := json_array_t();
         v_service_obj   json_object_t;
@@ -92,6 +135,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
     BEGIN
         -- 1. Validar Token y obtener Organización
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_pro_id := fn_scope_pro_id(pi_auth_header, v_org_id);
 
         -- 2. Calcular el Offset
         IF v_page < 1 THEN v_page := 1; END IF;
@@ -104,13 +148,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         -- 3. Obtener el total de registros (Aplicando el filtro)
         SELECT COUNT(*)
         INTO v_total_records
-        FROM service
-        WHERE org_id_organization = v_org_id
-          AND (pi_is_active IS NULL OR is_active = pi_is_active)
+        FROM service s
+        WHERE s.org_id_organization = v_org_id
+          AND (pi_is_active IS NULL OR s.is_active = pi_is_active)
           AND (
                 v_search IS NULL
-                OR TRANSLATE(UPPER(name), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU')
+                OR TRANSLATE(UPPER(s.name), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU')
                    LIKE '%' || v_search || '%'
+              )
+          AND (
+                v_pro_id IS NULL
+                OR (
+                    v_pro_id > 0
+                    AND EXISTS (
+                        SELECT 1
+                          FROM professional_service ps
+                         WHERE ps.ser_id_service = s.id_service
+                           AND ps.pro_id_professional = v_pro_id
+                           AND ps.org_id_organization = v_org_id
+                    )
+                )
               );
 
         v_total_pages := CEIL(v_total_records / v_limit);
@@ -118,28 +175,41 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         -- 4. Consultar servicios (Aplicando el filtro)
         FOR rec IN (
             SELECT
-                id_service,
-                name,
-                duration_minutes,
-                price,
-                hide_public_price,
-                hidden_public_price_label,
-                image_url,
-                public_includes,
-                is_active,
-                created_at,
-                requires_deposit,
-                deposit_type,
-                deposit_value
-            FROM service
-            WHERE org_id_organization = v_org_id
-              AND (pi_is_active IS NULL OR is_active = pi_is_active)
+                s.id_service,
+                s.name,
+                s.duration_minutes,
+                s.price,
+                s.hide_public_price,
+                s.hidden_public_price_label,
+                s.image_url,
+                s.public_includes,
+                s.is_active,
+                s.created_at,
+                s.requires_deposit,
+                s.deposit_type,
+                s.deposit_value
+            FROM service s
+            WHERE s.org_id_organization = v_org_id
+              AND (pi_is_active IS NULL OR s.is_active = pi_is_active)
               AND (
                     v_search IS NULL
-                    OR TRANSLATE(UPPER(name), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU')
+                    OR TRANSLATE(UPPER(s.name), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU')
                        LIKE '%' || v_search || '%'
                   )
-            ORDER BY id_service DESC
+              AND (
+                    v_pro_id IS NULL
+                    OR (
+                        v_pro_id > 0
+                        AND EXISTS (
+                            SELECT 1
+                              FROM professional_service ps
+                             WHERE ps.ser_id_service = s.id_service
+                               AND ps.pro_id_professional = v_pro_id
+                               AND ps.org_id_organization = v_org_id
+                        )
+                    )
+                  )
+            ORDER BY s.id_service DESC
             OFFSET v_offset ROWS FETCH NEXT v_limit ROWS ONLY
         ) LOOP
             v_service_obj := json_object_t();
@@ -213,7 +283,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_image_url         service.image_url%TYPE;
         v_public_includes   service.public_includes%TYPE;
     BEGIN
-        -- 1. Validar Token y obtener Organización
+        -- 1. Validar Token, rol Admin y Organización
+        pr_assert_admin(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
         -- 2. Parsear el Body
@@ -293,7 +364,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             IF pkg_aox_payment_settings_api.fn_org_deposits_enabled(v_org_id) = 0 THEN
                 RAISE_APPLICATION_ERROR(
                     pkg_aox_util.c_sqlcode_forbidden,
-                    'Habilita el cobro de senas en Ajustes → Pagos (politica y datos SIPAP) antes de exigir seña en un servicio.'
+                    'Habilitá el cobro de señas en Ajustes → Pagos (política y datos SIPAP) antes de exigir seña en un servicio.'
                 );
             END IF;
         END IF;
@@ -398,6 +469,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             rollback;
             if sqlcode = -20001 then po_status_code := pkg_aox_util.c_unauthorized_code; -- Unauthorized JWT
             elsif sqlcode = -20002 then po_status_code := pkg_aox_util.c_bad_request_code; -- Bad JSON
+            elsif sqlcode = pkg_aox_util.c_sqlcode_forbidden then po_status_code := pkg_aox_util.c_forbidden_code;
             else po_status_code := pkg_aox_util.c_internal_error_code; end if;
 
             v_response_json.put('status', 'error');
@@ -413,6 +485,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         po_response_body out clob
     ) is
         v_org_id           number;
+        v_pro_id           number;
+        v_assigned         number;
         v_response_json    json_object_t := json_object_t();
         v_service_obj      json_object_t;
 
@@ -467,6 +541,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             from service
             where id_service          = pi_service_id
               and org_id_organization = v_org_id; -- ¡Seguridad anti-IDOR!
+
+            v_pro_id := fn_scope_pro_id(pi_auth_header, v_org_id);
+            IF v_pro_id IS NOT NULL THEN
+                SELECT COUNT(*)
+                  INTO v_assigned
+                  FROM professional_service
+                 WHERE ser_id_service = pi_service_id
+                   AND pro_id_professional = v_pro_id
+                   AND org_id_organization = v_org_id;
+                IF v_assigned = 0 THEN
+                    RAISE_APPLICATION_ERROR(
+                        pkg_aox_util.c_sqlcode_forbidden,
+                        'No tienes permisos para consultar este servicio.'
+                    );
+                END IF;
+            END IF;
 
             -- 3. Construir la respuesta JSON exitosa
             v_service_obj := json_object_t();
@@ -541,7 +631,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_public_includes   service.public_includes%TYPE;
         v_has_public_includes PLS_INTEGER := 0;
     begin
-        -- 1. Validar Token y obtener Organización
+        -- 1. Validar Token, rol Admin y Organización
+        pr_assert_admin(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
         -- 2. Parsear el Body
@@ -638,7 +729,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
             IF pkg_aox_payment_settings_api.fn_org_deposits_enabled(v_org_id) = 0 THEN
                 RAISE_APPLICATION_ERROR(
                     pkg_aox_util.c_sqlcode_forbidden,
-                    'Habilita el cobro de senas en Ajustes → Pagos (politica y datos SIPAP) antes de exigir seña en un servicio.'
+                    'Habilitá el cobro de señas en Ajustes → Pagos (política y datos SIPAP) antes de exigir seña en un servicio.'
                 );
             END IF;
         END IF;
@@ -763,7 +854,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_org_id        number;
         v_response_json json_object_t := json_object_t();
     begin
-        -- 1. Validar Token y obtener Organización
+        -- 1. Validar Token, rol Admin y Organización
+        pr_assert_admin(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
         -- 2. Ejecutar el DELETE
@@ -857,21 +949,36 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         po_response_body OUT CLOB
     ) IS
         v_org_id        NUMBER;
+        v_pro_id        NUMBER;
         v_response_json json_object_t := json_object_t();
         v_services_arr  json_array_t  := json_array_t();
         v_service_obj   json_object_t;
     BEGIN
         -- 1. Validar Token y obtener Organización
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_pro_id := fn_scope_pro_id(pi_auth_header, v_org_id);
 
         -- 2. Consultar SOLO los servicios activos de la organización
         FOR rec IN (
-            SELECT id_service, name, duration_minutes, price, hide_public_price,
-                   requires_deposit, deposit_type, deposit_value
-            FROM service
-            WHERE org_id_organization = v_org_id
-              AND is_active = 1
-            ORDER BY name ASC
+            SELECT s.id_service, s.name, s.duration_minutes, s.price, s.hide_public_price,
+                   s.requires_deposit, s.deposit_type, s.deposit_value
+            FROM service s
+            WHERE s.org_id_organization = v_org_id
+              AND s.is_active = 1
+              AND (
+                    v_pro_id IS NULL
+                    OR (
+                        v_pro_id > 0
+                        AND EXISTS (
+                            SELECT 1
+                              FROM professional_service ps
+                             WHERE ps.ser_id_service = s.id_service
+                               AND ps.pro_id_professional = v_pro_id
+                               AND ps.org_id_organization = v_org_id
+                        )
+                    )
+                  )
+            ORDER BY s.name ASC
         ) LOOP
             v_service_obj := json_object_t();
             v_service_obj.put('id_service'       , rec.id_service);
