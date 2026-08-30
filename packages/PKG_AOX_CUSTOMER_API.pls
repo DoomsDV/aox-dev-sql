@@ -20,6 +20,15 @@ CREATE OR REPLACE PACKAGE pkg_aox_customer_api IS
         po_response_body OUT CLOB
     );
 
+    -- ORDS: PUT /customers/:id  (body: full_name, phone_number)
+    PROCEDURE pr_update_customer_profile(
+        pi_auth_header   IN  VARCHAR2,
+        pi_cus_id        IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
 END pkg_aox_customer_api;
 /
 
@@ -727,6 +736,123 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         WHEN OTHERS THEN
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_get_customer_profile;
+
+    PROCEDURE pr_update_customer_profile(
+        pi_auth_header   IN  VARCHAR2,
+        pi_cus_id        IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id             NUMBER;
+        v_user_id            NUMBER;
+        v_role_id            NUMBER;
+        v_json_req           json_object_t;
+        v_response_json      json_object_t := json_object_t();
+        v_data_obj           json_object_t;
+        v_validation_errors  json_array_t  := json_array_t();
+        v_error              json_object_t;
+
+        v_full_name          customer.full_name%TYPE;
+        v_phone_raw          VARCHAR2(50);
+        v_phone_to_save      customer.phone_number%TYPE;
+        v_exists_count       NUMBER := 0;
+        v_dup_count          NUMBER := 0;
+    BEGIN
+        IF NVL(pi_cus_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Cliente invalido.');
+        END IF;
+
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+
+        IF v_role_id NOT IN (pkg_aox_util.fn_rol('ADMIN'), pkg_aox_util.fn_rol('RECEPCIONISTA')) THEN
+            RAISE_APPLICATION_ERROR(-20005, 'No tienes permisos para editar clientes.');
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_exists_count
+          FROM customer
+         WHERE id_customer         = pi_cus_id
+           AND org_id_organization = v_org_id;
+
+        IF v_exists_count = 0 THEN
+            RAISE_APPLICATION_ERROR(-20004, 'Cliente no encontrado.');
+        END IF;
+
+        v_json_req  := json_object_t.parse(pi_body);
+        v_full_name := TRIM(v_json_req.get_string('full_name'));
+        IF v_json_req.has('phone_number') THEN
+            v_phone_raw := TRIM(v_json_req.get_string('phone_number'));
+        END IF;
+
+        IF v_full_name IS NULL THEN
+            v_error := json_object_t();
+            v_error.put('field'  , 'full_name');
+            v_error.put('message', 'El nombre es obligatorio.');
+            v_validation_errors.append(v_error);
+        ELSIF LENGTH(v_full_name) > 150 THEN
+            v_error := json_object_t();
+            v_error.put('field'  , 'full_name');
+            v_error.put('message', 'El nombre no puede superar los 150 caracteres.');
+            v_validation_errors.append(v_error);
+        END IF;
+
+        IF v_phone_raw IS NOT NULL THEN
+            IF NOT REGEXP_LIKE(v_phone_raw, '^\+5959[0-9]{8}$') THEN
+                v_error := json_object_t();
+                v_error.put('field'  , 'phone_number');
+                v_error.put('message', 'Ingresa un numero de Paraguay valido. Ej: 0981 123 456.');
+                v_validation_errors.append(v_error);
+            ELSE
+                SELECT COUNT(*)
+                  INTO v_dup_count
+                  FROM customer
+                 WHERE org_id_organization = v_org_id
+                   AND phone_number        = v_phone_raw
+                   AND id_customer        != pi_cus_id;
+
+                IF v_dup_count > 0 THEN
+                    v_error := json_object_t();
+                    v_error.put('field'  , 'phone_number');
+                    v_error.put('message', 'Este numero ya esta registrado con otro cliente.');
+                    v_validation_errors.append(v_error);
+                END IF;
+            END IF;
+        END IF;
+
+        IF v_validation_errors.get_size() > 0 THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status' , 'error');
+            v_response_json.put('message', 'Errores de validacion en los campos enviados.');
+            v_response_json.put('errors' , v_validation_errors);
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        v_phone_to_save := v_phone_raw;
+
+        UPDATE customer
+           SET full_name    = v_full_name,
+               phone_number = v_phone_to_save
+         WHERE id_customer         = pi_cus_id
+           AND org_id_organization = v_org_id;
+
+        v_data_obj := json_object_t();
+        v_data_obj.put('id_customer' , pi_cus_id);
+        v_data_obj.put('full_name'   , v_full_name);
+        v_data_obj.put('phone_number', v_phone_to_save);
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data'  , v_data_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_update_customer_profile;
 
 END pkg_aox_customer_api;
 /
