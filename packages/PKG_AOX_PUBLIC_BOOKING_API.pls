@@ -2115,6 +2115,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
 
                 v_data_obj.put('ocr_status', v_tx_ocr_status);
                 v_data_obj.put('payment_reference', v_tx_reference);
+                -- Flag independiente del motivo: si el staff rechazó sin texto,
+                -- el cliente igual debe poder resubir el comprobante.
+                v_data_obj.put(
+                    'receipt_rejected',
+                    CASE
+                        WHEN v_tx_ocr_status = 'MISMATCH' AND v_tx_reviewed_at IS NOT NULL
+                        THEN TRUE
+                        ELSE FALSE
+                    END
+                );
                 IF v_tx_ocr_status = 'MISMATCH' AND v_tx_reviewed_at IS NOT NULL THEN
                     v_data_obj.put('reject_reason', v_tx_reject_reason);
                 END IF;
@@ -2829,6 +2839,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_app_id          appointment.id_appointment%TYPE;
         v_org_id          organization.id_organization%TYPE;
         v_cus_id          customer.id_customer%TYPE;
+        v_cus_name        customer.full_name%TYPE;
         v_pro_id          professional.id_professional%TYPE;
         v_app_status      appointment.status%TYPE;
         v_pay_status      appointment.payment_status%TYPE;
@@ -3148,6 +3159,30 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             BEGIN
                 pkg_aox_meta_api.pr_enqueue_booking_confirmation_wa(
                     pi_appointment_id => v_app_id
+                );
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+        ELSIF v_ocr_status IN ('MANUAL_REVIEW', 'MISMATCH', 'FAILED', 'PENDING') THEN
+            BEGIN
+                SELECT c.full_name
+                  INTO v_cus_name
+                  FROM customer c
+                 WHERE c.id_customer = v_cus_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_cus_name := NULL;
+            END;
+
+            BEGIN
+                pkg_aox_fcm_api.pr_notify_professional_appointment(
+                    pi_pro_id         => v_pro_id,
+                    pi_appointment_id => v_app_id,
+                    pi_title          => 'Comprobante pendiente de revisión',
+                    pi_body           => NVL(TRIM(v_cus_name), 'Un cliente')
+                                      || ' subió el comprobante SIPAP. Revisalo en Cobros.',
+                    pi_process_name   => 'PKG_AOX_PUBLIC_BOOKING_API.PR_UPLOAD_PUBLIC_RECEIPT.PAYMENT_REVIEW',
+                    pi_ntype          => 'PAYMENT'
                 );
             EXCEPTION
                 WHEN OTHERS THEN NULL;

@@ -3,17 +3,18 @@ CREATE OR REPLACE PACKAGE pkg_aox_payments_api IS
 
     -- Lista de cobros SIPAP (filtros status + fechas). Gate DEPOSIT_COLLECTION.
     PROCEDURE pr_list_payments(
-        pi_auth_header   IN  VARCHAR2,
-        pi_status_filter IN  VARCHAR2 DEFAULT 'all',
-        pi_date_preset   IN  VARCHAR2 DEFAULT 'all',
-        pi_date_from     IN  VARCHAR2 DEFAULT NULL,
-        pi_date_to       IN  VARCHAR2 DEFAULT NULL,
-        pi_page          IN  NUMBER   DEFAULT 1,
-        pi_limit         IN  NUMBER   DEFAULT 50,
-        pi_sort_dir      IN  VARCHAR2 DEFAULT 'desc',
-        pi_sort_by       IN  VARCHAR2 DEFAULT 'date',
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_auth_header     IN  VARCHAR2,
+        pi_status_filter   IN  VARCHAR2 DEFAULT 'all',
+        pi_date_preset     IN  VARCHAR2 DEFAULT 'all',
+        pi_date_from       IN  VARCHAR2 DEFAULT NULL,
+        pi_date_to         IN  VARCHAR2 DEFAULT NULL,
+        pi_page            IN  NUMBER   DEFAULT 1,
+        pi_limit           IN  NUMBER   DEFAULT 50,
+        pi_sort_dir        IN  VARCHAR2 DEFAULT 'desc',
+        pi_sort_by         IN  VARCHAR2 DEFAULT 'date',
+        pi_appointment_id  IN  NUMBER   DEFAULT NULL,
+        po_status_code     OUT NUMBER,
+        po_response_body   OUT CLOB
     );
 
     -- Count para badge del menu Cobros.
@@ -249,19 +250,21 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
     END fn_build_item;
 
     PROCEDURE pr_list_payments(
-        pi_auth_header   IN  VARCHAR2,
-        pi_status_filter IN  VARCHAR2 DEFAULT 'all',
-        pi_date_preset   IN  VARCHAR2 DEFAULT 'all',
-        pi_date_from     IN  VARCHAR2 DEFAULT NULL,
-        pi_date_to       IN  VARCHAR2 DEFAULT NULL,
-        pi_page          IN  NUMBER   DEFAULT 1,
-        pi_limit         IN  NUMBER   DEFAULT 50,
-        pi_sort_dir      IN  VARCHAR2 DEFAULT 'desc',
-        pi_sort_by       IN  VARCHAR2 DEFAULT 'date',
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_auth_header     IN  VARCHAR2,
+        pi_status_filter   IN  VARCHAR2 DEFAULT 'all',
+        pi_date_preset     IN  VARCHAR2 DEFAULT 'all',
+        pi_date_from       IN  VARCHAR2 DEFAULT NULL,
+        pi_date_to         IN  VARCHAR2 DEFAULT NULL,
+        pi_page            IN  NUMBER   DEFAULT 1,
+        pi_limit           IN  NUMBER   DEFAULT 50,
+        pi_sort_dir        IN  VARCHAR2 DEFAULT 'desc',
+        pi_sort_by         IN  VARCHAR2 DEFAULT 'date',
+        pi_appointment_id  IN  NUMBER   DEFAULT NULL,
+        po_status_code     OUT NUMBER,
+        po_response_body   OUT CLOB
     ) IS
         v_org_id        NUMBER;
+        v_app_id        NUMBER := CASE WHEN NVL(pi_appointment_id, 0) > 0 THEN pi_appointment_id ELSE NULL END;
         v_filter        VARCHAR2(30) := LOWER(TRIM(NVL(pi_status_filter, 'all')));
         v_sort_dir      VARCHAR2(4) := CASE
                                           WHEN LOWER(TRIM(NVL(pi_sort_dir, 'desc'))) = 'asc' THEN 'asc'
@@ -319,6 +322,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
           JOIN appointment a ON a.id_appointment = pt.app_id_appointment
          WHERE pt.org_id_organization = v_org_id
            AND pt.provider = 'sipap'
+           AND (v_app_id IS NULL OR a.id_appointment = v_app_id)
            AND (
                 (
                     v_filter = 'refunded'
@@ -401,6 +405,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
               ) claim_agg ON claim_agg.app_id_appointment = a.id_appointment
              WHERE pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
+               AND (v_app_id IS NULL OR a.id_appointment = v_app_id)
                AND (
                     (
                         v_filter = 'refunded'

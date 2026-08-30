@@ -305,13 +305,25 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 a.schedule_exception_pro,
                 NVL(p.display_name, TRIM(u.first_name || ' ' || u.last_name)) AS professional_name,
                 s.name AS service_name,
-                l.name AS location_name
+                l.name AS location_name,
+                pt.receipt_url AS sipap_receipt_url,
+                pt.ocr_status AS sipap_ocr_status,
+                pt.reviewed_at AS sipap_reviewed_at
             FROM appointment a
             JOIN customer c     ON a.cus_id_customer     = c.id_customer
             JOIN professional p ON a.pro_id_professional = p.id_professional
             JOIN app_user u     ON p.usr_id_user         = u.id_user
             JOIN service s      ON a.ser_id_service      = s.id_service
             JOIN location l     ON a.loc_id_location     = l.id_location
+            LEFT JOIN payment_transaction pt
+              ON pt.app_id_appointment = a.id_appointment
+             AND pt.provider = 'sipap'
+             AND pt.id_transaction = (
+                    SELECT MAX(pt2.id_transaction)
+                      FROM payment_transaction pt2
+                     WHERE pt2.app_id_appointment = a.id_appointment
+                       AND pt2.provider = 'sipap'
+                 )
             WHERE a.id_appointment = pi_app_id
               AND a.org_id_organization = v_org_id
               AND (v_role_id != pkg_aox_util.fn_rol('PROFESIONAL') OR a.pro_id_professional = v_actual_pro_id)
@@ -331,6 +343,24 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             v_app_obj.put('status'              , rec.status);
             v_app_obj.put('attendance_status'   , rec.attendance_status);
             v_app_obj.put('payment_status'      , rec.payment_status);
+            v_app_obj.put(
+                'receipt_uploaded',
+                CASE WHEN rec.sipap_receipt_url IS NOT NULL THEN TRUE ELSE FALSE END
+            );
+            v_app_obj.put(
+                'receipt_pending_review',
+                CASE
+                    WHEN rec.sipap_receipt_url IS NOT NULL
+                     AND NVL(rec.payment_status, 'NONE') = 'PENDING'
+                     AND NVL(rec.sipap_ocr_status, 'PENDING') IN ('PENDING', 'MISMATCH', 'MANUAL_REVIEW', 'FAILED')
+                     AND NOT (rec.sipap_reviewed_at IS NOT NULL AND NVL(rec.sipap_ocr_status, 'X') = 'MISMATCH')
+                    THEN TRUE
+                    ELSE FALSE
+                END
+            );
+            IF rec.sipap_ocr_status IS NOT NULL THEN
+                v_app_obj.put('ocr_status', rec.sipap_ocr_status);
+            END IF;
             IF rec.deposit_amount IS NOT NULL THEN
                 v_app_obj.put('deposit_amount', rec.deposit_amount);
             END IF;
