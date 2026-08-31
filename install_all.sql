@@ -184,6 +184,9 @@ PROMPT [41b/43] org_payment_card (Pagopar pago-recurrente / catastro de tarjetas
 PROMPT [41c/43] org_billing_profile (datos fiscales suscripcion Hasel)
 @@tables\ORG_BILLING_PROFILE.sql
 
+PROMPT [41c2] subscription_einvoice_outbox (despacho FE post-PAID)
+@@tables\SUBSCRIPTION_EINVOICE_OUTBOX.sql
+
 PROMPT [41d] ref_addon (complementos mensuales / tienda)
 @@tables\REF_ADDON.sql
 

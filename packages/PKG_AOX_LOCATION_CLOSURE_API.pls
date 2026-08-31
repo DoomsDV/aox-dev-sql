@@ -484,6 +484,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         BEGIN
             v_json_req := json_object_t.parse(pi_body);
         EXCEPTION
@@ -719,6 +722,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         pr_assert_manager(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         BEGIN
             SELECT closure_group_id
               INTO v_group_id
@@ -784,6 +790,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
     BEGIN
         pr_assert_manager(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         BEGIN
             v_json_req := json_object_t.parse(pi_body);

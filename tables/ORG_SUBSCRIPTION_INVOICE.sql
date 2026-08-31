@@ -28,7 +28,10 @@ CREATE TABLE org_subscription_invoice (
   einvoice_kude_url     VARCHAR2(500)               NULL,
   einvoice_ambiente     VARCHAR2(10)                NULL,
   einvoice_sent_at      TIMESTAMP(6) WITH TIME ZONE NULL,
-  einvoice_error        VARCHAR2(500)               NULL
+  einvoice_error        VARCHAR2(500)               NULL,
+  einvoice_email_status   VARCHAR2(20)                DEFAULT 'NONE' NOT NULL,
+  einvoice_email_error    VARCHAR2(500)               NULL,
+  einvoice_email_attempts NUMBER                      DEFAULT 0 NOT NULL
 )
 /
 
@@ -72,6 +75,13 @@ PROMPT ALTER TABLE org_subscription_invoice ADD CONSTRAINT chk_orginv_einvoice_s
 ALTER TABLE org_subscription_invoice
   ADD CONSTRAINT chk_orginv_einvoice_status CHECK (
     einvoice_status IN ('NONE', 'PENDING', 'SENT_PENDING_KUDE', 'SENT', 'FAILED')
+  )
+/
+
+PROMPT ALTER TABLE org_subscription_invoice ADD CONSTRAINT chk_orginv_einvoice_email_status CHECK
+ALTER TABLE org_subscription_invoice
+  ADD CONSTRAINT chk_orginv_einvoice_email_status CHECK (
+    einvoice_email_status IN ('NONE', 'PENDING', 'SENT', 'FAILED')
   )
 /
 
@@ -134,3 +144,9 @@ COMMENT ON COLUMN org_subscription_invoice.einvoice_kude_url IS 'URL publica del
 COMMENT ON COLUMN org_subscription_invoice.einvoice_ambiente IS 'Ambiente SIFEN de la emision (test | prod), segun el prefijo de la api key usada.';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_sent_at IS 'Cuando se envio el email de factura con el KuDE adjunto al billing_email.';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_error IS 'Ultimo error del ciclo de emision (SIFEN rechazado o fallo de envio de email).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_email_status IS
+  'Envio de correo con KuDE: NONE | PENDING | SENT | FAILED. Independiente de einvoice_status (FE/KuDE).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_email_error IS
+  'Ultimo error al enviar el mail FACTURASUSCRIPCIONV2 (no debe reabrir emision FE).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_email_attempts IS
+  'Reintentos de envio de correo (acotados en pr_retry_pending_einvoice_emails).';

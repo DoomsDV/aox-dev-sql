@@ -1,4 +1,4 @@
-﻿PROMPT CREATE OR REPLACE PACKAGE pkg_aox_professional_api
+PROMPT CREATE OR REPLACE PACKAGE pkg_aox_professional_api
 CREATE OR REPLACE PACKAGE pkg_aox_professional_api IS
 
     -- Crear Profesional y Usuario en una sola transacción
@@ -118,6 +118,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_ser_id            NUMBER;
     BEGIN
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         -- 1. Parsear el JSON
         BEGIN
@@ -669,6 +672,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         -- 1. Validar JWT y Organización
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         -- 2. Recuperar el ID del usuario asociado a este profesional
         BEGIN
             SELECT
@@ -1152,6 +1158,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_response_json json_object_t := json_object_t();
     BEGIN
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         -- 1. Verificar que el profesional existe y pertenece a esta organización
         BEGIN

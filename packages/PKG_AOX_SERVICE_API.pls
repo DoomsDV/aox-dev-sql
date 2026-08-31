@@ -287,6 +287,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         pr_assert_admin(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         -- 2. Parsear el Body
         BEGIN
             v_json_req := json_object_t.parse(pi_body);
@@ -635,6 +638,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         pr_assert_admin(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         -- 2. Parsear el Body
         begin
             v_json_req := json_object_t.parse(pi_body);
@@ -857,6 +863,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         -- 1. Validar Token, rol Admin y Organización
         pr_assert_admin(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         -- 2. Ejecutar el DELETE
         delete from service

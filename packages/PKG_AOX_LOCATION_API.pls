@@ -310,6 +310,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
     BEGIN
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         BEGIN
             v_json_req := json_object_t.parse(pi_body);
             v_name     := v_json_req.get_string('name');
@@ -373,6 +376,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         v_is_active         location.is_active%TYPE;
     BEGIN
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         BEGIN
             v_json_req := json_object_t.parse(pi_body);
@@ -439,6 +445,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         v_response_json json_object_t := json_object_t();
     BEGIN
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         DELETE FROM location
         WHERE id_location = pi_location_id AND org_id_organization = v_org_id;

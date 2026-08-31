@@ -147,12 +147,36 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
     -- No expone HTTP; lo invoca DBMS_SCHEDULER (ver migracion del job, solo en produccion).
     PROCEDURE pr_run_billing_cycle;
 
+    -- Ciclo acotado a una org (DEV / fixture E2E). Sin scheduler permanente.
+    -- Bloqueo concurrente por org; registra cada corrida en aox_api_log.
+    PROCEDURE pr_run_billing_cycle_for_org(pi_org_id IN NUMBER);
+
+    -- Campanita SYSTEM: trial pronto/vencido, PAST_DUE, READ_ONLY, cobro recuperado.
+    -- Idempotente por dedupe_key org+evento+periodo+member.
+    PROCEDURE pr_notify_subscription_lifecycle(pi_org_id IN NUMBER);
+
     ----------------------------------------------------------------------------
     -- Factura electronica SIFEN (firmador esign) sobre invoices de suscripcion.
     -- Disparo interno server-to-server: sin JWT de usuario, protegido por
     -- header X-Service-Token (app_parameter ESIGN_CALLBACK_SERVICE_TOKEN).
     -- Ver aox-dev/docs (facturacion electronica) para el flujo completo.
     ----------------------------------------------------------------------------
+
+    -- Encola emision FE (outbox) de forma atomica. Sin COMMIT ni HTTP.
+    PROCEDURE pr_enqueue_einvoice_dispatch(pi_invoice_id IN NUMBER);
+
+    -- Despacha filas PENDING/lease-expirado de subscription_einvoice_outbox (HTTP a Astro).
+    -- pi_org_id NULL = global; si se informa, solo esa org (fixture E2E).
+    PROCEDURE pr_dispatch_einvoice_outbox(
+        pi_limit  IN NUMBER DEFAULT 20,
+        pi_org_id IN NUMBER DEFAULT NULL
+    );
+
+    -- Reintenta emails de KuDE fallidos/pendientes/PENDING caducados sin reemitir FE.
+    PROCEDURE pr_retry_pending_einvoice_emails(
+        pi_limit  IN NUMBER DEFAULT 20,
+        pi_org_id IN NUMBER DEFAULT NULL
+    );
 
     -- POST /internal/v1/subscription-invoices/:id/einvoice
     -- Callback de Astro con el resultado de POST /v1/documents en el firmador.
@@ -192,6 +216,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     c_plan_premium CONSTANT VARCHAR2(30) := 'PREMIUM';
     c_plan_base    CONSTANT VARCHAR2(30) := 'BASE';
     c_plan_free    CONSTANT VARCHAR2(30) := 'FREE';
+
+    -- Forward decls de helpers privados (usados antes de su definicion en el body).
+    PROCEDURE pr_enqueue_billing_admin_notice(
+        pi_org_id IN NUMBER,
+        pi_event  IN VARCHAR2,
+        pi_period IN VARCHAR2,
+        pi_title  IN VARCHAR2,
+        pi_body   IN VARCHAR2
+    );
+    PROCEDURE pr_notificar_emision_fe(pi_invoice_id IN NUMBER);
+    PROCEDURE pr_send_einvoice_email(pi_invoice_id IN NUMBER);
 
     --------------------------------------------------------------------------
     -- Helpers
@@ -287,161 +322,209 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
     END pr_assert_service_token;
 
-    -- Dispara (best-effort, nunca bloqueante) la emision de Factura Electronica en el
-    -- firmador para una invoice que acaba de pasar a PAID. Hace un POST saliente a
-    -- ESIGN_WEBHOOK_URL (Astro /api/internal/esign/emit-invoice) con X-Service-Token.
-    -- Astro llama al firmador y luego confirma el resultado via
-    -- pr_save_einvoice_result / pr_save_einvoice_kude (endpoints internos, mas abajo).
+    --------------------------------------------------------------------------
+    -- Campanita SYSTEM (admins) — ciclo de suscripcion
+    --------------------------------------------------------------------------
+    PROCEDURE pr_enqueue_billing_admin_notice(
+        pi_org_id    IN NUMBER,
+        pi_event     IN VARCHAR2,
+        pi_period    IN VARCHAR2,
+        pi_title     IN VARCHAR2,
+        pi_body      IN VARCHAR2
+    ) IS
+        v_admin_role NUMBER := 1;
+        v_dedupe     VARCHAR2(200);
+    BEGIN
+        IF NVL(pi_org_id, 0) <= 0 OR TRIM(pi_event) IS NULL THEN
+            RETURN;
+        END IF;
+
+        FOR mem IN (
+            SELECT id_org_member
+              FROM org_member
+             WHERE org_id_organization = pi_org_id
+               AND is_active = 1
+               AND rol_id_role = v_admin_role
+        ) LOOP
+            v_dedupe := SUBSTR(
+                'BILLING:' || pi_org_id || ':' || UPPER(TRIM(pi_event)) || ':' ||
+                NVL(TRIM(pi_period), 'NA') || ':' || mem.id_org_member,
+                1, 200
+            );
+            pkg_aox_inbox_api.pr_enqueue(
+                pi_org_id         => pi_org_id,
+                pi_org_member_id  => mem.id_org_member,
+                pi_ntype          => 'SYSTEM',
+                pi_title          => pi_title,
+                pi_body           => pi_body,
+                pi_action_type    => 'OPEN_URL',
+                pi_action_url     => '/panel/plan',
+                pi_dedupe_key     => v_dedupe
+            );
+        END LOOP;
+    END pr_enqueue_billing_admin_notice;
+
+    PROCEDURE pr_notify_subscription_lifecycle(pi_org_id IN NUMBER) IS
+        v_state        VARCHAR2(20);
+        v_prev_status  org_subscription.status%TYPE;
+        v_trial_end    TIMESTAMP WITH TIME ZONE;
+        v_period_end   TIMESTAMP WITH TIME ZONE;
+        v_grace_end    TIMESTAMP WITH TIME ZONE;
+        v_period_key   VARCHAR2(40);
+        v_now          TIMESTAMP WITH TIME ZONE := systimestamp;
+        v_hours_left   NUMBER;
+    BEGIN
+        IF NVL(pi_org_id, 0) <= 0 THEN
+            RETURN;
+        END IF;
+
+        BEGIN
+            SELECT status, trial_ends_at, current_period_end, grace_ends_at
+              INTO v_prev_status, v_trial_end, v_period_end, v_grace_end
+              FROM org_subscription
+             WHERE org_id_organization = pi_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RETURN;
+        END;
+
+        v_state := pkg_aox_subscription_api.fn_get_subscription_state(pi_org_id);
+
+        -- Trial pronto a vencer (ventana 72h).
+        IF v_state = 'TRIAL' AND v_trial_end IS NOT NULL THEN
+            v_hours_left := (CAST(v_trial_end AS DATE) - CAST(v_now AS DATE)) * 24;
+            IF v_hours_left <= 72 AND v_hours_left > 0 THEN
+                v_period_key := TO_CHAR(v_trial_end AT TIME ZONE 'UTC', 'YYYYMMDD');
+                pr_enqueue_billing_admin_notice(
+                    pi_org_id => pi_org_id,
+                    pi_event  => 'TRIAL_SOON',
+                    pi_period => v_period_key,
+                    pi_title  => 'Tu prueba de Hasel vence pronto',
+                    pi_body   => 'Quedan menos de 3 dias de prueba. Elegi un plan para no perder el acceso.'
+                );
+            END IF;
+        END IF;
+
+        IF v_state = 'TRIAL_EXPIRED' THEN
+            v_period_key := TO_CHAR(NVL(v_trial_end, v_now) AT TIME ZONE 'UTC', 'YYYYMMDD');
+            pr_enqueue_billing_admin_notice(
+                pi_org_id => pi_org_id,
+                pi_event  => 'TRIAL_EXPIRED',
+                pi_period => v_period_key,
+                pi_title  => 'Tu prueba de Hasel venció',
+                pi_body   => 'La prueba gratuita terminó. Activa un plan para seguir usando Hasel.'
+            );
+        ELSIF v_state = 'PAST_DUE' THEN
+            v_period_key := TO_CHAR(NVL(v_period_end, v_now) AT TIME ZONE 'UTC', 'YYYYMMDD');
+            pr_enqueue_billing_admin_notice(
+                pi_org_id => pi_org_id,
+                pi_event  => 'PAST_DUE',
+                pi_period => v_period_key,
+                pi_title  => 'Pago pendiente de tu suscripción',
+                pi_body   => 'No pudimos cobrar el plan. Tenés unos días de gracia antes de pasar a solo lectura.'
+            );
+        ELSIF v_state = 'READ_ONLY' THEN
+            v_period_key := TO_CHAR(NVL(v_grace_end, NVL(v_period_end, v_now)) AT TIME ZONE 'UTC', 'YYYYMMDD');
+            pr_enqueue_billing_admin_notice(
+                pi_org_id => pi_org_id,
+                pi_event  => 'READ_ONLY',
+                pi_period => v_period_key,
+                pi_title  => 'Tu organización está en solo lectura',
+                pi_body   => 'Se venció el periodo de gracia. Regularizá el pago para volver a editar.'
+            );
+        END IF;
+        -- PAYMENT_RECOVERED se dispara desde pr_fulfill_paid_subscription (prev PAST_DUE).
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'SUBSCRIPTION_NOTIFY',
+                pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFY_SUBSCRIPTION_LIFECYCLE',
+                pi_org_id          => pi_org_id,
+                pi_status          => 'ERROR',
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE
+            );
+    END pr_notify_subscription_lifecycle;
+
+    -- Compat: alias interno usado por webhook/credito. Solo encola (sin COMMIT/HTTP).
     PROCEDURE pr_notificar_emision_fe(pi_invoice_id IN NUMBER) IS
-        v_org_id          NUMBER;
-        v_desc            org_subscription_invoice.description%TYPE;
-        v_amount          org_subscription_invoice.amount%TYPE;
-        v_currency        org_subscription_invoice.currency%TYPE;
-        v_billing_name    org_billing_profile.billing_name%TYPE;
-        v_doc_type        org_billing_profile.billing_doc_type%TYPE;
-        v_doc_number      org_billing_profile.billing_doc_number%TYPE;
-        v_billing_email   org_billing_profile.billing_email%TYPE;
-        v_webhook_url     VARCHAR2(500);
-        v_service_token   VARCHAR2(200);
-        v_establecimiento VARCHAR2(10);
-        v_punto           VARCHAR2(10);
-        v_payload         json_object_t := json_object_t();
-        v_receptor        json_object_t := json_object_t();
-        v_datos_op        json_object_t := json_object_t();
-        v_response        CLOB;
-        v_status_code     NUMBER;
+    BEGIN
+        pr_enqueue_einvoice_dispatch(pi_invoice_id);
+    END pr_notificar_emision_fe;
+
+    -- Encola la emision FE de forma atomica. Sin COMMIT ni llamada HTTP.
+    -- Solo reclama invoices PAID en NONE/FAILED sin CDC (protege estados terminales).
+    PROCEDURE pr_enqueue_einvoice_dispatch(pi_invoice_id IN NUMBER) IS
+        v_org_id   NUMBER;
+        v_amount   NUMBER;
+        v_status   VARCHAR2(20);
+        v_inv_stat VARCHAR2(20);
+        v_claimed  NUMBER := 0;
     BEGIN
         BEGIN
-            -- Se factura el valor real del servicio (gross_amount), no el "amount"
-            -- neto efectivamente cobrado en Gs: cuando se cubre con saldo a favor
-            -- (credit_applied), amount puede ser 0 pero igual se presto el servicio.
-            SELECT org_id_organization, description, NVL(gross_amount, amount), currency
-              INTO v_org_id, v_desc, v_amount, v_currency
+            SELECT org_id_organization, NVL(gross_amount, amount), status, NVL(einvoice_status, 'NONE')
+              INTO v_org_id, v_amount, v_inv_stat, v_status
               FROM org_subscription_invoice
-             WHERE id_invoice = pi_invoice_id;
+             WHERE id_invoice = pi_invoice_id
+             FOR UPDATE OF einvoice_status;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 RETURN;
         END;
 
-        -- Sin valor a facturar (ej. addon gratis $0) no corresponde emitir FE.
-        IF NVL(v_amount, 0) <= 0 THEN
+        IF v_inv_stat <> 'PAID' OR NVL(v_amount, 0) <= 0 THEN
             RETURN;
         END IF;
 
-        BEGIN
-            SELECT billing_name, billing_doc_type, billing_doc_number, billing_email
-              INTO v_billing_name, v_doc_type, v_doc_number, v_billing_email
-              FROM org_billing_profile
-             WHERE org_id_organization = v_org_id;
-        EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                pkg_aox_util.pr_log_api(
-                    pi_api_name      => 'ESIGN_EINVOICE',
-                    pi_process_name  => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
-                    pi_org_id        => v_org_id,
-                    pi_status        => 'SKIPPED',
-                    pi_error_message => 'Org sin org_billing_profile; no se emite FE.',
-                    pi_request_body  => TO_CLOB('invoice_id=' || pi_invoice_id)
-                );
-                RETURN;
-        END;
-
-        IF v_doc_type IS NULL OR v_doc_number IS NULL OR v_billing_email IS NULL THEN
-            pkg_aox_util.pr_log_api(
-                pi_api_name      => 'ESIGN_EINVOICE',
-                pi_process_name  => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
-                pi_org_id        => v_org_id,
-                pi_status        => 'SKIPPED',
-                pi_error_message => 'org_billing_profile incompleto; no se emite FE.',
-                pi_request_body  => TO_CLOB('invoice_id=' || pi_invoice_id)
-            );
+        -- Ya tiene CDC o FE en curso/terminal: no re-encolar.
+        IF v_status NOT IN ('NONE', 'FAILED') THEN
             RETURN;
         END IF;
-
-        v_webhook_url      := fn_get_parameter('ESIGN_WEBHOOK_URL');
-        v_service_token    := fn_get_parameter('ESIGN_CALLBACK_SERVICE_TOKEN');
-        v_establecimiento  := NVL(fn_get_parameter('ESIGN_ESTABLECIMIENTO'), '001');
-        v_punto            := NVL(fn_get_parameter('ESIGN_PUNTO_EXPEDICION'), '001');
-
-        -- Integracion aun no configurada (ej. produccion sin key real todavia):
-        -- no bloquear el pago, solo no emitir.
-        IF v_webhook_url IS NULL OR TRIM(v_webhook_url) IS NULL
-           OR v_service_token IS NULL OR TRIM(v_service_token) IS NULL THEN
-            RETURN;
-        END IF;
-
-        v_datos_op.put('establecimiento', v_establecimiento);
-        v_datos_op.put('punto_expedicion', v_punto);
-
-        v_receptor.put('tipo', LOWER(v_doc_type)); -- 'ci' | 'ruc'
-        v_receptor.put('documento', v_doc_number);
-        v_receptor.put('nombre', v_billing_name);
-        IF v_doc_type = 'RUC' THEN
-            v_receptor.put('dv', fn_calcular_dv_ruc(v_doc_number));
-            v_receptor.put('tipoContribuyente', 2); -- juridica (Hasel factura a la organizacion)
-        END IF;
-
-        v_payload.put('invoice_id', pi_invoice_id);
-        v_payload.put('datos_operacion', v_datos_op);
-        v_payload.put('receptor', v_receptor);
-        v_payload.put('moneda', NVL(v_currency, 'PYG'));
-        v_payload.put('descripcion', NVL(v_desc, 'Suscripcion Hasel'));
-        v_payload.put('monto', v_amount);
 
         UPDATE /*+ no_parallel */ org_subscription_invoice
-           SET einvoice_status = 'PENDING'
+           SET einvoice_status = 'PENDING',
+               einvoice_error  = NULL
          WHERE id_invoice = pi_invoice_id
-           AND NVL(einvoice_status, 'NONE') IN ('NONE', 'FAILED');
-        COMMIT;
+           AND NVL(einvoice_status, 'NONE') IN ('NONE', 'FAILED')
+           AND einvoice_cdc IS NULL;
+
+        v_claimed := SQL%ROWCOUNT;
+        IF v_claimed = 0 THEN
+            RETURN;
+        END IF;
 
         BEGIN
-            apex_web_service.g_request_headers.delete();
-            apex_web_service.g_request_headers(1).name  := 'Content-Type';
-            apex_web_service.g_request_headers(1).value := 'application/json';
-            apex_web_service.g_request_headers(2).name  := 'X-Service-Token';
-            apex_web_service.g_request_headers(2).value := v_service_token;
-
-            v_response := apex_web_service.make_rest_request(
-                p_url         => v_webhook_url,
-                p_http_method => 'POST',
-                p_body        => v_payload.to_clob()
-            );
-            v_status_code := apex_web_service.g_status_code;
-
-            pkg_aox_util.pr_log_api(
-                pi_api_name      => 'ESIGN_EINVOICE',
-                pi_process_name  => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
-                pi_http_method   => 'POST',
-                pi_endpoint      => v_webhook_url,
-                pi_org_id        => v_org_id,
-                pi_status        => CASE WHEN v_status_code BETWEEN 200 AND 299 THEN 'SUCCESS' ELSE 'ERROR' END,
-                pi_status_code   => v_status_code,
-                pi_request_body  => v_payload.to_clob(),
-                pi_response_body => v_response
+            INSERT INTO subscription_einvoice_outbox (
+                invoice_id, org_id_organization, status, emission_key
+            ) VALUES (
+                pi_invoice_id, v_org_id, 'PENDING', 'INV-' || TO_CHAR(pi_invoice_id)
             );
         EXCEPTION
-            WHEN OTHERS THEN
-                pkg_aox_util.pr_log_api(
-                    pi_api_name        => 'ESIGN_EINVOICE',
-                    pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
-                    pi_http_method     => 'POST',
-                    pi_endpoint        => v_webhook_url,
-                    pi_org_id          => v_org_id,
-                    pi_status          => 'ERROR',
-                    pi_error_code      => SQLCODE,
-                    pi_error_message   => SQLERRM,
-                    pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
-                    pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
-                    pi_request_body    => v_payload.to_clob()
-                );
+            WHEN DUP_VAL_ON_INDEX THEN
+                UPDATE subscription_einvoice_outbox
+                   SET status = 'PENDING',
+                       attempts = 0,
+                       last_error = NULL,
+                       processed_at = NULL,
+                       lease_owner = NULL,
+                       lease_until = NULL,
+                       processing_started_at = NULL,
+                       emission_key = NVL(emission_key, 'INV-' || TO_CHAR(pi_invoice_id))
+                 WHERE invoice_id = pi_invoice_id
+                   AND status IN ('FAILED', 'DONE')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM org_subscription_invoice i
+                        WHERE i.id_invoice = pi_invoice_id
+                          AND i.einvoice_cdc IS NOT NULL
+                   );
         END;
     EXCEPTION
         WHEN OTHERS THEN
-            -- Nunca debe romper el flujo de pago/checkout que la invoco.
             pkg_aox_util.pr_log_api(
                 pi_api_name        => 'ESIGN_EINVOICE',
-                pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_NOTIFICAR_EMISION_FE',
+                pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_ENQUEUE_EINVOICE_DISPATCH',
                 pi_status          => 'ERROR',
                 pi_error_code      => SQLCODE,
                 pi_error_message   => SQLERRM,
@@ -449,25 +532,400 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                 pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
                 pi_request_body    => TO_CLOB('invoice_id=' || pi_invoice_id)
             );
-    END pr_notificar_emision_fe;
+    END pr_enqueue_einvoice_dispatch;
 
-    -- Baja el KuDE (PDF) publico y manda el mail de factura al billing_email
-    -- con el PDF adjunto. Se invoca desde pr_save_einvoice_kude una vez que
-    -- Astro confirma que el KuDE ya esta listo.
+    FUNCTION fn_build_einvoice_payload(pi_invoice_id IN NUMBER) RETURN CLOB IS
+        v_org_id          NUMBER;
+        v_desc            org_subscription_invoice.description%TYPE;
+        v_amount          org_subscription_invoice.amount%TYPE;
+        v_currency        org_subscription_invoice.currency%TYPE;
+        v_provider        org_subscription_invoice.payment_provider%TYPE;
+        v_billing_name    org_billing_profile.billing_name%TYPE;
+        v_doc_type        org_billing_profile.billing_doc_type%TYPE;
+        v_doc_number      org_billing_profile.billing_doc_number%TYPE;
+        v_billing_email   org_billing_profile.billing_email%TYPE;
+        v_establecimiento VARCHAR2(10);
+        v_punto           VARCHAR2(10);
+        v_emission_key    VARCHAR2(64);
+        v_medio_pago      NUMBER;
+        v_des_medio       VARCHAR2(60);
+        v_tipo_contrib    NUMBER;
+        v_payload         json_object_t := json_object_t();
+        v_receptor        json_object_t := json_object_t();
+        v_datos_op        json_object_t := json_object_t();
+    BEGIN
+        SELECT org_id_organization, description, NVL(gross_amount, amount), currency, payment_provider
+          INTO v_org_id, v_desc, v_amount, v_currency, v_provider
+          FROM org_subscription_invoice
+         WHERE id_invoice = pi_invoice_id;
+
+        SELECT billing_name, billing_doc_type, billing_doc_number, billing_email
+          INTO v_billing_name, v_doc_type, v_doc_number, v_billing_email
+          FROM org_billing_profile
+         WHERE org_id_organization = v_org_id;
+
+        IF v_doc_type IS NULL OR v_doc_number IS NULL OR v_billing_email IS NULL THEN
+            RETURN NULL;
+        END IF;
+
+        BEGIN
+            SELECT NVL(emission_key, 'INV-' || TO_CHAR(pi_invoice_id))
+              INTO v_emission_key
+              FROM subscription_einvoice_outbox
+             WHERE invoice_id = pi_invoice_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_emission_key := 'INV-' || TO_CHAR(pi_invoice_id);
+        END;
+
+        v_establecimiento := NVL(fn_get_parameter('ESIGN_ESTABLECIMIENTO'), '001');
+        v_punto           := NVL(fn_get_parameter('ESIGN_PUNTO_EXPEDICION'), '001');
+
+        -- Medio de pago segun proveedor real (no forzar tarjeta en pagos por saldo).
+        CASE LOWER(NVL(v_provider, ''))
+            WHEN 'credit' THEN
+                v_medio_pago := 13; -- Compensacion
+                v_des_medio  := 'Compensación';
+            WHEN 'pagopar' THEN
+                v_medio_pago := 3;
+                v_des_medio  := 'Tarjeta de crédito';
+            WHEN 'bancard' THEN
+                v_medio_pago := 3;
+                v_des_medio  := 'Tarjeta de crédito';
+            WHEN 'qr' THEN
+                v_medio_pago := 7;
+                v_des_medio  := 'Billetera electrónica';
+            ELSE
+                IF NVL(v_provider, '') IS NOT NULL THEN
+                    v_medio_pago := 99;
+                    v_des_medio  := 'Otro';
+                ELSE
+                    v_medio_pago := 3;
+                    v_des_medio  := 'Tarjeta de crédito';
+                END IF;
+        END CASE;
+
+        v_datos_op.put('establecimiento', v_establecimiento);
+        v_datos_op.put('punto_expedicion', v_punto);
+
+        v_receptor.put('tipo', LOWER(v_doc_type));
+        v_receptor.put('documento', v_doc_number);
+        v_receptor.put('nombre', v_billing_name);
+        IF UPPER(v_doc_type) = 'RUC' THEN
+            v_receptor.put('dv', fn_calcular_dv_ruc(v_doc_number));
+            -- Persona juridica si el nombre sugiere razon social; si no, fisica.
+            IF REGEXP_LIKE(UPPER(NVL(v_billing_name, '')),
+                           '(S\.?\s*R\.?\s*L\.?)|(S\.?\s*A\.?)|EAS|LTDA|CIA\.?|COOP|SOCIEDAD') THEN
+                v_tipo_contrib := 2;
+            ELSE
+                v_tipo_contrib := 1;
+            END IF;
+            v_receptor.put('tipoContribuyente', v_tipo_contrib);
+            v_receptor.put('tipoOperacion', 1); -- B2B
+        END IF;
+
+        v_payload.put('invoice_id', pi_invoice_id);
+        v_payload.put('emission_key', v_emission_key);
+        v_payload.put('datos_operacion', v_datos_op);
+        v_payload.put('receptor', v_receptor);
+        v_payload.put('moneda', NVL(v_currency, 'PYG'));
+        v_payload.put('descripcion', NVL(v_desc, 'Suscripcion Hasel'));
+        v_payload.put('monto', v_amount);
+        v_payload.put('tipoTransaccion', 2);
+        v_payload.put('desTipoTransaccion', 'Prestación de servicios');
+        v_payload.put('indPres', 3);
+        v_payload.put('desIndPres', 'Operación electrónica (venta a distancia, internet, etc.)');
+        v_payload.put('condicion', 'contado');
+        v_payload.put('medioPago', v_medio_pago);
+        v_payload.put('desMedioPago', v_des_medio);
+
+        RETURN v_payload.to_clob();
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN NULL;
+    END fn_build_einvoice_payload;
+
+    PROCEDURE pr_dispatch_einvoice_outbox(
+        pi_limit  IN NUMBER DEFAULT 20,
+        pi_org_id IN NUMBER DEFAULT NULL
+    ) IS
+        v_webhook_url   VARCHAR2(500) := fn_get_parameter('ESIGN_WEBHOOK_URL');
+        v_service_token VARCHAR2(200) := fn_get_parameter('ESIGN_CALLBACK_SERVICE_TOKEN');
+        v_payload       CLOB;
+        v_response      CLOB;
+        v_status_code   NUMBER;
+        v_limit         PLS_INTEGER := LEAST(GREATEST(NVL(pi_limit, 20), 1), 100);
+        v_lease_minutes NUMBER := 5;
+        v_max_attempts  NUMBER := 5;
+        v_worker_id     VARCHAR2(64) := SUBSTR('JOB-' || TO_CHAR(systimestamp, 'YYYYMMDDHH24MISSFF') || '-' || DBMS_SESSION.UNIQUE_SESSION_ID, 1, 64);
+        TYPE t_ids IS TABLE OF NUMBER;
+        v_ids           t_ids;
+        v_id_outbox     NUMBER;
+        v_invoice_id    NUMBER;
+        v_org_id        NUMBER;
+        v_attempts      NUMBER;
+        v_emission_key  VARCHAR2(64);
+        v_cdc           VARCHAR2(44);
+        v_estatus       VARCHAR2(20);
+        v_resp_json     json_object_t;
+        v_resp_cdc      VARCHAR2(44);
+        v_resp_data     json_object_t;
+        v_terminal_fail BOOLEAN;
+    BEGIN
+        IF v_webhook_url IS NULL OR TRIM(v_webhook_url) IS NULL
+           OR v_service_token IS NULL OR TRIM(v_service_token) IS NULL THEN
+            RETURN;
+        END IF;
+
+        -- Reclamo atomico: PENDING o PROCESSING con lease expirado.
+        SELECT id_outbox
+          BULK COLLECT INTO v_ids
+          FROM subscription_einvoice_outbox
+         WHERE (
+                   status = 'PENDING'
+                OR (status = 'PROCESSING' AND (lease_until IS NULL OR lease_until < systimestamp))
+               )
+           AND (pi_org_id IS NULL OR org_id_organization = pi_org_id)
+           AND ROWNUM <= v_limit
+         FOR UPDATE SKIP LOCKED;
+
+        FOR i IN 1 .. v_ids.COUNT LOOP
+            v_id_outbox := v_ids(i);
+            v_resp_cdc := NULL;
+            BEGIN
+                SELECT invoice_id, org_id_organization, attempts,
+                       NVL(emission_key, 'INV-' || TO_CHAR(invoice_id))
+                  INTO v_invoice_id, v_org_id, v_attempts, v_emission_key
+                  FROM subscription_einvoice_outbox
+                 WHERE id_outbox = v_id_outbox;
+
+                UPDATE subscription_einvoice_outbox
+                   SET status = 'PROCESSING',
+                       attempts = NVL(attempts, 0) + 1,
+                       lease_owner = v_worker_id,
+                       lease_until = systimestamp + NUMTODSINTERVAL(v_lease_minutes, 'MINUTE'),
+                       processing_started_at = systimestamp,
+                       emission_key = NVL(emission_key, v_emission_key)
+                 WHERE id_outbox = v_id_outbox;
+                COMMIT;
+
+                SELECT einvoice_cdc, einvoice_status
+                  INTO v_cdc, v_estatus
+                  FROM org_subscription_invoice
+                 WHERE id_invoice = v_invoice_id;
+
+                -- Solo DONE con resultado terminal verificable en Oracle.
+                IF v_cdc IS NOT NULL OR v_estatus IN ('SENT_PENDING_KUDE', 'SENT') THEN
+                    UPDATE subscription_einvoice_outbox
+                       SET status = 'DONE',
+                           processed_at = systimestamp,
+                           lease_owner = NULL,
+                           lease_until = NULL,
+                           last_error = NULL
+                     WHERE id_outbox = v_id_outbox;
+                    COMMIT;
+                    CONTINUE;
+                END IF;
+
+                v_payload := fn_build_einvoice_payload(v_invoice_id);
+                IF v_payload IS NULL THEN
+                    UPDATE subscription_einvoice_outbox
+                       SET status = 'FAILED',
+                           last_error = 'Sin billing profile o datos incompletos',
+                           processed_at = systimestamp,
+                           lease_owner = NULL,
+                           lease_until = NULL
+                     WHERE id_outbox = v_id_outbox;
+                    UPDATE /*+ no_parallel */ org_subscription_invoice
+                       SET einvoice_status = 'FAILED',
+                           einvoice_error  = 'Sin billing profile o datos incompletos'
+                     WHERE id_invoice = v_invoice_id
+                       AND einvoice_cdc IS NULL
+                       AND NVL(einvoice_status, 'NONE') IN ('NONE', 'PENDING', 'FAILED');
+                    COMMIT;
+                    CONTINUE;
+                END IF;
+
+                apex_web_service.g_request_headers.delete();
+                apex_web_service.g_request_headers(1).name  := 'Content-Type';
+                apex_web_service.g_request_headers(1).value := 'application/json';
+                apex_web_service.g_request_headers(2).name  := 'X-Service-Token';
+                apex_web_service.g_request_headers(2).value := v_service_token;
+                apex_web_service.g_request_headers(3).name  := 'Idempotency-Key';
+                apex_web_service.g_request_headers(3).value := v_emission_key;
+
+                v_response := apex_web_service.make_rest_request(
+                    p_url         => v_webhook_url,
+                    p_http_method => 'POST',
+                    p_body        => v_payload
+                );
+                v_status_code := apex_web_service.g_status_code;
+
+                pkg_aox_util.pr_log_api(
+                    pi_api_name      => 'ESIGN_EINVOICE',
+                    pi_process_name  => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_DISPATCH_EINVOICE_OUTBOX',
+                    pi_http_method   => 'POST',
+                    pi_endpoint      => v_webhook_url,
+                    pi_org_id        => v_org_id,
+                    pi_status        => CASE WHEN v_status_code BETWEEN 200 AND 299 THEN 'SUCCESS' ELSE 'ERROR' END,
+                    pi_status_code   => v_status_code,
+                    pi_request_body  => v_payload,
+                    pi_response_body => v_response
+                );
+
+                -- Extraer CDC del body Astro si vino (no confiar solo en HTTP 200).
+                BEGIN
+                    v_resp_json := json_object_t.parse(v_response);
+                    IF v_resp_json.has('data') AND NOT v_resp_json.get('data').is_null THEN
+                        v_resp_data := TREAT(v_resp_json.get('data') AS json_object_t);
+                        v_resp_cdc := v_resp_data.get_string('cdc');
+                    END IF;
+                    IF v_resp_cdc IS NULL AND v_resp_json.has('cdc') THEN
+                        v_resp_cdc := v_resp_json.get_string('cdc');
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_resp_cdc := NULL;
+                END;
+
+                IF v_resp_cdc IS NOT NULL THEN
+                    -- Persistencia best-effort si el callback ORDS aun no corrio.
+                    UPDATE /*+ no_parallel */ org_subscription_invoice
+                       SET einvoice_cdc    = NVL(einvoice_cdc, v_resp_cdc),
+                           einvoice_status = CASE
+                                               WHEN einvoice_status IN ('SENT_PENDING_KUDE', 'SENT') THEN einvoice_status
+                                               ELSE 'SENT_PENDING_KUDE'
+                                             END,
+                           einvoice_error  = NULL
+                     WHERE id_invoice = v_invoice_id
+                       AND (einvoice_cdc IS NULL OR einvoice_cdc = v_resp_cdc);
+
+                    UPDATE subscription_einvoice_outbox
+                       SET status = 'DONE',
+                           processed_at = systimestamp,
+                           last_error = NULL,
+                           lease_owner = NULL,
+                           lease_until = NULL
+                     WHERE id_outbox = v_id_outbox;
+                ELSIF v_status_code BETWEEN 200 AND 299 THEN
+                    -- 2xx sin CDC: NO cerrar DONE (evita PENDING muerto). Reintento con lease.
+                    UPDATE subscription_einvoice_outbox
+                       SET status = 'PENDING',
+                           last_error = SUBSTR('HTTP ' || v_status_code || ' sin CDC verificable', 1, 500),
+                           lease_owner = NULL,
+                           lease_until = NULL,
+                           processed_at = NULL
+                     WHERE id_outbox = v_id_outbox;
+                ELSE
+                    v_terminal_fail := (NVL(v_attempts, 0) + 1 >= v_max_attempts)
+                                       OR (v_status_code BETWEEN 400 AND 499
+                                           AND v_status_code NOT IN (408, 429));
+                    IF v_terminal_fail THEN
+                        UPDATE subscription_einvoice_outbox
+                           SET status = 'FAILED',
+                               last_error = SUBSTR('HTTP ' || v_status_code, 1, 500),
+                               processed_at = systimestamp,
+                               lease_owner = NULL,
+                               lease_until = NULL
+                         WHERE id_outbox = v_id_outbox;
+                        UPDATE /*+ no_parallel */ org_subscription_invoice
+                           SET einvoice_status = 'FAILED',
+                               einvoice_error  = SUBSTR('HTTP ' || v_status_code || ' emision FE', 1, 500)
+                         WHERE id_invoice = v_invoice_id
+                           AND einvoice_cdc IS NULL
+                           AND NVL(einvoice_status, 'NONE') IN ('NONE', 'PENDING', 'FAILED');
+                    ELSE
+                        UPDATE subscription_einvoice_outbox
+                           SET status = 'PENDING',
+                               last_error = SUBSTR('HTTP ' || v_status_code, 1, 500),
+                               lease_owner = NULL,
+                               lease_until = NULL,
+                               processed_at = NULL
+                         WHERE id_outbox = v_id_outbox;
+                    END IF;
+                END IF;
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DECLARE
+                        v_err VARCHAR2(500) := SUBSTR(SQLERRM, 1, 500);
+                    BEGIN
+                        ROLLBACK;
+                        IF NVL(v_attempts, 0) + 1 >= v_max_attempts THEN
+                            UPDATE subscription_einvoice_outbox
+                               SET status = 'FAILED',
+                                   last_error = v_err,
+                                   processed_at = systimestamp,
+                                   lease_owner = NULL,
+                                   lease_until = NULL
+                             WHERE id_outbox = v_id_outbox;
+                            UPDATE /*+ no_parallel */ org_subscription_invoice
+                               SET einvoice_status = 'FAILED',
+                                   einvoice_error  = v_err
+                             WHERE id_invoice = v_invoice_id
+                               AND einvoice_cdc IS NULL
+                               AND NVL(einvoice_status, 'NONE') IN ('NONE', 'PENDING', 'FAILED');
+                        ELSE
+                            UPDATE subscription_einvoice_outbox
+                               SET status = 'PENDING',
+                                   last_error = v_err,
+                                   lease_owner = NULL,
+                                   lease_until = NULL
+                             WHERE id_outbox = v_id_outbox;
+                        END IF;
+                        COMMIT;
+                        pkg_aox_util.pr_log_api(
+                            pi_api_name        => 'ESIGN_EINVOICE',
+                            pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_DISPATCH_EINVOICE_OUTBOX',
+                            pi_org_id          => v_org_id,
+                            pi_status          => 'ERROR',
+                            pi_error_code      => SQLCODE,
+                            pi_error_message   => v_err,
+                            pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                            pi_request_body    => TO_CLOB('invoice_id=' || v_invoice_id)
+                        );
+                    END;
+            END;
+        END LOOP;
+    END pr_dispatch_einvoice_outbox;
+
+    -- Baja el KuDE (PDF) y manda mail FACTURASUSCRIPCIONV2. Fallo de email NO marca FE como FAILED.
     PROCEDURE pr_send_einvoice_email(pi_invoice_id IN NUMBER) IS
         v_org_id         NUMBER;
         v_cdc            org_subscription_invoice.einvoice_cdc%TYPE;
         v_kude_url       org_subscription_invoice.einvoice_kude_url%TYPE;
+        v_email_status   VARCHAR2(20);
         v_billing_name   org_billing_profile.billing_name%TYPE;
         v_billing_email  org_billing_profile.billing_email%TYPE;
         v_pdf_blob       BLOB;
         v_mail_id        NUMBER;
         v_apex_session_created BOOLEAN := FALSE;
         v_error_message  VARCHAR2(4000);
+        v_claimed        NUMBER := 0;
     BEGIN
+        -- Claim atomico: evita emails duplicados en reintentos concurrentes.
+        -- PENDING caducado se recupera via pr_retry_pending_einvoice_emails (reset a FAILED).
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_email_status = 'PENDING',
+               einvoice_email_attempts = NVL(einvoice_email_attempts, 0) + 1,
+               einvoice_email_error = NULL
+         WHERE id_invoice = pi_invoice_id
+           AND einvoice_kude_url IS NOT NULL
+           AND einvoice_cdc IS NOT NULL
+           AND NVL(einvoice_email_status, 'NONE') IN ('NONE', 'FAILED')
+           AND einvoice_sent_at IS NULL;
+
+        v_claimed := SQL%ROWCOUNT;
+        IF v_claimed = 0 THEN
+            RETURN;
+        END IF;
+        COMMIT;
+
         SELECT i.org_id_organization, i.einvoice_cdc, i.einvoice_kude_url,
+               NVL(i.einvoice_email_status, 'NONE'),
                p.billing_name, p.billing_email
-          INTO v_org_id, v_cdc, v_kude_url, v_billing_name, v_billing_email
+          INTO v_org_id, v_cdc, v_kude_url, v_email_status,
+               v_billing_name, v_billing_email
           FROM org_subscription_invoice i
           JOIN org_billing_profile p ON p.org_id_organization = i.org_id_organization
          WHERE i.id_invoice = pi_invoice_id;
@@ -497,7 +955,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_mail_id := apex_mail.send(
             p_to                 => TRIM(v_billing_email),
             p_from               => NVL(fn_get_parameter('MAIL_FROM_ADDRESS'), 'noreply@hasel.app'),
-            p_template_static_id => 'FACTURASUSCRIPCION',
+            p_template_static_id => 'FACTURASUSCRIPCIONV2',
             p_placeholders       => '{' ||
                                     '"NOMBRE": "' || fn_json_escape(v_billing_name) || '",' ||
                                     '"CDC": "' || fn_json_escape(v_cdc) || '"' ||
@@ -514,8 +972,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         apex_mail.push_queue;
 
         UPDATE /*+ no_parallel */ org_subscription_invoice
-           SET einvoice_status = 'SENT',
-               einvoice_sent_at = systimestamp
+           SET einvoice_status       = 'SENT',
+               einvoice_sent_at      = systimestamp,
+               einvoice_email_status = 'SENT',
+               einvoice_email_error  = NULL
          WHERE id_invoice = pi_invoice_id;
         COMMIT;
 
@@ -530,10 +990,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                     WHEN OTHERS THEN NULL;
                 END;
             END IF;
+            -- Fallo de email: NO tocar einvoice_status FE/KuDE ni permitir nueva emision.
             UPDATE /*+ no_parallel */ org_subscription_invoice
-               SET einvoice_status = 'FAILED',
-                   einvoice_error  = SUBSTR(v_error_message, 1, 500)
-             WHERE id_invoice = pi_invoice_id;
+               SET einvoice_email_status = 'FAILED',
+                   einvoice_email_error  = SUBSTR(v_error_message, 1, 500)
+             WHERE id_invoice = pi_invoice_id
+               AND NVL(einvoice_email_status, 'NONE') <> 'SENT';
             COMMIT;
             pkg_aox_util.pr_log_api(
                 pi_api_name        => 'ESIGN_EINVOICE',
@@ -546,6 +1008,46 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                 pi_request_body    => TO_CLOB('invoice_id=' || pi_invoice_id)
             );
     END pr_send_einvoice_email;
+
+    PROCEDURE pr_retry_pending_einvoice_emails(
+        pi_limit  IN NUMBER DEFAULT 20,
+        pi_org_id IN NUMBER DEFAULT NULL
+    ) IS
+        v_limit PLS_INTEGER := LEAST(GREATEST(NVL(pi_limit, 20), 1), 100);
+        v_max_attempts NUMBER := 5;
+    BEGIN
+        -- Recuperar PENDING abandonados (crash entre claim y SENT) sin reabrir FE.
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_email_status = 'FAILED',
+               einvoice_email_error  = NVL(einvoice_email_error, 'PENDING caducado; reintento automatico')
+         WHERE einvoice_email_status = 'PENDING'
+           AND einvoice_sent_at IS NULL
+           AND einvoice_cdc IS NOT NULL
+           AND einvoice_kude_url IS NOT NULL
+           AND NVL(einvoice_email_attempts, 0) >= 1
+           AND (pi_org_id IS NULL OR org_id_organization = pi_org_id);
+
+        FOR rec IN (
+            SELECT id_invoice
+              FROM org_subscription_invoice
+             WHERE einvoice_kude_url IS NOT NULL
+               AND einvoice_cdc IS NOT NULL
+               AND einvoice_sent_at IS NULL
+               AND NVL(einvoice_email_status, 'NONE') IN ('NONE', 'FAILED')
+               AND NVL(einvoice_email_attempts, 0) < v_max_attempts
+               AND einvoice_status IN ('SENT_PENDING_KUDE', 'SENT')
+               AND (pi_org_id IS NULL OR org_id_organization = pi_org_id)
+             ORDER BY id_invoice
+             FETCH FIRST v_limit ROWS ONLY
+        ) LOOP
+            BEGIN
+                pr_send_einvoice_email(rec.id_invoice);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+        END LOOP;
+    END pr_retry_pending_einvoice_emails;
 
     FUNCTION fn_http_post_json(pi_url IN VARCHAR2, pi_body IN CLOB) RETURN CLOB IS
         v_response CLOB;
@@ -1120,7 +1622,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         pi_org_id  IN NUMBER,
         pi_plan_id IN NUMBER
     ) IS
+        v_prev_status org_subscription.status%TYPE;
     BEGIN
+        BEGIN
+            SELECT status INTO v_prev_status
+              FROM org_subscription
+             WHERE org_id_organization = pi_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_prev_status := NULL;
+        END;
+
         UPDATE /*+ no_parallel */ org_subscription
            SET pln_id_plan            = pi_plan_id,
                status                 = 'ACTIVE',
@@ -1136,6 +1648,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                updated_at             = systimestamp
          WHERE org_id_organization = pi_org_id;
         pr_refresh_storage_limit(pi_org_id);
+
+        IF v_prev_status = 'PAST_DUE' THEN
+            pr_enqueue_billing_admin_notice(
+                pi_org_id => pi_org_id,
+                pi_event  => 'PAYMENT_RECOVERED',
+                pi_period => TO_CHAR(systimestamp AT TIME ZONE 'UTC', 'YYYYMMDDHH24MI'),
+                pi_title  => 'Pago recuperado',
+                pi_body   => 'El cobro de tu suscripción se confirmó. Ya estás al día.'
+            );
+        END IF;
     END pr_fulfill_paid_subscription;
 
     PROCEDURE pr_fulfill_paid_addon(
@@ -1445,9 +1967,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             ELSIF v_invoice_type = 'STORAGE_ADDON' THEN
                 pr_fulfill_paid_addon(pi_org_id, v_addon_id);
             END IF;
-            COMMIT;
 
-            pr_notificar_emision_fe(po_invoice_id);
+            pr_enqueue_einvoice_dispatch(po_invoice_id);
+            COMMIT;
+            pr_dispatch_einvoice_outbox(5);
+
             po_hash := NULL;
             lp_idem_complete(po_invoice_id, po_hash);
             RETURN;
@@ -2502,8 +3026,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                SET status = 'PAID', paid_at = systimestamp
              WHERE id_invoice = v_invoice_id;
 
-            pr_notificar_emision_fe(v_invoice_id);
-
             -- Consumir credito declarado en la factura (idempotente via ledger).
             pr_consume_credit(v_org_id, NVL(v_credit_applied, 0), v_invoice_id);
 
@@ -2528,6 +3050,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                 END IF;
                 pr_fulfill_paid_addon(v_org_id, v_addon_id);
             END IF;
+
+            -- Encolar FE en la misma transaccion del PAID; despachar HTTP despues del COMMIT.
+            pr_enqueue_einvoice_dispatch(v_invoice_id);
         ELSE
             UPDATE /*+ no_parallel */ org_subscription_invoice
                SET status = 'FAILED'
@@ -2537,6 +3062,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         COMMIT;
+
+        IF v_pagado THEN
+            BEGIN
+                pr_dispatch_einvoice_outbox(5);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+        END IF;
 
         v_echo.append(v_result_obj);
         po_status_code := 200;
@@ -2893,7 +3427,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_plan_code  VARCHAR2(30);
         v_auto_renew NUMBER(1,0);
         v_max_retry  NUMBER := NVL(TO_NUMBER(fn_get_parameter('SUBSCRIPTION_MAX_CHARGE_RETRIES')), 4);
+        TYPE t_org_set IS TABLE OF BOOLEAN INDEX BY PLS_INTEGER;
+        v_touched    t_org_set;
+        v_org_id     NUMBER;
     BEGIN
+        -- Guardrail de ambiente: en DEV (BILLING_ENABLED=0) el job global no cobra.
+        IF NVL(fn_get_parameter('BILLING_ENABLED'), '0') <> '1' THEN
+            pkg_aox_util.pr_log_api(
+                pi_api_name => 'SUBSCRIPTION_BILLING_CYCLE',
+                pi_process_name => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_RUN_BILLING_CYCLE',
+                pi_http_method => 'JOB',
+                pi_endpoint => 'HASEL_SUBSCRIPTION_BILLING_CYCLE',
+                pi_status => 'SKIPPED',
+                pi_error_message => 'BILLING_ENABLED!=1'
+            );
+            RETURN;
+        END IF;
+
         -- 1) Aplicar pending vencidos (incluye Terminar→FREE aunque auto_renew=0).
         FOR rec IN (
             SELECT s.org_id_organization AS org_id
@@ -2906,6 +3456,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         ) LOOP
             BEGIN
                 pr_apply_due_pending_plan(rec.org_id);
+                v_touched(rec.org_id) := TRUE;
                 COMMIT;
             EXCEPTION
                 WHEN OTHERS THEN
@@ -2942,7 +3493,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                     CONTINUE;
                 END IF;
 
-                -- Contabilizar el intento (dunning). El webhook / PAID por credito lo resetea.
                 UPDATE /*+ no_parallel */ org_subscription
                    SET charge_retry_count = NVL(charge_retry_count, 0) + 1,
                        last_charge_at     = systimestamp,
@@ -2950,9 +3500,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                  WHERE org_id_organization = rec.org_id;
                 COMMIT;
 
-                -- Un solo cargo: plan efectivo (BASE o PREMIUM) + addons ACTIVE, menos account_balance.
-                -- Key deterministica org+dia: si el job corre dos veces el mismo dia (overlap/retry
-                -- del scheduler) no duplica el cobro del ciclo.
                 pr_charge_target(
                     pi_org_id           => rec.org_id,
                     pi_target_type      => 'CONSOLIDATED',
@@ -2962,6 +3509,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                     po_hash             => v_hash,
                     pi_idempotency_key  => 'CYCLE:' || rec.org_id || ':' || TO_CHAR(systimestamp, 'YYYYMMDD')
                 );
+                v_touched(rec.org_id) := TRUE;
             EXCEPTION
                 WHEN OTHERS THEN
                     ROLLBACK;
@@ -2974,7 +3522,219 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                     );
             END;
         END LOOP;
+
+        -- Orgs con lifecycle inminente (trial/gracia) tambien se consideran tocadas.
+        FOR rec IN (
+            SELECT s.org_id_organization AS org_id
+              FROM org_subscription s
+             WHERE NVL(s.billing_exempt, 0) = 0
+               AND NVL(s.is_founder, 0) = 0
+               AND (
+                       (s.trial_ends_at IS NOT NULL AND s.trial_ends_at <= systimestamp + NUMTODSINTERVAL(3, 'DAY'))
+                    OR (s.grace_ends_at IS NOT NULL AND s.grace_ends_at <= systimestamp + NUMTODSINTERVAL(3, 'DAY'))
+                    OR s.status IN ('PAST_DUE', 'READ_ONLY', 'CANCELED')
+                   )
+        ) LOOP
+            v_touched(rec.org_id) := TRUE;
+        END LOOP;
+
+        -- 3) Notificaciones solo para orgs tocadas.
+        v_org_id := v_touched.FIRST;
+        WHILE v_org_id IS NOT NULL LOOP
+            BEGIN
+                pr_notify_subscription_lifecycle(v_org_id);
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    ROLLBACK;
+            END;
+            v_org_id := v_touched.NEXT(v_org_id);
+        END LOOP;
+
+        -- 4) Outbox FE + emails (global: todas las filas pendientes; el ciclo de fixture filtra).
+        BEGIN
+            pr_dispatch_einvoice_outbox(50, NULL);
+            pr_retry_pending_einvoice_emails(50, NULL);
+        EXCEPTION
+            WHEN OTHERS THEN
+                NULL;
+        END;
     END pr_run_billing_cycle;
+
+    PROCEDURE pr_run_billing_cycle_for_org(pi_org_id IN NUMBER) IS
+        v_invoice_id NUMBER;
+        v_hash       VARCHAR2(128);
+        v_plan_code  VARCHAR2(30);
+        v_auto_renew NUMBER(1,0);
+        v_max_retry  NUMBER := NVL(TO_NUMBER(fn_get_parameter('SUBSCRIPTION_MAX_CHARGE_RETRIES')), 4);
+        v_sub_id     NUMBER;
+        v_locked     BOOLEAN := FALSE;
+        v_fixture_id NUMBER;
+        v_fixture_name VARCHAR2(100);
+        v_org_name   organization.name%TYPE;
+    BEGIN
+        IF NVL(pi_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'org_id invalido para ciclo de billing.');
+        END IF;
+
+        -- Aislamiento fixture: exige QA_BILLING_E2E_ORG_ID inmutable (nombre solo como chequeo).
+        BEGIN
+            v_fixture_id := TO_NUMBER(fn_get_parameter('QA_BILLING_E2E_ORG_ID'));
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_fixture_id := NULL;
+        END;
+        v_fixture_name := NVL(fn_get_parameter('QA_BILLING_E2E_ORG_NAME'), 'QA Billing E2E');
+
+        IF v_fixture_id IS NULL THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation,
+                'QA_BILLING_E2E_ORG_ID no configurado; ejecuta scripts/qa_billing_e2e_seed.sql');
+        END IF;
+        IF pi_org_id <> v_fixture_id THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation,
+                'pr_run_billing_cycle_for_org solo admite la fixture E2E (org_id=' || v_fixture_id || ').');
+        END IF;
+        IF pi_org_id = 1 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Abortado: no se puede ciclar org_id=1.');
+        END IF;
+
+        SELECT name INTO v_org_name FROM organization WHERE id_organization = pi_org_id;
+        IF v_org_name <> v_fixture_name THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation,
+                'Org ' || pi_org_id || ' no coincide con fixture "' || v_fixture_name || '".');
+        END IF;
+
+        pkg_aox_util.pr_log_api(
+            pi_api_name     => 'SUBSCRIPTION_BILLING_CYCLE',
+            pi_process_name => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_RUN_BILLING_CYCLE_FOR_ORG',
+            pi_http_method  => 'DEV',
+            pi_endpoint     => 'pr_run_billing_cycle_for_org',
+            pi_org_id       => pi_org_id,
+            pi_status       => 'STARTED',
+            pi_request_body => TO_CLOB('org_id=' || pi_org_id)
+        );
+
+        -- Lock concurrente por org (NOWAIT): evita corridas solapadas de la fixture.
+        BEGIN
+            SELECT id_subscription INTO v_sub_id
+              FROM org_subscription
+             WHERE org_id_organization = pi_org_id
+             FOR UPDATE NOWAIT;
+            v_locked := TRUE;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                pkg_aox_util.pr_log_api(
+                    pi_api_name => 'SUBSCRIPTION_BILLING_CYCLE',
+                    pi_process_name => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_RUN_BILLING_CYCLE_FOR_ORG',
+                    pi_org_id => pi_org_id,
+                    pi_status => 'SKIPPED',
+                    pi_error_message => 'Org sin org_subscription'
+                );
+                RETURN;
+            WHEN OTHERS THEN
+                IF SQLCODE = -54 THEN -- resource busy
+                    pkg_aox_util.pr_log_api(
+                        pi_api_name => 'SUBSCRIPTION_BILLING_CYCLE',
+                        pi_process_name => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_RUN_BILLING_CYCLE_FOR_ORG',
+                        pi_org_id => pi_org_id,
+                        pi_status => 'SKIPPED',
+                        pi_error_message => 'Ciclo ya en ejecucion para esta org (lock)'
+                    );
+                    RETURN;
+                END IF;
+                RAISE;
+        END;
+
+        BEGIN
+            pr_apply_due_pending_plan(pi_org_id);
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_util.pr_log_api(
+                    pi_api_name => 'SUBSCRIPTION_BILLING_CYCLE',
+                    pi_process_name => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_APPLY_PENDING',
+                    pi_org_id => pi_org_id,
+                    pi_status => 'ERROR',
+                    pi_error_code => SQLCODE,
+                    pi_error_message => SQLERRM
+                );
+        END;
+
+        BEGIN
+            SELECT p.code, NVL(s.auto_renew, 1)
+              INTO v_plan_code, v_auto_renew
+              FROM org_subscription s
+              JOIN ref_plan p ON p.id_plan = s.pln_id_plan
+             WHERE s.org_id_organization = pi_org_id;
+
+            DECLARE
+                v_due NUMBER := 0;
+            BEGIN
+                SELECT COUNT(*)
+                  INTO v_due
+                  FROM org_subscription s2
+                 WHERE s2.org_id_organization = pi_org_id
+                   AND s2.status IN ('ACTIVE', 'PAST_DUE')
+                   AND NVL(s2.billing_exempt, 0) = 0
+                   AND s2.current_period_end IS NOT NULL
+                   AND s2.current_period_end <= systimestamp
+                   AND NVL(s2.charge_retry_count, 0) < v_max_retry;
+
+                IF v_plan_code <> c_plan_free
+                   AND v_auto_renew = 1
+                   AND v_due > 0
+                THEN
+                    UPDATE /*+ no_parallel */ org_subscription
+                       SET charge_retry_count = NVL(charge_retry_count, 0) + 1,
+                           last_charge_at     = systimestamp,
+                           updated_at         = systimestamp
+                     WHERE org_id_organization = pi_org_id;
+
+                    pr_charge_target(
+                        pi_org_id           => pi_org_id,
+                        pi_target_type      => 'CONSOLIDATED',
+                        pi_plan_code        => v_plan_code,
+                        pi_addon_code       => NULL,
+                        po_invoice_id       => v_invoice_id,
+                        po_hash             => v_hash,
+                        pi_idempotency_key  => 'CYCLE:' || pi_org_id || ':' || TO_CHAR(systimestamp, 'YYYYMMDD')
+                    );
+                END IF;
+            END;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_util.pr_log_api(
+                    pi_api_name => 'SUBSCRIPTION_BILLING_CYCLE',
+                    pi_process_name => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_RUN_BILLING_CYCLE_FOR_ORG',
+                    pi_org_id => pi_org_id,
+                    pi_status => 'ERROR',
+                    pi_error_code => SQLCODE,
+                    pi_error_message => SQLERRM,
+                    pi_error_stack => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                    pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE
+                );
+        END;
+
+        pr_notify_subscription_lifecycle(pi_org_id);
+        COMMIT;
+
+        BEGIN
+            pr_dispatch_einvoice_outbox(10, pi_org_id);
+            pr_retry_pending_einvoice_emails(10, pi_org_id);
+        EXCEPTION
+            WHEN OTHERS THEN
+                NULL;
+        END;
+
+        pkg_aox_util.pr_log_api(
+            pi_api_name     => 'SUBSCRIPTION_BILLING_CYCLE',
+            pi_process_name => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_RUN_BILLING_CYCLE_FOR_ORG',
+            pi_http_method  => 'DEV',
+            pi_endpoint     => 'pr_run_billing_cycle_for_org',
+            pi_org_id       => pi_org_id,
+            pi_status       => 'SUCCESS',
+            pi_request_body => TO_CLOB('org_id=' || pi_org_id || ';invoice_id=' || v_invoice_id)
+        );
+    END pr_run_billing_cycle_for_org;
 
     --------------------------------------------------------------------------
     -- Factura electronica SIFEN (firmador esign) - endpoints internos
@@ -2998,6 +3758,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_ambiente      VARCHAR2(10);
         v_mensaje       VARCHAR2(500);
         v_new_status    VARCHAR2(20);
+        v_cur_cdc       VARCHAR2(44);
+        v_cur_status    VARCHAR2(20);
+        v_rows          NUMBER;
     BEGIN
         pr_assert_service_token(pi_service_token);
 
@@ -3009,10 +3772,45 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_ambiente := CASE WHEN v_json.has('ambiente') THEN v_json.get_string('ambiente') END;
         v_mensaje  := CASE WHEN v_json.has('mensaje') THEN v_json.get_string('mensaje') END;
 
-        v_new_status := CASE WHEN UPPER(v_estado) = 'APROBADO' THEN 'SENT_PENDING_KUDE' ELSE 'FAILED' END;
+        BEGIN
+            SELECT einvoice_cdc, einvoice_status
+              INTO v_cur_cdc, v_cur_status
+              FROM org_subscription_invoice
+             WHERE id_invoice = pi_invoice_id
+             FOR UPDATE;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                po_status_code := 404;
+                v_response.put('status', 'error');
+                v_response.put('message', 'Invoice no encontrada.');
+                po_response_body := v_response.to_clob();
+                RETURN;
+        END;
+
+        -- Idempotencia / proteccion de estados terminales con CDC.
+        IF v_cur_status IN ('SENT_PENDING_KUDE', 'SENT') AND v_cur_cdc IS NOT NULL THEN
+            IF v_cdc IS NULL OR v_cdc = v_cur_cdc THEN
+                po_status_code := pkg_aox_util.c_success_ok_code;
+                v_response.put('status', 'success');
+                v_response.put('message', 'CDC ya persistido; callback ignorado.');
+                po_response_body := v_response.to_clob();
+                RETURN;
+            END IF;
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Invoice ya tiene CDC terminal distinto; no se sobrescribe.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        IF UPPER(NVL(v_estado, '')) = 'APROBADO' AND v_cdc IS NOT NULL THEN
+            v_new_status := 'SENT_PENDING_KUDE';
+        ELSE
+            v_new_status := 'FAILED';
+        END IF;
 
         UPDATE /*+ no_parallel */ org_subscription_invoice
-           SET einvoice_cdc          = v_cdc,
+           SET einvoice_cdc          = CASE WHEN v_new_status = 'SENT_PENDING_KUDE' THEN v_cdc ELSE einvoice_cdc END,
                einvoice_estado_sifen = v_estado,
                einvoice_cod_res      = v_cod_res,
                einvoice_prot_aut     = v_prot_aut,
@@ -3023,14 +3821,38 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                                                           || CASE WHEN v_cod_res IS NOT NULL THEN ' codRes=' || v_cod_res END
                                                           || CASE WHEN v_mensaje IS NOT NULL THEN ' - ' || v_mensaje END, 1, 500)
                                              ELSE NULL END
-         WHERE id_invoice = pi_invoice_id;
+         WHERE id_invoice = pi_invoice_id
+           AND NVL(einvoice_status, 'NONE') IN ('NONE', 'PENDING', 'FAILED')
+           AND (einvoice_cdc IS NULL OR einvoice_cdc = v_cdc);
 
-        IF SQL%ROWCOUNT = 0 THEN
-            po_status_code := 404;
+        v_rows := SQL%ROWCOUNT;
+        IF v_rows = 0 THEN
+            po_status_code := 409;
             v_response.put('status', 'error');
-            v_response.put('message', 'Invoice no encontrada.');
+            v_response.put('message', 'No se actualizo (estado no reclamable o CDC protegido).');
             po_response_body := v_response.to_clob();
             RETURN;
+        END IF;
+
+        -- Cerrar outbox solo con resultado terminal verificable.
+        IF v_new_status = 'SENT_PENDING_KUDE' AND v_cdc IS NOT NULL THEN
+            UPDATE subscription_einvoice_outbox
+               SET status = 'DONE',
+                   processed_at = systimestamp,
+                   last_error = NULL,
+                   lease_owner = NULL,
+                   lease_until = NULL
+             WHERE invoice_id = pi_invoice_id
+               AND status IN ('PENDING', 'PROCESSING');
+        ELSIF v_new_status = 'FAILED' THEN
+            UPDATE subscription_einvoice_outbox
+               SET status = 'FAILED',
+                   processed_at = systimestamp,
+                   last_error = SUBSTR(NVL(v_mensaje, 'SIFEN ' || v_estado), 1, 500),
+                   lease_owner = NULL,
+                   lease_until = NULL
+             WHERE invoice_id = pi_invoice_id
+               AND status IN ('PENDING', 'PROCESSING');
         END IF;
 
         COMMIT;
@@ -3061,6 +3883,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
               FROM org_subscription_invoice
              WHERE einvoice_status = 'SENT_PENDING_KUDE'
                AND einvoice_cdc IS NOT NULL
+               AND einvoice_kude_url IS NULL
              ORDER BY id_invoice
              FETCH FIRST 50 ROWS ONLY
         ) LOOP
@@ -3107,9 +3930,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         UPDATE /*+ no_parallel */ org_subscription_invoice
            SET einvoice_kude_url = v_kude_url
          WHERE id_invoice = pi_invoice_id
-           AND einvoice_status = 'SENT_PENDING_KUDE';
+           AND einvoice_status = 'SENT_PENDING_KUDE'
+           AND einvoice_kude_url IS NULL;
 
         IF SQL%ROWCOUNT = 0 THEN
+            -- Idempotente: si ya tiene la misma URL, OK.
+            DECLARE
+                v_existing VARCHAR2(500);
+            BEGIN
+                SELECT einvoice_kude_url INTO v_existing
+                  FROM org_subscription_invoice
+                 WHERE id_invoice = pi_invoice_id;
+                IF v_existing IS NOT NULL AND v_existing = v_kude_url THEN
+                    po_status_code := pkg_aox_util.c_success_ok_code;
+                    v_response.put('status', 'success');
+                    po_response_body := v_response.to_clob();
+                    RETURN;
+                END IF;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    NULL;
+            END;
             po_status_code := 404;
             v_response.put('status', 'error');
             v_response.put('message', 'Invoice no encontrada o ya procesada.');
@@ -3119,8 +3960,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
         COMMIT;
 
-        -- Envio del mail con adjunto: no debe hacer fallar el callback si el mail
-        -- falla (queda einvoice_status=FAILED y se puede reintentar aparte).
+        -- Envio del mail con adjunto: fallo de email no marca FE FAILED ni reabre emision.
         BEGIN
             pr_send_einvoice_email(pi_invoice_id);
         EXCEPTION

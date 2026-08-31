@@ -154,6 +154,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_api IS
     BEGIN
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         IF pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header) NOT IN (
             pkg_aox_util.fn_rol('ADMIN'),
             pkg_aox_util.fn_rol('RECEPCIONISTA')

@@ -11,8 +11,6 @@
 PROMPT === org_subscription_invoice.einvoice_* ===
 
 DECLARE
-    v_exists NUMBER;
-
     PROCEDURE add_col(pi_ddl IN VARCHAR2, pi_column IN VARCHAR2) IS
         v_count NUMBER;
     BEGIN
@@ -66,26 +64,44 @@ COMMIT;
 
 PROMPT === app_parameter: integracion firmador esign ===
 
+-- ESIGN_WEBHOOK_URL: solo INSERT si falta. Nunca sobrescribe un valor ya configurado
+-- (prod/staging) con staging.hasel.app. Path legacy se repara en 20260831.
+-- ESIGN_CALLBACK_SERVICE_TOKEN: NUNCA versionar el secreto; setear solo en app_parameter /
+-- secretos de despliegue (ver migrations/20260831_billing_e2e_hardening.sql).
 MERGE INTO app_parameter t
 USING (
     SELECT 'ESIGN_WEBHOOK_URL' AS param_key,
-           'https://staging.hasel.app/api/v1/internal/subscription-invoices' AS param_value,
-           'Base URL del callback Astro que recibe el resultado de emision SIFEN (POST /api/internal/esign/emit-invoice). Cambiar a https://hasel.app/... en produccion.' AS description
-      FROM dual UNION ALL
-    SELECT 'ESIGN_CALLBACK_SERVICE_TOKEN',
-           'esign_svc_8f2a1c6d4b7e4f0f9c3a2d5e6b1a9c7f',
-           'Secreto compartido (header X-Service-Token) entre Oracle y Astro (ESIGN_CALLBACK_SERVICE_TOKEN en bookmate/.env.development). Valor de arranque para TEST; regenerar antes de producir en serio y actualizar en ambos lados.'
+           'https://staging.hasel.app/api/internal/esign/emit-invoice' AS param_value,
+           'Base URL del callback Astro que recibe el resultado de emision SIFEN (POST /api/internal/esign/emit-invoice). Configurar por ambiente; no sobrescribir prod.' AS description
       FROM dual UNION ALL
     SELECT 'ESIGN_ESTABLECIMIENTO', '001', 'Establecimiento SIFEN de Hasel como emisor (panel esign).' FROM dual UNION ALL
     SELECT 'ESIGN_PUNTO_EXPEDICION', '001', 'Punto de expedicion SIFEN de Hasel como emisor (panel esign).' FROM dual
 ) s
 ON (t.param_key = s.param_key)
+WHEN MATCHED THEN
+    UPDATE SET t.description = s.description,
+               t.param_value = CASE
+                   WHEN s.param_key = 'ESIGN_WEBHOOK_URL' THEN t.param_value
+                   ELSE s.param_value
+               END
 WHEN NOT MATCHED THEN
     INSERT (param_key, param_value, description)
     VALUES (s.param_key, s.param_value, s.description);
 
+MERGE INTO app_parameter t
+USING (
+    SELECT 'ESIGN_CALLBACK_SERVICE_TOKEN' AS param_key,
+           'Secreto compartido (header X-Service-Token) entre Oracle y Astro. NO versionar el valor; rotar en app_parameter y Vercel Preview.' AS description
+      FROM dual
+) s
+ON (t.param_key = s.param_key)
+WHEN MATCHED THEN
+    UPDATE SET t.description = s.description
+WHEN NOT MATCHED THEN
+    INSERT (param_key, param_value, description)
+    VALUES (s.param_key, NULL, s.description);
+
 COMMIT;
 
 PROMPT === OK: subscription_einvoice_sifen (columnas + app_parameter) ===
-PROMPT NOTA: reemplazar ESIGN_CALLBACK_SERVICE_TOKEN y ESIGN_WEBHOOK_URL con los valores reales
-PROMPT       (el token debe ser identico al ESIGN_CALLBACK_SERVICE_TOKEN de bookmate/.env.development).
+PROMPT NOTA: setear ESIGN_CALLBACK_SERVICE_TOKEN solo en secretos (no en el repo).

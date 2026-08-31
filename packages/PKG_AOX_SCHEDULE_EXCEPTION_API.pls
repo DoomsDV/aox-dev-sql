@@ -355,6 +355,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_exception_api IS
     BEGIN
         pr_assert_schedule_manager(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         pr_assert_professional_in_org(pi_prof_id, v_org_id);
         v_exception_date := fn_parse_exception_date(pi_exception_date);
         pr_assert_future_or_today_editable(v_exception_date);
@@ -523,6 +527,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_exception_api IS
     BEGIN
         pr_assert_schedule_manager(pi_auth_header);
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         pr_assert_professional_in_org(pi_prof_id, v_org_id);
         v_exception_date := fn_parse_exception_date(pi_exception_date);
         pr_assert_future_or_today_editable(v_exception_date);

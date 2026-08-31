@@ -557,6 +557,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             raise_application_error(pkg_aox_util.c_sqlcode_forbidden, 'Acceso denegado. Solo el administrador puede modificar el perfil del negocio.');
         end if;
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         if pi_body is null or dbms_lob.getlength(pi_body) = 0 then
             raise_application_error(-20003, 'JSON inválido o vacío.');
         end if;
@@ -1295,6 +1298,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             raise_application_error(pkg_aox_util.c_sqlcode_forbidden, 'Solo el administrador puede editar la galeria.');
         END IF;
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         IF pi_body IS NULL OR dbms_lob.getlength(pi_body) = 0 THEN
             raise_application_error(-20003, 'JSON invalido o vacio.');
         END IF;
@@ -1411,6 +1417,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             raise_application_error(pkg_aox_util.c_sqlcode_forbidden, 'Solo el administrador puede editar la galeria.');
         END IF;
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         BEGIN
             v_gallery_id := TO_NUMBER(TRIM(pi_gallery_id));
         EXCEPTION
@@ -1491,6 +1500,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         IF NVL(v_role_id, 0) <> 1 THEN
             raise_application_error(pkg_aox_util.c_sqlcode_forbidden, 'Solo el administrador puede editar la galeria.');
         END IF;
+
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         IF pi_body IS NULL OR dbms_lob.getlength(pi_body) = 0 THEN
             raise_application_error(-20003, 'JSON invalido o vacio.');

@@ -767,6 +767,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
+        -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
         IF v_role_id NOT IN (pkg_aox_util.fn_rol('ADMIN'), pkg_aox_util.fn_rol('RECEPCIONISTA')) THEN
             RAISE_APPLICATION_ERROR(-20005, 'No tienes permisos para editar clientes.');
         END IF;
