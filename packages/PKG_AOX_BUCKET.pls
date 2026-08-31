@@ -114,6 +114,21 @@ CREATE OR REPLACE package pkg_aox_bucket AS
         po_object_key    out varchar2
     );
 
+    -- Prueba de reembolso: path no predecible, no toca payment_transaction.
+    -- organizations/{org}/payments/{yyyy}/{mm}/{customer}/refunds/{guid}.{ext}
+    procedure pr_upload_refund_proof(
+        pi_blob          in blob,
+        pi_filename      in varchar2,
+        pi_mime_type     in varchar2,
+        pi_org_id        in organization.id_organization%type,
+        pi_customer_id   in customer.id_customer%type,
+        po_url           out varchar2,
+        po_object_key    out varchar2,
+        po_mime_type     out varchar2
+    );
+
+    function fn_public_object_url(pi_object_key in varchar2) return varchar2;
+
     -- Escaneo de agenda (IA visión): imagen temporal para el modelo multimodal.
     -- organizations/{org_id}/agenda-scans/{yyyy}/{mm}/{uid}.{ext}
     procedure pr_upload_agenda_scan(
@@ -1308,6 +1323,123 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         po_url := v_url;
         po_object_key := v_object_key;
     end pr_upload_payment_receipt;
+
+    function fn_public_object_url(pi_object_key in varchar2) return varchar2 is
+    begin
+        if pi_object_key is null or trim(pi_object_key) is null then
+            return null;
+        end if;
+        if lower(pi_object_key) like 'http%' then
+            return pi_object_key;
+        end if;
+        return rtrim(g_base_url, '/') || '/' || ltrim(pi_object_key, '/');
+    end fn_public_object_url;
+
+    procedure pr_upload_refund_proof(
+        pi_blob          in blob,
+        pi_filename      in varchar2,
+        pi_mime_type     in varchar2,
+        pi_org_id        in organization.id_organization%type,
+        pi_customer_id   in customer.id_customer%type,
+        po_url           out varchar2,
+        po_object_key    out varchar2,
+        po_mime_type     out varchar2
+    ) is
+        v_ext          varchar2(20);
+        v_safe_name    varchar2(255);
+        v_yyyy         varchar2(4);
+        v_mm           varchar2(2);
+        v_uid          varchar2(80);
+        v_object_key   varchar2(500);
+        v_url          varchar2(1000);
+        v_response     clob;
+        v_status_code  number;
+        v_mime         varchar2(150);
+        v_size_bytes   number;
+        v_head         raw(8);
+        v_head_hex     varchar2(16);
+        v_read_amt     integer := 8;
+    begin
+        if nvl(pi_org_id, 0) <= 0 or nvl(pi_customer_id, 0) <= 0 then
+            raise_application_error(-20002, 'Parametros de prueba de reembolso invalidos.');
+        end if;
+        if pi_blob is null or dbms_lob.getlength(pi_blob) = 0 then
+            raise_application_error(-20002, 'El comprobante esta vacio.');
+        end if;
+
+        v_size_bytes := dbms_lob.getlength(pi_blob);
+        pr_assert_storage_room(pi_org_id, v_size_bytes);
+
+        v_mime := lower(nvl(trim(pi_mime_type), 'application/octet-stream'));
+        v_safe_name := fn_safe_file_name(nvl(pi_filename, 'reembolso'));
+
+        begin
+            dbms_lob.read(pi_blob, v_read_amt, 1, v_head);
+            v_head_hex := rawtohex(v_head);
+        exception
+            when others then
+                v_head_hex := null;
+        end;
+
+        if v_head_hex like 'FFD8%' then
+            v_ext := 'jpg';
+            v_mime := 'image/jpeg';
+        elsif v_head_hex like '89504E47%' then
+            v_ext := 'png';
+            v_mime := 'image/png';
+        elsif v_head_hex like '25504446%' then
+            v_ext := 'pdf';
+            v_mime := 'application/pdf';
+        elsif v_mime in ('image/jpeg', 'image/jpg') or lower(v_safe_name) like '%.jpg' or lower(v_safe_name) like '%.jpeg' then
+            v_ext := 'jpg';
+            v_mime := 'image/jpeg';
+        elsif v_mime = 'image/png' or lower(v_safe_name) like '%.png' then
+            v_ext := 'png';
+            v_mime := 'image/png';
+        elsif v_mime = 'image/webp' or lower(v_safe_name) like '%.webp' then
+            v_ext := 'webp';
+            v_mime := 'image/webp';
+        elsif v_mime = 'application/pdf' or lower(v_safe_name) like '%.pdf' then
+            v_ext := 'pdf';
+            v_mime := 'application/pdf';
+        else
+            raise_application_error(-20002, 'Formato de comprobante no soportado.');
+        end if;
+
+        v_yyyy := to_char(current_timestamp, 'YYYY');
+        v_mm   := to_char(current_timestamp, 'MM');
+        v_uid  := lower(rawtohex(sys_guid()));
+
+        v_object_key := c_organizations_dir || pi_org_id
+            || '/' || c_payments_dir || v_yyyy
+            || '/' || v_mm
+            || '/' || pi_customer_id
+            || '/refunds/' || v_uid || '.' || v_ext;
+
+        v_url := rtrim(g_base_url, '/') || '/' || v_object_key;
+
+        apex_web_service.g_request_headers.delete;
+        apex_web_service.g_request_headers(1).name := 'Content-Type';
+        apex_web_service.g_request_headers(1).value := v_mime;
+
+        v_response := apex_web_service.make_rest_request(
+            p_url                  => v_url,
+            p_http_method          => 'PUT',
+            p_credential_static_id => g_credential,
+            p_body_blob            => pi_blob
+        );
+
+        v_status_code := apex_web_service.g_status_code;
+        if v_status_code not between 200 and 299 then
+            raise_application_error(-20001, 'Error al subir la prueba de reembolso. Codigo HTTP: ' || v_status_code);
+        end if;
+
+        pr_adjust_storage_used(pi_org_id, v_size_bytes);
+
+        po_url := v_url;
+        po_object_key := v_object_key;
+        po_mime_type := v_mime;
+    end pr_upload_refund_proof;
 
     procedure pr_upload_agenda_scan(
         pi_blob          in blob,

@@ -56,6 +56,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_ia_manager IS
         pi_org_id        IN NUMBER   DEFAULT NULL
     ) RETURN CLOB;
 
+    -- OCR de comprobante de DEVOLUCION (monto + alias destino). No busca HASEL-*.
+    FUNCTION fn_extract_refund_proof(
+        pi_image_url      IN VARCHAR2,
+        pi_expected_amt   IN NUMBER   DEFAULT NULL,
+        pi_expected_alias IN VARCHAR2 DEFAULT NULL,
+        pi_org_id         IN NUMBER   DEFAULT NULL
+    ) RETURN CLOB;
+
     -- Escaneo de agenda manuscrita: visión multimodal → array de borradores de cita.
     -- Sube la imagen al bucket y pasa la URL pública al modelo (gpt-4o).
     -- pi_target_date: YYYY-MM-DD aplicado a filas sin fecha propia (opcional).
@@ -1669,6 +1677,151 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ia_manager IS
 
         RETURN v_result.to_clob();
     END fn_extract_transfer_receipt;
+
+    FUNCTION fn_extract_refund_proof(
+        pi_image_url      IN VARCHAR2,
+        pi_expected_amt   IN NUMBER   DEFAULT NULL,
+        pi_expected_alias IN VARCHAR2 DEFAULT NULL,
+        pi_org_id         IN NUMBER   DEFAULT NULL
+    ) RETURN CLOB IS
+        v_system   CLOB;
+        v_user     CLOB;
+        v_raw      CLOB;
+        v_clean    CLOB;
+        v_result   json_object_t := json_object_t();
+        v_parsed   json_object_t;
+        v_status   VARCHAR2(30) := 'OK';
+        v_err_msg  VARCHAR2(4000);
+    BEGIN
+        v_system := TO_CLOB(
+            'Sos un extractor de comprobantes de TRANSFERENCIA DE DEVOLUCION (SIPAP Paraguay). '
+            || 'Respondé SOLO con un JSON válido, sin markdown. '
+            || 'Schema: {"amount":number|null,"alias_hint":string|null,"transfer_datetime":string|null,'
+            || '"bank_hint":string|null,"blank_image":boolean,"confidence":number}. '
+            || 'amount: monto en guaranies. alias_hint: alias/CI/celular/email destino si se ve. '
+            || 'blank_image: true si la imagen esta vacia, tapada o ilegible. '
+            || 'confidence: 0 a 1.'
+        );
+
+        v_user := TO_CLOB('Extrae los datos del comprobante de devolucion.');
+        IF pi_expected_amt IS NOT NULL THEN
+            v_user := v_user || TO_CLOB(CHR(10) || 'Monto esperado (Gs): ' || TO_CHAR(pi_expected_amt));
+        END IF;
+        IF pi_expected_alias IS NOT NULL THEN
+            v_user := v_user || TO_CLOB(CHR(10) || 'Alias destino esperado: ' || pi_expected_alias);
+        END IF;
+
+        BEGIN
+            v_raw := fn_call_azure_openai_vision(
+                pi_system_prompt => v_system,
+                pi_user_text     => v_user,
+                pi_image_url     => pi_image_url,
+                pi_max_tokens    => 600,
+                pi_temperature   => 0.1
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_status  := 'ERROR';
+                v_err_msg := SUBSTR(SQLERRM, 1, 4000);
+                v_result.put('status', 'error');
+                v_result.put('error', v_err_msg);
+                v_result.put_null('amount');
+                v_result.put_null('alias_hint');
+                v_result.put_null('transfer_datetime');
+                v_result.put('blank_image', FALSE);
+                v_result.put('confidence', 0);
+                pkg_aox_util.pr_log_ai(
+                    pi_process_name    => 'PKG_AOX_IA_MANAGER.FN_EXTRACT_REFUND_PROOF',
+                    pi_session_id      => NULL,
+                    pi_org_id          => pi_org_id,
+                    pi_user_id         => NULL,
+                    pi_role_id         => NULL,
+                    pi_pro_id          => NULL,
+                    pi_status          => 'ERROR',
+                    pi_status_code     => 500,
+                    pi_error_code      => SQLCODE,
+                    pi_error_message   => v_err_msg,
+                    pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                    pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                    pi_prompt          => v_user,
+                    pi_request_payload => TO_CLOB(SUBSTR(pi_image_url, 1, 500)),
+                    pi_response_body   => NULL,
+                    pi_parameters      => NULL
+                );
+                RETURN v_result.to_clob();
+        END;
+
+        v_clean := fn_strip_markdown_json(v_raw);
+
+        BEGIN
+            v_parsed := json_object_t.parse(v_clean);
+            v_result.put('status', 'ok');
+            BEGIN
+                v_result.put('amount', v_parsed.get_number('amount'));
+            EXCEPTION WHEN OTHERS THEN v_result.put_null('amount');
+            END;
+            BEGIN
+                v_result.put('alias_hint', v_parsed.get_string('alias_hint'));
+            EXCEPTION WHEN OTHERS THEN v_result.put_null('alias_hint');
+            END;
+            BEGIN
+                v_result.put('transfer_datetime', v_parsed.get_string('transfer_datetime'));
+            EXCEPTION WHEN OTHERS THEN v_result.put_null('transfer_datetime');
+            END;
+            BEGIN
+                v_result.put('bank_hint', v_parsed.get_string('bank_hint'));
+            EXCEPTION WHEN OTHERS THEN v_result.put_null('bank_hint');
+            END;
+            BEGIN
+                v_result.put('blank_image', v_parsed.get_boolean('blank_image'));
+            EXCEPTION
+                WHEN OTHERS THEN
+                    BEGIN
+                        v_result.put('blank_image', NVL(v_parsed.get_number('blank_image'), 0) = 1);
+                    EXCEPTION
+                        WHEN OTHERS THEN v_result.put('blank_image', FALSE);
+                    END;
+            END;
+            BEGIN
+                v_result.put('confidence', NVL(v_parsed.get_number('confidence'), 0));
+            EXCEPTION WHEN OTHERS THEN v_result.put('confidence', 0);
+            END;
+            v_result.put('raw', v_clean);
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_status := 'PARSE_ERROR';
+                v_result.put('status', 'parse_error');
+                v_result.put('error', SUBSTR(SQLERRM, 1, 400));
+                v_result.put_null('amount');
+                v_result.put_null('alias_hint');
+                v_result.put('confidence', 0);
+                v_result.put('blank_image', FALSE);
+                IF v_clean IS NOT NULL THEN
+                    v_result.put('raw', v_clean);
+                END IF;
+        END;
+
+        pkg_aox_util.pr_log_ai(
+            pi_process_name    => 'PKG_AOX_IA_MANAGER.FN_EXTRACT_REFUND_PROOF',
+            pi_session_id      => NULL,
+            pi_org_id          => pi_org_id,
+            pi_user_id         => NULL,
+            pi_role_id         => NULL,
+            pi_pro_id          => NULL,
+            pi_status          => CASE WHEN v_status = 'OK' THEN 'OK' ELSE 'ERROR' END,
+            pi_status_code     => CASE WHEN v_status = 'OK' THEN 200 ELSE 500 END,
+            pi_error_code      => NULL,
+            pi_error_message   => CASE WHEN v_status = 'OK' THEN NULL ELSE v_status END,
+            pi_error_stack     => NULL,
+            pi_error_backtrace => NULL,
+            pi_prompt          => v_user,
+            pi_request_payload => TO_CLOB(SUBSTR(pi_image_url, 1, 500)),
+            pi_response_body   => v_clean,
+            pi_parameters      => NULL
+        );
+
+        RETURN v_result.to_clob();
+    END fn_extract_refund_proof;
 
     FUNCTION fn_transcribe_whisper_audio(
         pi_audio_base64 IN CLOB,

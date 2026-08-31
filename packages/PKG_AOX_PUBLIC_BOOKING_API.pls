@@ -2042,6 +2042,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 a.refund_status,
                 a.refund_amount,
                 a.refund_alias,
+                a.refund_sent_at,
+                a.refund_alias_submitted_at,
+                ws.public_whatsapp,
                 c.full_name AS customer_name,
                 c.phone_number AS customer_phone,
                 l.name AS location_name,
@@ -2251,41 +2254,25 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_data_obj.put('refund_amount', rec.refund_amount);
             END IF;
             v_data_obj.put('refund_alias', rec.refund_alias);
-
-            IF NVL(rec.refund_status, 'NONE') = 'PENDING' THEN
-                DECLARE
-                    v_alias_at   TIMESTAMP WITH TIME ZONE;
-                    v_deadline   TIMESTAMP WITH TIME ZONE;
-                    v_can_claim  NUMBER := 0;
-                    v_open_claim NUMBER := 0;
-                BEGIN
-                    SELECT refund_alias_submitted_at
-                      INTO v_alias_at
-                      FROM appointment
-                     WHERE id_appointment = rec.id_appointment;
-
-                    v_deadline := pkg_aox_refund_claims_api.fn_refund_sla_deadline(v_alias_at);
-                    IF v_deadline IS NOT NULL THEN
-                        v_data_obj.put(
-                            'refund_sla_deadline',
-                            TO_CHAR(v_deadline AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-                        );
-                    END IF;
-                    v_can_claim := pkg_aox_refund_claims_api.fn_is_refund_sla_breached(v_alias_at);
-
-                    SELECT COUNT(*)
-                      INTO v_open_claim
-                      FROM org_refund_claim
-                     WHERE app_id_appointment = rec.id_appointment
-                       AND claim_status = 'OPEN';
-
-                    v_data_obj.put('refund_claim_open', CASE WHEN v_open_claim > 0 THEN 1 ELSE 0 END);
-                    v_data_obj.put(
-                        'can_claim_refund',
-                        CASE WHEN v_can_claim = 1 AND v_open_claim = 0 THEN 1 ELSE 0 END
-                    );
-                END;
+            IF rec.refund_sent_at IS NOT NULL THEN
+                v_data_obj.put(
+                    'refund_sent_at',
+                    TO_CHAR(rec.refund_sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                );
             END IF;
+            v_data_obj.put(
+                'refund_dispute',
+                pkg_aox_refund_disputes_api.fn_build_public_dto(
+                    pi_app_id              => rec.id_appointment,
+                    pi_refund_status       => rec.refund_status,
+                    pi_refund_sent_at      => rec.refund_sent_at,
+                    pi_alias_submitted_at  => rec.refund_alias_submitted_at,
+                    pi_public_whatsapp     => rec.public_whatsapp,
+                    pi_customer_phone      => rec.customer_phone
+                )
+            );
+            v_data_obj.put('can_claim_refund', 0);
+            v_data_obj.put('refund_claim_open', 0);
 
             -- Preview solo si la cita sigue activa y hay seña pagada.
             IF rec.status <> 'CANCELADO'

@@ -203,24 +203,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_claims_api IS
         v_created    NUMBER;
         v_deadline   TIMESTAMP WITH TIME ZONE;
     BEGIN
-        IF pi_body IS NOT NULL AND DBMS_LOB.GETLENGTH(pi_body) > 0 THEN
-            BEGIN
-                v_json := json_object_t.parse(pi_body);
-                v_notes := SUBSTR(TRIM(v_json.get_string('notes')), 1, 500);
-            EXCEPTION
-                WHEN OTHERS THEN
-                    v_notes := NULL;
-            END;
-        END IF;
-
-        SELECT a.id_appointment,
-               a.org_id_organization,
-               a.refund_status,
-               a.refund_alias_submitted_at
-          INTO v_app_id, v_org_id, v_refund_st, v_alias_at
-          FROM appointment a
-         WHERE a.public_manage_token = TRIM(pi_public_token)
-         FOR UPDATE;
+        po_status_code := 410;
+        pkg_aox_util.pr_build_api_error_response(
+            pi_status_code   => po_status_code,
+            pi_api_code      => 'GONE',
+            pi_message       => 'Este reclamo fue reemplazado por el flujo de disputa. Usa POST /reservations/:token/refund-dispute.',
+            po_response_body => po_response_body
+        );
+        RETURN;
 
         IF v_refund_st <> 'PENDING' THEN
             RAISE_APPLICATION_ERROR(
@@ -353,6 +343,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_claims_api IS
          WHERE app_id_appointment = v_app_id
            AND claim_status = 'OPEN';
 
+        pkg_aox_refund_disputes_api.pr_dismiss_for_appointment(
+            pi_app_id  => v_app_id,
+            pi_user_id => v_user_id,
+            pi_reason  => v_reason
+        );
+
         COMMIT;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
@@ -380,6 +376,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_claims_api IS
         v_created  NUMBER;
         v_count    NUMBER := 0;
     BEGIN
+        -- Job legado: ya no abre reclamos ni aplica strikes sobre PENDING.
+        RETURN;
         FOR rec IN (
             SELECT /*+ no_parallel */
                    a.id_appointment,

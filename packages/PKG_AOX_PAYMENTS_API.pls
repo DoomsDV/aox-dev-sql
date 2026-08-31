@@ -295,7 +295,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         pr_resolve_date_range(pi_date_preset, pi_date_from, pi_date_to, v_from, v_to);
         v_offset := (v_page - 1) * v_limit;
 
-        -- Badge: comprobantes por revisar + reembolsos PENDING.
+        -- Badge: comprobantes por revisar + reembolsos PENDING + disputas activas.
         SELECT /*+ no_parallel */ COUNT(*)
           INTO v_pending_count
           FROM (
@@ -314,6 +314,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
              WHERE pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
                AND a.refund_status = 'PENDING'
+            UNION
+            SELECT pt.id_transaction
+              FROM payment_transaction pt
+              JOIN org_refund_dispute d ON d.app_id_appointment = pt.app_id_appointment
+             WHERE pt.org_id_organization = v_org_id
+               AND pt.provider = 'sipap'
+               AND d.dispute_status IN ('OPEN', 'EVIDENCE_PROCESSING')
           );
 
         SELECT /*+ no_parallel */ COUNT(*)
@@ -388,7 +395,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                    a.refund_alias,
                    a.refund_alias_submitted_at,
                    NVL(a.refund_requested_at, NVL(pt.receipt_uploaded_at, pt.created_at)) AS sort_ts,
-                   NVL(claim_agg.open_claims, 0) AS open_claims
+                   NVL(claim_agg.open_claims, 0) AS open_claims,
+                   d.dispute_status,
+                   d.proof_due_at,
+                   d.current_evidence_id
               FROM payment_transaction pt
               JOIN appointment a ON a.id_appointment = pt.app_id_appointment
               JOIN customer c ON c.id_customer = a.cus_id_customer
@@ -396,6 +406,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
               JOIN professional p ON p.id_professional = a.pro_id_professional
               JOIN app_user u ON u.id_user = p.usr_id_user
               JOIN location l ON l.id_location = a.loc_id_location
+              LEFT JOIN org_refund_dispute d ON d.app_id_appointment = a.id_appointment
               LEFT JOIN (
                   SELECT orc.app_id_appointment,
                          COUNT(*) AS open_claims
@@ -490,6 +501,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                     rec.reviewed_at
                 );
                 v_item.put('refund_claim_open', CASE WHEN rec.open_claims > 0 THEN 1 ELSE 0 END);
+                IF rec.dispute_status IS NOT NULL THEN
+                    v_item.put('refund_dispute_status', rec.dispute_status);
+                    v_item.put('refund_dispute_due_at', fn_iso_ts(rec.proof_due_at));
+                    v_item.put(
+                        'refund_dispute_has_proof',
+                        CASE WHEN rec.current_evidence_id IS NOT NULL THEN 1 ELSE 0 END
+                    );
+                    IF rec.dispute_status IN ('OPEN', 'EVIDENCE_PROCESSING') THEN
+                        v_item.put('ui_status', 'refund_dispute');
+                    END IF;
+                END IF;
                 IF NVL(rec.refund_status, 'NONE') = 'PENDING' THEN
                     v_item.put(
                         'refund_sla_breached',
@@ -563,6 +585,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
              WHERE pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
                AND a.refund_status = 'PENDING'
+            UNION
+            SELECT pt.id_transaction
+              FROM payment_transaction pt
+              JOIN org_refund_dispute d ON d.app_id_appointment = pt.app_id_appointment
+             WHERE pt.org_id_organization = v_org_id
+               AND pt.provider = 'sipap'
+               AND d.dispute_status IN ('OPEN', 'EVIDENCE_PROCESSING')
           );
 
         po_status_code := pkg_aox_util.c_success_ok_code;
