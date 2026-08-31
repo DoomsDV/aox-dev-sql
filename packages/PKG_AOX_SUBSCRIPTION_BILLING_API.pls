@@ -189,7 +189,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
     );
 
     -- GET /internal/v1/subscription-invoices/pending-kude
-    -- Invoices con FE aprobada pero KuDE aun no confirmado (para el cron de Astro).
+    -- Invoices con FE aprobada a las que les falta XML y/o KuDE (cron Astro).
     PROCEDURE pr_list_pending_kude(
         pi_service_token IN  VARCHAR2,
         po_status_code   OUT NUMBER,
@@ -197,8 +197,18 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
     );
 
     -- POST /internal/v1/subscription-invoices/:id/einvoice-kude
-    -- Callback de Astro cuando el KuDE (PDF) ya esta listo: dispara el email con adjunto.
+    -- Legacy: solo kudeUrl. Preferir pr_save_einvoice_artifacts.
     PROCEDURE pr_save_einvoice_kude(
+        pi_service_token IN  VARCHAR2,
+        pi_invoice_id    IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    -- POST /internal/v1/subscription-invoices/:id/einvoice-artifacts
+    -- Callback idempotente: XML canonico + metadatos + kudeUrl; reevalua email.
+    PROCEDURE pr_save_einvoice_artifacts(
         pi_service_token IN  VARCHAR2,
         pi_invoice_id    IN  NUMBER,
         pi_body          IN  CLOB,
@@ -715,7 +725,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                  WHERE id_invoice = v_invoice_id;
 
                 -- Solo DONE con resultado terminal verificable en Oracle.
-                IF v_cdc IS NOT NULL OR v_estatus IN ('SENT_PENDING_KUDE', 'SENT') THEN
+                IF v_cdc IS NOT NULL OR v_estatus IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE', 'SENT') THEN
                     UPDATE subscription_einvoice_outbox
                        SET status = 'DONE',
                            processed_at = systimestamp,
@@ -793,8 +803,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                     UPDATE /*+ no_parallel */ org_subscription_invoice
                        SET einvoice_cdc    = NVL(einvoice_cdc, v_resp_cdc),
                            einvoice_status = CASE
-                                               WHEN einvoice_status IN ('SENT_PENDING_KUDE', 'SENT') THEN einvoice_status
-                                               ELSE 'SENT_PENDING_KUDE'
+                                               WHEN einvoice_status IN (
+                                                      'SENT_PENDING_ARTIFACTS',
+                                                      'SENT_PENDING_KUDE',
+                                                      'SENT'
+                                                    ) THEN einvoice_status
+                                               ELSE 'SENT_PENDING_ARTIFACTS'
                                              END,
                            einvoice_error  = NULL
                      WHERE id_invoice = v_invoice_id
@@ -889,31 +903,51 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END LOOP;
     END pr_dispatch_einvoice_outbox;
 
-    -- Baja el KuDE (PDF) y manda mail FACTURASUSCRIPCIONV2. Fallo de email NO marca FE como FAILED.
+    -- Baja KuDE (PDF) + adjunta XML privado; un solo push_queue.
+    -- Claim solo si CDC + XML integro + kude_url. Fallo de email NO marca FE FAILED.
     PROCEDURE pr_send_einvoice_email(pi_invoice_id IN NUMBER) IS
         v_org_id         NUMBER;
         v_cdc            org_subscription_invoice.einvoice_cdc%TYPE;
         v_kude_url       org_subscription_invoice.einvoice_kude_url%TYPE;
-        v_email_status   VARCHAR2(20);
+        v_xml_clob       CLOB;
+        v_xml_sha        VARCHAR2(64);
+        v_xml_size       NUMBER;
+        v_xml_mime       VARCHAR2(100);
         v_billing_name   org_billing_profile.billing_name%TYPE;
         v_billing_email  org_billing_profile.billing_email%TYPE;
         v_pdf_blob       BLOB;
+        v_xml_blob       BLOB;
         v_mail_id        NUMBER;
         v_apex_session_created BOOLEAN := FALSE;
         v_error_message  VARCHAR2(4000);
         v_claimed        NUMBER := 0;
+        v_lease_minutes  NUMBER := 15;
+        v_dest_off       INTEGER := 1;
+        v_src_off        INTEGER := 1;
+        v_lang_ctx       INTEGER := DBMS_LOB.DEFAULT_LANG_CTX;
+        v_warning        INTEGER;
+        v_hash_hex       VARCHAR2(64);
     BEGIN
-        -- Claim atomico: evita emails duplicados en reintentos concurrentes.
-        -- PENDING caducado se recupera via pr_retry_pending_einvoice_emails (reset a FAILED).
+        -- Claim atomico con lease real: NONE/FAILED o PENDING expirado.
         UPDATE /*+ no_parallel */ org_subscription_invoice
            SET einvoice_email_status = 'PENDING',
                einvoice_email_attempts = NVL(einvoice_email_attempts, 0) + 1,
-               einvoice_email_error = NULL
+               einvoice_email_error = NULL,
+               einvoice_email_lease_until = systimestamp + NUMTODSINTERVAL(v_lease_minutes, 'MINUTE')
          WHERE id_invoice = pi_invoice_id
            AND einvoice_kude_url IS NOT NULL
            AND einvoice_cdc IS NOT NULL
-           AND NVL(einvoice_email_status, 'NONE') IN ('NONE', 'FAILED')
-           AND einvoice_sent_at IS NULL;
+           AND einvoice_xml_firmado IS NOT NULL
+           AND einvoice_xml_sha256 IS NOT NULL
+           AND einvoice_sent_at IS NULL
+           AND (
+                   NVL(einvoice_email_status, 'NONE') IN ('NONE', 'FAILED')
+                OR (
+                       einvoice_email_status = 'PENDING'
+                   AND (einvoice_email_lease_until IS NULL
+                        OR einvoice_email_lease_until < systimestamp)
+                   )
+               );
 
         v_claimed := SQL%ROWCOUNT;
         IF v_claimed = 0 THEN
@@ -922,16 +956,55 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         COMMIT;
 
         SELECT i.org_id_organization, i.einvoice_cdc, i.einvoice_kude_url,
-               NVL(i.einvoice_email_status, 'NONE'),
+               i.einvoice_xml_firmado, i.einvoice_xml_sha256,
+               i.einvoice_xml_size, NVL(i.einvoice_xml_mime, 'application/xml; charset=UTF-8'),
                p.billing_name, p.billing_email
-          INTO v_org_id, v_cdc, v_kude_url, v_email_status,
+          INTO v_org_id, v_cdc, v_kude_url,
+               v_xml_clob, v_xml_sha, v_xml_size, v_xml_mime,
                v_billing_name, v_billing_email
           FROM org_subscription_invoice i
           JOIN org_billing_profile p ON p.org_id_organization = i.org_id_organization
          WHERE i.id_invoice = pi_invoice_id;
 
-        IF v_kude_url IS NULL OR v_billing_email IS NULL THEN
+        IF v_kude_url IS NULL OR v_billing_email IS NULL OR v_xml_clob IS NULL THEN
+            UPDATE /*+ no_parallel */ org_subscription_invoice
+               SET einvoice_email_status = 'FAILED',
+                   einvoice_email_error  = 'Faltan artefactos o billing_email',
+                   einvoice_email_lease_until = NULL
+             WHERE id_invoice = pi_invoice_id
+               AND NVL(einvoice_email_status, 'NONE') <> 'SENT';
+            COMMIT;
             RETURN;
+        END IF;
+
+        -- Snapshot del destinatario efectivo al reclamar el envio.
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_email_to = TRIM(v_billing_email)
+         WHERE id_invoice = pi_invoice_id
+           AND NVL(einvoice_email_status, 'NONE') = 'PENDING';
+        COMMIT;
+
+        -- Verificar integridad del XML privado (SHA-256).
+        DBMS_LOB.CREATETEMPORARY(v_xml_blob, TRUE);
+        v_dest_off := 1;
+        v_src_off  := 1;
+        v_lang_ctx := DBMS_LOB.DEFAULT_LANG_CTX;
+        DBMS_LOB.CONVERTTOBLOB(
+            dest_lob     => v_xml_blob,
+            src_clob     => v_xml_clob,
+            amount       => DBMS_LOB.LOBMAXSIZE,
+            dest_offset  => v_dest_off,
+            src_offset   => v_src_off,
+            blob_csid    => NLS_CHARSET_ID('AL32UTF8'),
+            lang_context => v_lang_ctx,
+            warning      => v_warning
+        );
+        v_hash_hex := LOWER(RAWTOHEX(DBMS_CRYPTO.HASH(v_xml_blob, DBMS_CRYPTO.HASH_SH256)));
+        IF v_hash_hex <> LOWER(TRIM(v_xml_sha)) THEN
+            RAISE_APPLICATION_ERROR(-20091, 'SHA-256 del XML no coincide con metadatos.');
+        END IF;
+        IF v_xml_size IS NOT NULL AND DBMS_LOB.GETLENGTH(v_xml_blob) <> v_xml_size THEN
+            RAISE_APPLICATION_ERROR(-20092, 'Tamano del XML no coincide con metadatos.');
         END IF;
 
         apex_web_service.g_request_headers.delete();
@@ -964,25 +1037,47 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
         apex_mail.add_attachment(
             p_mail_id     => v_mail_id,
+            p_attachment  => v_xml_blob,
+            p_filename    => 'factura-' || v_cdc || '.xml',
+            p_mime_type   => NVL(v_xml_mime, 'application/xml')
+        );
+
+        apex_mail.add_attachment(
+            p_mail_id     => v_mail_id,
             p_attachment  => v_pdf_blob,
             p_filename    => 'factura-' || v_cdc || '.pdf',
             p_mime_type   => 'application/pdf'
         );
 
+        -- Un solo push_queue tras ambos adjuntos.
         apex_mail.push_queue;
 
         UPDATE /*+ no_parallel */ org_subscription_invoice
-           SET einvoice_status       = 'SENT',
-               einvoice_sent_at      = systimestamp,
-               einvoice_email_status = 'SENT',
-               einvoice_email_error  = NULL
+           SET einvoice_status            = 'SENT',
+               einvoice_sent_at           = systimestamp,
+               einvoice_email_status      = 'SENT',
+               einvoice_email_error       = NULL,
+               einvoice_email_lease_until = NULL,
+               einvoice_email_mail_id     = v_mail_id,
+               einvoice_email_to          = TRIM(v_billing_email)
          WHERE id_invoice = pi_invoice_id;
         COMMIT;
+
+        IF DBMS_LOB.ISTEMPORARY(v_xml_blob) = 1 THEN
+            DBMS_LOB.FREETEMPORARY(v_xml_blob);
+        END IF;
 
         apex_session.delete_session;
     EXCEPTION
         WHEN OTHERS THEN
             v_error_message := SQLERRM;
+            BEGIN
+                IF v_xml_blob IS NOT NULL AND DBMS_LOB.ISTEMPORARY(v_xml_blob) = 1 THEN
+                    DBMS_LOB.FREETEMPORARY(v_xml_blob);
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
             IF v_apex_session_created THEN
                 BEGIN
                     apex_session.delete_session;
@@ -990,10 +1085,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                     WHEN OTHERS THEN NULL;
                 END;
             END IF;
-            -- Fallo de email: NO tocar einvoice_status FE/KuDE ni permitir nueva emision.
+            -- Fallo de email: NO tocar einvoice_status FE/artefactos ni permitir nueva emision.
             UPDATE /*+ no_parallel */ org_subscription_invoice
                SET einvoice_email_status = 'FAILED',
-                   einvoice_email_error  = SUBSTR(v_error_message, 1, 500)
+                   einvoice_email_error  = SUBSTR(v_error_message, 1, 500),
+                   einvoice_email_lease_until = NULL,
+                   einvoice_email_mail_id = NVL(v_mail_id, einvoice_email_mail_id)
              WHERE id_invoice = pi_invoice_id
                AND NVL(einvoice_email_status, 'NONE') <> 'SENT';
             COMMIT;
@@ -1016,14 +1113,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_limit PLS_INTEGER := LEAST(GREATEST(NVL(pi_limit, 20), 1), 100);
         v_max_attempts NUMBER := 5;
     BEGIN
-        -- Recuperar PENDING abandonados (crash entre claim y SENT) sin reabrir FE.
+        -- Recuperar PENDING con lease vencido sin reabrir FE.
         UPDATE /*+ no_parallel */ org_subscription_invoice
            SET einvoice_email_status = 'FAILED',
-               einvoice_email_error  = NVL(einvoice_email_error, 'PENDING caducado; reintento automatico')
+               einvoice_email_error  = NVL(einvoice_email_error, 'PENDING lease caducado; reintento automatico'),
+               einvoice_email_lease_until = NULL
          WHERE einvoice_email_status = 'PENDING'
            AND einvoice_sent_at IS NULL
            AND einvoice_cdc IS NOT NULL
            AND einvoice_kude_url IS NOT NULL
+           AND einvoice_xml_firmado IS NOT NULL
+           AND einvoice_email_lease_until IS NOT NULL
+           AND einvoice_email_lease_until < systimestamp
            AND NVL(einvoice_email_attempts, 0) >= 1
            AND (pi_org_id IS NULL OR org_id_organization = pi_org_id);
 
@@ -1032,10 +1133,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
               FROM org_subscription_invoice
              WHERE einvoice_kude_url IS NOT NULL
                AND einvoice_cdc IS NOT NULL
+               AND einvoice_xml_firmado IS NOT NULL
+               AND einvoice_xml_sha256 IS NOT NULL
                AND einvoice_sent_at IS NULL
                AND NVL(einvoice_email_status, 'NONE') IN ('NONE', 'FAILED')
                AND NVL(einvoice_email_attempts, 0) < v_max_attempts
-               AND einvoice_status IN ('SENT_PENDING_KUDE', 'SENT')
+               AND einvoice_status IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE', 'SENT')
                AND (pi_org_id IS NULL OR org_id_organization = pi_org_id)
              ORDER BY id_invoice
              FETCH FIRST v_limit ROWS ONLY
@@ -3788,7 +3891,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END;
 
         -- Idempotencia / proteccion de estados terminales con CDC.
-        IF v_cur_status IN ('SENT_PENDING_KUDE', 'SENT') AND v_cur_cdc IS NOT NULL THEN
+        IF v_cur_status IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE', 'SENT') AND v_cur_cdc IS NOT NULL THEN
             IF v_cdc IS NULL OR v_cdc = v_cur_cdc THEN
                 po_status_code := pkg_aox_util.c_success_ok_code;
                 v_response.put('status', 'success');
@@ -3804,13 +3907,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         IF UPPER(NVL(v_estado, '')) = 'APROBADO' AND v_cdc IS NOT NULL THEN
-            v_new_status := 'SENT_PENDING_KUDE';
+            v_new_status := 'SENT_PENDING_ARTIFACTS';
         ELSE
             v_new_status := 'FAILED';
         END IF;
 
         UPDATE /*+ no_parallel */ org_subscription_invoice
-           SET einvoice_cdc          = CASE WHEN v_new_status = 'SENT_PENDING_KUDE' THEN v_cdc ELSE einvoice_cdc END,
+           SET einvoice_cdc          = CASE WHEN v_new_status = 'SENT_PENDING_ARTIFACTS' THEN v_cdc ELSE einvoice_cdc END,
                einvoice_estado_sifen = v_estado,
                einvoice_cod_res      = v_cod_res,
                einvoice_prot_aut     = v_prot_aut,
@@ -3835,7 +3938,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         -- Cerrar outbox solo con resultado terminal verificable.
-        IF v_new_status = 'SENT_PENDING_KUDE' AND v_cdc IS NOT NULL THEN
+        IF v_new_status = 'SENT_PENDING_ARTIFACTS' AND v_cdc IS NOT NULL THEN
             UPDATE subscription_einvoice_outbox
                SET status = 'DONE',
                    processed_at = systimestamp,
@@ -3881,9 +3984,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         FOR rec IN (
             SELECT id_invoice, einvoice_cdc
               FROM org_subscription_invoice
-             WHERE einvoice_status = 'SENT_PENDING_KUDE'
+             WHERE einvoice_status IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE')
                AND einvoice_cdc IS NOT NULL
-               AND einvoice_kude_url IS NULL
+               AND (einvoice_kude_url IS NULL OR einvoice_xml_firmado IS NULL)
              ORDER BY id_invoice
              FETCH FIRST 50 ROWS ONLY
         ) LOOP
@@ -3902,7 +4005,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_list_pending_kude;
 
-    -- POST /internal/v1/subscription-invoices/:id/einvoice-kude
+    -- POST /internal/v1/subscription-invoices/:id/einvoice-kude (legacy: solo URL)
     PROCEDURE pr_save_einvoice_kude(
         pi_service_token IN  VARCHAR2,
         pi_invoice_id    IN  NUMBER,
@@ -3913,6 +4016,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_json      json_object_t;
         v_response  json_object_t := json_object_t();
         v_kude_url  VARCHAR2(500);
+        v_existing  VARCHAR2(500);
+        v_has_xml   NUMBER;
     BEGIN
         pr_assert_service_token(pi_service_token);
 
@@ -3930,43 +4035,50 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         UPDATE /*+ no_parallel */ org_subscription_invoice
            SET einvoice_kude_url = v_kude_url
          WHERE id_invoice = pi_invoice_id
-           AND einvoice_status = 'SENT_PENDING_KUDE'
-           AND einvoice_kude_url IS NULL;
+           AND einvoice_status IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE')
+           AND (einvoice_kude_url IS NULL OR einvoice_kude_url = v_kude_url);
 
         IF SQL%ROWCOUNT = 0 THEN
-            -- Idempotente: si ya tiene la misma URL, OK.
-            DECLARE
-                v_existing VARCHAR2(500);
             BEGIN
                 SELECT einvoice_kude_url INTO v_existing
                   FROM org_subscription_invoice
                  WHERE id_invoice = pi_invoice_id;
                 IF v_existing IS NOT NULL AND v_existing = v_kude_url THEN
-                    po_status_code := pkg_aox_util.c_success_ok_code;
-                    v_response.put('status', 'success');
+                    NULL; -- idempotente; seguir a reevaluacion de email
+                ELSE
+                    po_status_code := 404;
+                    v_response.put('status', 'error');
+                    v_response.put('message', 'Invoice no encontrada o ya procesada.');
                     po_response_body := v_response.to_clob();
                     RETURN;
                 END IF;
             EXCEPTION
                 WHEN NO_DATA_FOUND THEN
-                    NULL;
+                    po_status_code := 404;
+                    v_response.put('status', 'error');
+                    v_response.put('message', 'Invoice no encontrada.');
+                    po_response_body := v_response.to_clob();
+                    RETURN;
             END;
-            po_status_code := 404;
-            v_response.put('status', 'error');
-            v_response.put('message', 'Invoice no encontrada o ya procesada.');
-            po_response_body := v_response.to_clob();
-            RETURN;
         END IF;
 
         COMMIT;
 
-        -- Envio del mail con adjunto: fallo de email no marca FE FAILED ni reabre emision.
-        BEGIN
-            pr_send_einvoice_email(pi_invoice_id);
-        EXCEPTION
-            WHEN OTHERS THEN
-                NULL;
-        END;
+        -- Solo enviar si ya hay XML privado; si no, el cron de artefactos completa.
+        SELECT CASE WHEN einvoice_xml_firmado IS NOT NULL AND einvoice_xml_sha256 IS NOT NULL
+                    THEN 1 ELSE 0 END
+          INTO v_has_xml
+          FROM org_subscription_invoice
+         WHERE id_invoice = pi_invoice_id;
+
+        IF v_has_xml = 1 THEN
+            BEGIN
+                pr_send_einvoice_email(pi_invoice_id);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+        END IF;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response.put('status', 'success');
@@ -3976,6 +4088,215 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             ROLLBACK;
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_save_einvoice_kude;
+
+    -- POST /internal/v1/subscription-invoices/:id/einvoice-artifacts
+    PROCEDURE pr_save_einvoice_artifacts(
+        pi_service_token IN  VARCHAR2,
+        pi_invoice_id    IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_response     json_object_t := json_object_t();
+        v_cdc          VARCHAR2(44);
+        v_kude_url     VARCHAR2(500);
+        v_xml_clob     CLOB;
+        v_xml_sha      VARCHAR2(64);
+        v_xml_size     NUMBER;
+        v_xml_mime     VARCHAR2(100);
+        v_cur_cdc      VARCHAR2(44);
+        v_cur_status   VARCHAR2(20);
+        v_cur_kude     VARCHAR2(500);
+        v_cur_sha      VARCHAR2(64);
+        v_xml_blob     BLOB;
+        v_hash_hex     VARCHAR2(64);
+        v_dest_off     INTEGER := 1;
+        v_src_off      INTEGER := 1;
+        v_lang_ctx     INTEGER := DBMS_LOB.DEFAULT_LANG_CTX;
+        v_warning      INTEGER;
+        v_email_status VARCHAR2(20);
+        v_same_xml     BOOLEAN := FALSE;
+    BEGIN
+        pr_assert_service_token(pi_service_token);
+
+        BEGIN
+            SELECT jt.cdc, jt.kude_url, jt.xml_clob, jt.xml_sha256, jt.xml_size, jt.xml_mime
+              INTO v_cdc, v_kude_url, v_xml_clob, v_xml_sha, v_xml_size, v_xml_mime
+              FROM JSON_TABLE(
+                       pi_body, '$'
+                       COLUMNS (
+                           cdc        VARCHAR2(44)  PATH '$.cdc',
+                           kude_url   VARCHAR2(500) PATH '$.kudeUrl',
+                           xml_clob   CLOB          PATH '$.xml',
+                           xml_sha256 VARCHAR2(64)  PATH '$.xmlSha256',
+                           xml_size   NUMBER        PATH '$.xmlSize',
+                           xml_mime   VARCHAR2(100) PATH '$.xmlMime'
+                       )
+                   ) jt;
+        EXCEPTION
+            WHEN OTHERS THEN
+                po_status_code := pkg_aox_util.c_bad_request_code;
+                v_response.put('status', 'error');
+                v_response.put('message', 'Body JSON invalido.');
+                po_response_body := v_response.to_clob();
+                RETURN;
+        END;
+
+        IF v_cdc IS NULL OR TRIM(v_cdc) IS NULL
+           OR v_kude_url IS NULL OR TRIM(v_kude_url) IS NULL
+           OR v_xml_clob IS NULL OR DBMS_LOB.GETLENGTH(v_xml_clob) = 0
+           OR v_xml_sha IS NULL OR TRIM(v_xml_sha) IS NULL THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Faltan cdc, kudeUrl, xml o xmlSha256.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        v_xml_mime := NVL(TRIM(v_xml_mime), 'application/xml; charset=UTF-8');
+        v_xml_sha  := LOWER(TRIM(v_xml_sha));
+
+        BEGIN
+            SELECT einvoice_cdc, einvoice_status, einvoice_kude_url,
+                   einvoice_xml_sha256, NVL(einvoice_email_status, 'NONE')
+              INTO v_cur_cdc, v_cur_status, v_cur_kude, v_cur_sha, v_email_status
+              FROM org_subscription_invoice
+             WHERE id_invoice = pi_invoice_id
+             FOR UPDATE;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                po_status_code := 404;
+                v_response.put('status', 'error');
+                v_response.put('message', 'Invoice no encontrada.');
+                po_response_body := v_response.to_clob();
+                RETURN;
+        END;
+
+        IF v_cur_status NOT IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE', 'SENT') THEN
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Invoice no esta en estado de artefactos.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        IF v_cur_cdc IS NULL OR v_cur_cdc <> TRIM(v_cdc) THEN
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'CDC del body no coincide con la factura.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        -- Verificar hash del XML recibido.
+        DBMS_LOB.CREATETEMPORARY(v_xml_blob, TRUE);
+        v_dest_off := 1;
+        v_src_off  := 1;
+        v_lang_ctx := DBMS_LOB.DEFAULT_LANG_CTX;
+        DBMS_LOB.CONVERTTOBLOB(
+            dest_lob     => v_xml_blob,
+            src_clob     => v_xml_clob,
+            amount       => DBMS_LOB.LOBMAXSIZE,
+            dest_offset  => v_dest_off,
+            src_offset   => v_src_off,
+            blob_csid    => NLS_CHARSET_ID('AL32UTF8'),
+            lang_context => v_lang_ctx,
+            warning      => v_warning
+        );
+        v_hash_hex := LOWER(RAWTOHEX(DBMS_CRYPTO.HASH(v_xml_blob, DBMS_CRYPTO.HASH_SH256)));
+        IF v_hash_hex <> v_xml_sha THEN
+            IF DBMS_LOB.ISTEMPORARY(v_xml_blob) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_xml_blob);
+            END IF;
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response.put('status', 'error');
+            v_response.put('message', 'xmlSha256 no coincide con el XML recibido.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        IF v_xml_size IS NULL THEN
+            v_xml_size := DBMS_LOB.GETLENGTH(v_xml_blob);
+        ELSIF v_xml_size <> DBMS_LOB.GETLENGTH(v_xml_blob) THEN
+            IF DBMS_LOB.ISTEMPORARY(v_xml_blob) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_xml_blob);
+            END IF;
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response.put('status', 'error');
+            v_response.put('message', 'xmlSize no coincide con el XML recibido.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        IF DBMS_LOB.ISTEMPORARY(v_xml_blob) = 1 THEN
+            DBMS_LOB.FREETEMPORARY(v_xml_blob);
+        END IF;
+
+        v_same_xml := (v_cur_sha IS NOT NULL AND LOWER(v_cur_sha) = v_xml_sha);
+
+        -- Persistencia idempotente: no sobrescribir XML con hash distinto.
+        IF v_cur_sha IS NOT NULL AND LOWER(v_cur_sha) <> v_xml_sha THEN
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'XML ya persistido con hash distinto; no se sobrescribe.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        IF v_cur_kude IS NOT NULL AND v_cur_kude <> TRIM(v_kude_url) THEN
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'kudeUrl distinto al ya persistido.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_kude_url = TRIM(v_kude_url),
+               einvoice_xml_firmado = CASE
+                   WHEN einvoice_xml_firmado IS NULL THEN v_xml_clob
+                   ELSE einvoice_xml_firmado
+               END,
+               einvoice_xml_sha256 = NVL(einvoice_xml_sha256, v_xml_sha),
+               einvoice_xml_size = NVL(einvoice_xml_size, v_xml_size),
+               einvoice_xml_mime = NVL(einvoice_xml_mime, v_xml_mime),
+               einvoice_xml_available_at = NVL(einvoice_xml_available_at, systimestamp),
+               -- Normalizar alias legacy al estado neutro preferido (si aun no SENT).
+               einvoice_status = CASE
+                   WHEN einvoice_status = 'SENT' THEN 'SENT'
+                   ELSE 'SENT_PENDING_ARTIFACTS'
+               END
+         WHERE id_invoice = pi_invoice_id;
+
+        COMMIT;
+
+        -- Siempre reevaluar entrega pendiente (aunque kude/XML ya existieran).
+        IF v_email_status <> 'SENT' THEN
+            BEGIN
+                pr_send_einvoice_email(pi_invoice_id);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+        END IF;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('message', CASE WHEN v_same_xml THEN 'Artefactos ya conocidos; email reevaluado.'
+                                       ELSE 'Artefactos persistidos.' END);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            BEGIN
+                IF v_xml_blob IS NOT NULL AND DBMS_LOB.ISTEMPORARY(v_xml_blob) = 1 THEN
+                    DBMS_LOB.FREETEMPORARY(v_xml_blob);
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_save_einvoice_artifacts;
 
 END pkg_aox_subscription_billing_api;
 /

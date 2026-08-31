@@ -31,14 +31,36 @@ Endpoints internos server-to-server, **sin JWT de usuario**: protegidos por head
 |--------|-----------|----------------|
 | POST | `/api/v1/internal/subscription-invoices/:id/einvoice` | `pr_save_einvoice_result` |
 | GET  | `/api/v1/internal/subscription-invoices/pending-kude` | `pr_list_pending_kude` |
-| POST | `/api/v1/internal/subscription-invoices/:id/einvoice-kude` | `pr_save_einvoice_kude` |
+| POST | `/api/v1/internal/subscription-invoices/:id/einvoice-kude` | `pr_save_einvoice_kude` (legacy) |
+| POST | `/api/v1/internal/subscription-invoices/:id/einvoice-artifacts` | `pr_save_einvoice_artifacts` |
 
 Registro reproducible: `migrations/20260810_subscription_einvoice_sifen.sql` (columnas
-`org_subscription_invoice.einvoice_*` + `app_parameter`) y
-`migrations/20260810_subscription_einvoice_ords.sql` (endpoints ORDS).
+`org_subscription_invoice.einvoice_*` + `app_parameter`),
+`migrations/20260810_subscription_einvoice_ords.sql` (endpoints ORDS base),
+`migrations/20260831_einvoice_artifacts.sql` (XML privado + lease email) y
+`migrations/20260831_einvoice_artifacts_ords.sql` (callback de artefactos).
 
-Flujo completo (trigger, payload, polling de KuDE, envío de mail con adjunto) documentado
-en el header de `PKG_AOX_SUBSCRIPTION_BILLING_API.pls`, sección "Factura electronica SIFEN".
+### POST `/internal/subscription-invoices/:id/einvoice-artifacts`
+
+Body (Astro `poll-kude` → bridge autenticado al firmador):
+
+```json
+{
+  "cdc": "01800...44digitos",
+  "kudeUrl": "https://…/kude.pdf",
+  "xml": "<?xml version=\"1.0\"…>",
+  "xmlSha256": "hex_sha256_lowercase",
+  "xmlSize": 12345,
+  "xmlMime": "application/xml; charset=UTF-8"
+}
+```
+
+Valida CDC de la factura, persiste XML privado (nunca URL pública), verifica SHA-256,
+guarda KuDE URL y reevalúa el envío atómico (XML + PDF) si el email aún no está `SENT`.
+
+Flujo completo (trigger, payload, reconciliación de artefactos, mail con adjuntos)
+documentado en el header de `PKG_AOX_SUBSCRIPTION_BILLING_API.pls`, sección
+"Factura electronica SIFEN".
 
 ## Contratos
 

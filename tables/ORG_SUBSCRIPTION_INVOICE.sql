@@ -31,7 +31,15 @@ CREATE TABLE org_subscription_invoice (
   einvoice_error        VARCHAR2(500)               NULL,
   einvoice_email_status   VARCHAR2(20)                DEFAULT 'NONE' NOT NULL,
   einvoice_email_error    VARCHAR2(500)               NULL,
-  einvoice_email_attempts NUMBER                      DEFAULT 0 NOT NULL
+  einvoice_email_attempts NUMBER                      DEFAULT 0 NOT NULL,
+  einvoice_xml_firmado       CLOB                          NULL,
+  einvoice_xml_sha256        VARCHAR2(64)                  NULL,
+  einvoice_xml_size          NUMBER                        NULL,
+  einvoice_xml_mime          VARCHAR2(100)                 NULL,
+  einvoice_xml_available_at  TIMESTAMP(6) WITH TIME ZONE   NULL,
+  einvoice_email_lease_until TIMESTAMP(6) WITH TIME ZONE   NULL,
+  einvoice_email_mail_id     NUMBER                        NULL,
+  einvoice_email_to          VARCHAR2(255)                 NULL
 )
 /
 
@@ -74,7 +82,16 @@ ALTER TABLE org_subscription_invoice
 PROMPT ALTER TABLE org_subscription_invoice ADD CONSTRAINT chk_orginv_einvoice_status CHECK
 ALTER TABLE org_subscription_invoice
   ADD CONSTRAINT chk_orginv_einvoice_status CHECK (
-    einvoice_status IN ('NONE', 'PENDING', 'SENT_PENDING_KUDE', 'SENT', 'FAILED')
+    -- NONE: no aplica | PENDING: emision pedida | SENT_PENDING_ARTIFACTS: FE aprobada, esperando XML+KuDE+email
+    -- SENT_PENDING_KUDE: alias legacy de SENT_PENDING_ARTIFACTS | SENT: email encolado | FAILED: rechazo SIFEN
+    einvoice_status IN (
+      'NONE',
+      'PENDING',
+      'SENT_PENDING_ARTIFACTS',
+      'SENT_PENDING_KUDE',
+      'SENT',
+      'FAILED'
+    )
   )
 /
 
@@ -135,18 +152,34 @@ COMMENT ON COLUMN org_subscription_invoice.sad_id_storage_addon IS 'Addon de sto
 COMMENT ON COLUMN org_subscription_invoice.rad_id_addon IS 'Complemento de modulo (invoice_type MODULE_ADDON). Sin writes hasta ADDONS_BILLING_LIVE.';
 COMMENT ON COLUMN org_subscription_invoice.gross_amount IS 'Monto antes de descontar saldo a favor.';
 COMMENT ON COLUMN org_subscription_invoice.credit_applied IS 'Gs de saldo a favor aplicados (se consumen al pasar a PAID).';
-COMMENT ON COLUMN org_subscription_invoice.einvoice_status IS 'Ciclo de emision de Factura Electronica SIFEN: NONE (no aplica/no configurado) | PENDING (webhook enviado al firmador) | SENT_PENDING_KUDE (FE aprobada, esperando PDF) | SENT (email con KuDE enviado) | FAILED.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_status IS
+  'Ciclo FE SIFEN vs entrega: NONE | PENDING (emision pedida) | SENT_PENDING_ARTIFACTS (aprobada, esperando XML+KuDE+email; alias legacy SENT_PENDING_KUDE) | SENT (email encolado) | FAILED (rechazo SIFEN).';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_cdc IS 'CDC (44 digitos) del documento emitido en el firmador esign.';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_estado_sifen IS 'estado devuelto por POST /v1/documents del firmador (APROBADO | RECHAZADO | FIRMADO).';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_cod_res IS 'codRes SIFEN (ej. 0260 aprobado).';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_prot_aut IS 'Protocolo de autorizacion SIFEN.';
-COMMENT ON COLUMN org_subscription_invoice.einvoice_kude_url IS 'URL publica del KuDE (PDF) en el bucket del firmador, una vez listo.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_kude_url IS
+  'URL del KuDE (PDF). El XML NO tiene URL publica; vive en einvoice_xml_firmado.';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_ambiente IS 'Ambiente SIFEN de la emision (test | prod), segun el prefijo de la api key usada.';
-COMMENT ON COLUMN org_subscription_invoice.einvoice_sent_at IS 'Cuando se envio el email de factura con el KuDE adjunto al billing_email.';
-COMMENT ON COLUMN org_subscription_invoice.einvoice_error IS 'Ultimo error del ciclo de emision (SIFEN rechazado o fallo de envio de email).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_sent_at IS 'Cuando se encolo el email de factura con XML+PDF al billing_email efectivo.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_error IS 'Ultimo error del ciclo de emision SIFEN (no de email).';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_email_status IS
-  'Envio de correo con KuDE: NONE | PENDING | SENT | FAILED. Independiente de einvoice_status (FE/KuDE).';
+  'Correo con adjuntos XML+PDF: NONE | PENDING (lease) | SENT | FAILED. Independiente del ciclo SIFEN.';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_email_error IS
   'Ultimo error al enviar el mail FACTURASUSCRIPCIONV2 (no debe reabrir emision FE).';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_email_attempts IS
   'Reintentos de envio de correo (acotados en pr_retry_pending_einvoice_emails).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_xml_firmado IS
+  'Copia privada del XML firmado canonico (CLOB). NUNCA exponer ni guardar URL publica.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_xml_sha256 IS
+  'SHA-256 hex (lowercase) del XML firmado.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_xml_size IS 'Tamano en bytes del XML firmado.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_xml_mime IS 'MIME del XML (application/xml; charset=UTF-8).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_xml_available_at IS
+  'Cuando AOX persistio el XML privado (artefacto listo).';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_email_lease_until IS
+  'Vencimiento del claim PENDING de email; expirado permite reintento.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_email_mail_id IS
+  'apex_mail.send mail_id del ultimo intento.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_email_to IS
+  'Snapshot del billing_email efectivo usado en el envio.';
