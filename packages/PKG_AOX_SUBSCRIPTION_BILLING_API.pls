@@ -2200,9 +2200,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
             IF v_founder = 1 AND pi_plan_code = c_plan_premium THEN
                 v_gross := ROUND(v_gross * 0.5);
-                v_desc := 'Suscripcion ' || v_item_name || ' fundador 50% (1 mes)';
+                v_desc := 'Suscripción ' || v_item_name || ' fundador 50% (1 mes)';
             ELSE
-                v_desc := 'Suscripcion ' || v_item_name || ' (1 mes)';
+                v_desc := 'Suscripción ' || v_item_name || ' (1 mes)';
             END IF;
             v_invoice_type := 'SUBSCRIPTION';
 
@@ -2226,7 +2226,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             IF v_addon_suffix IS NOT NULL THEN
                 v_desc := v_item_name || ' + ' || v_addon_suffix || ' (1 mes)';
             ELSE
-                v_desc := 'Suscripcion ' || v_item_name || ' (1 mes)';
+                v_desc := 'Suscripción ' || v_item_name || ' (1 mes)';
             END IF;
 
             IF v_sub_end IS NOT NULL THEN
@@ -2287,7 +2287,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
         pr_apply_credit_to_amount(pi_org_id, v_gross, v_net, v_credit);
         IF v_credit > 0 THEN
-            v_desc := SUBSTR(v_desc || ' - credito ' || TO_CHAR(v_credit) || ' Gs', 1, 255);
+            v_desc := SUBSTR(
+                v_desc || ' - crédito ' || TRIM(TO_CHAR(v_credit, 'FM999G999G999', 'NLS_NUMERIC_CHARACTERS='',.''')) || ' Gs',
+                1,
+                255
+            );
         END IF;
 
         -- Cubierto 100% por saldo: PAID sin Pagopar ni tarjeta.
