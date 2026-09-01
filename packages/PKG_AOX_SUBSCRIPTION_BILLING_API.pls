@@ -87,6 +87,17 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
         po_response_body OUT CLOB
     );
 
+    -- GET /workspace/subscription/invoices/:id/kude
+    -- Devuelve metadatos de descarga del KuDE (PDF) para la org del JWT.
+    -- La URL del KuDE no se expone en el listado; solo este endpoint la entrega
+    -- al proxy autenticado de Bookmate.
+    PROCEDURE pr_get_invoice_kude(
+        pi_auth_header   IN  VARCHAR2,
+        pi_invoice_id    IN  NUMBER,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- POST /pagopar/subscription/webhook  (confirmaci?n Pagopar de facturaci?n de plataforma)
     PROCEDURE pr_subscription_webhook(
         pi_body          IN  CLOB,
@@ -3228,7 +3239,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                    NVL(i.credit_applied, 0) AS credit_applied,
                    i.currency, i.description, i.payment_provider,
                    i.created_at, i.paid_at, i.period_start, i.period_end,
-                   i.external_reference, p.code AS plan_code, p.name AS plan_name
+                   i.external_reference, p.code AS plan_code, p.name AS plan_name,
+                   i.einvoice_cdc,
+                   NVL(i.einvoice_status, 'NONE') AS einvoice_status,
+                   CASE
+                       WHEN i.einvoice_kude_url IS NOT NULL
+                            AND LENGTH(TRIM(i.einvoice_kude_url)) > 0
+                       THEN 1 ELSE 0
+                   END AS factura_disponible
               FROM org_subscription_invoice i
               LEFT JOIN ref_plan p ON p.id_plan = i.pln_id_plan
              WHERE i.org_id_organization = v_org_id
@@ -3253,6 +3271,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                 v_item.put('period_start', fn_ts_to_iso(rec.period_start));
                 v_item.put('period_end', fn_ts_to_iso(rec.period_end));
                 v_item.put('hash', rec.external_reference);
+                v_item.put('cdc', rec.einvoice_cdc);
+                v_item.put('einvoice_status', rec.einvoice_status);
+                v_item.put('factura_disponible', rec.factura_disponible = 1);
                 v_items.append(v_item);
             END;
         END LOOP;
@@ -3275,6 +3296,80 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         WHEN OTHERS THEN
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_list_invoices;
+
+    --------------------------------------------------------------------------
+    -- GET /workspace/subscription/invoices/:id/kude
+    --------------------------------------------------------------------------
+    PROCEDURE pr_get_invoice_kude(
+        pi_auth_header   IN  VARCHAR2,
+        pi_invoice_id    IN  NUMBER,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id     NUMBER;
+        v_cdc        org_subscription_invoice.einvoice_cdc%TYPE;
+        v_kude_url   org_subscription_invoice.einvoice_kude_url%TYPE;
+        v_einvoice   org_subscription_invoice.einvoice_status%TYPE;
+        v_status     org_subscription_invoice.status%TYPE;
+        v_response   json_object_t := json_object_t();
+        v_data       json_object_t := json_object_t();
+    BEGIN
+        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        IF NVL(v_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_session, 'Token invalido o sin organizacion asociada.');
+        END IF;
+
+        IF NVL(pi_invoice_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'invoice_id invalido.');
+        END IF;
+
+        BEGIN
+            SELECT status,
+                   NVL(einvoice_status, 'NONE'),
+                   einvoice_cdc,
+                   einvoice_kude_url
+              INTO v_status, v_einvoice, v_cdc, v_kude_url
+              FROM org_subscription_invoice
+             WHERE id_invoice = pi_invoice_id
+               AND org_id_organization = v_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                po_status_code := pkg_aox_util.c_not_found_code;
+                pkg_aox_util.pr_build_api_error_response(
+                    pi_status_code   => po_status_code,
+                    pi_api_code      => pkg_aox_util.c_api_code_not_found,
+                    pi_message       => 'Factura no encontrada.',
+                    po_response_body => po_response_body
+                );
+                RETURN;
+        END;
+
+        IF v_kude_url IS NULL OR LENGTH(TRIM(v_kude_url)) = 0 THEN
+            po_status_code := pkg_aox_util.c_conflict_code;
+            pkg_aox_util.pr_build_api_error_response(
+                pi_status_code   => po_status_code,
+                pi_api_code      => pkg_aox_util.c_api_code_conflict,
+                pi_message       => 'La factura electronica aun no esta disponible.',
+                po_response_body => po_response_body
+            );
+            RETURN;
+        END IF;
+
+        v_data.put('invoice_id', pi_invoice_id);
+        v_data.put('status', v_status);
+        v_data.put('einvoice_status', v_einvoice);
+        v_data.put('cdc', v_cdc);
+        v_data.put('kude_url', TRIM(v_kude_url));
+        v_data.put('factura_disponible', TRUE);
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_get_invoice_kude;
 
     --------------------------------------------------------------------------
     -- POST /pagopar/subscription/webhook
