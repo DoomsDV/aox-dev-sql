@@ -152,12 +152,18 @@ end pkg_aox_auth_api;
 PROMPT CREATE OR REPLACE PACKAGE BODY pkg_aox_auth_api
 CREATE OR REPLACE package body pkg_aox_auth_api as
     -- CONSTANTES PRIVADAS PARA CÓDIGOS DE RESPUESTA
-    c_verification_template       constant varchar2(50) := 'VERIFICATIONCODE';
     c_verification_ttl_minutes    constant number       := 5;
     c_verification_max_attempts   constant number       := 5;
     c_resend_wait_seconds         constant number       := 60;
     c_invitation_ttl_days         constant number       := 7;
-    c_invitation_template         constant varchar2(50) := 'ACCEPTINVITE';
+
+    function fn_mail_template_id(
+        pi_param_key in varchar2,
+        pi_default   in varchar2
+    ) return varchar2 is
+    begin
+        return nvl(trim(fn_get_parameter(pi_param_key)), pi_default);
+    end fn_mail_template_id;
 
     function fn_json_escape(pi_value in varchar2) return varchar2 is
     begin
@@ -234,7 +240,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         apex_mail.send(
             p_to                 => trim(pi_email),
             p_from               => NVL(fn_get_parameter('MAIL_FROM_ADDRESS'), 'noreply@hasel.app'),
-            p_template_static_id => c_verification_template,
+            p_template_static_id => fn_mail_template_id('APEX_EMAIL_TEMPLATE_VERIFICATIONCODE', 'VERIFICATIONCODEV3'),
             p_placeholders       => '{' ||
                                     '"NOMBRE": "' || fn_json_escape(pi_first_name) || '",' ||
                                     '"CODIGO": "' || fn_json_escape(pi_code) || '"' ||
@@ -1747,6 +1753,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         v_token         varchar2(100);
         v_response_json json_object_t := json_object_t();
         v_first_name    platform_user.first_name%TYPE;
+        v_app_base_url  varchar2(500);
         v_apex_session_created boolean := false;
     begin
         -- Parsear JSON
@@ -1873,13 +1880,19 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
             );
             v_apex_session_created := true;
 
+            v_app_base_url := rtrim(
+                nvl(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://staging.hasel.app'),
+                '/'
+            );
+
             apex_mail.send(
                 p_to                 => trim(v_email),
                 p_from               => NVL(fn_get_parameter('MAIL_FROM_ADDRESS'), 'noreply@hasel.app'),
-                p_template_static_id => 'PWDRESET',
+                p_template_static_id => fn_mail_template_id('APEX_EMAIL_TEMPLATE_PWDRESET', 'PWDRESETV3'),
                 p_placeholders       => '{' ||
-                                        '"NOMBRE": "' || v_first_name || '",' ||
-                                        '"TOKEN": "' || v_token || '"' ||
+                                        '"NOMBRE": "' || fn_json_escape(v_first_name) || '",' ||
+                                        '"TOKEN": "' || fn_json_escape(v_token) || '",' ||
+                                        '"BASE_URL": "' || fn_json_escape(v_app_base_url) || '"' ||
                                         '}'
             );
 
@@ -2063,7 +2076,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         apex_mail.send(
             p_to                 => trim(pi_email),
             p_from               => nvl(fn_get_parameter('MAIL_FROM_ADDRESS'), 'noreply@hasel.app'),
-            p_template_static_id => c_invitation_template,
+            p_template_static_id => fn_mail_template_id('APEX_EMAIL_TEMPLATE_ACCEPTINVITE', 'ACCEPTINVITEV3'),
             p_placeholders       => '{' ||
                                     '"ORG_NAME": "' || fn_json_escape(v_org_name) || '",' ||
                                     '"INVITE_URL": "' || fn_json_escape(trim(pi_invite_url)) || '",' ||

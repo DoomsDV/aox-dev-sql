@@ -1220,7 +1220,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_mail_id := apex_mail.send(
             p_to                 => TRIM(v_billing_email),
             p_from               => NVL(fn_get_parameter('MAIL_FROM_ADDRESS'), 'noreply@hasel.app'),
-            p_template_static_id => 'FACTURASUSCRIPCIONV3',
+            p_template_static_id => nvl(trim(fn_get_parameter('APEX_EMAIL_TEMPLATE_FACTURASUSCRIPCION')), 'FACTURASUSCRIPCIONV3'),
             p_placeholders       => '{' ||
                                     '"NOMBRE": "' || fn_json_escape(v_billing_name) || '",' ||
                                     '"NUMERO_FACTURA": "' || fn_json_escape(v_invoice_number) || '",' ||
