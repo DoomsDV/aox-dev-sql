@@ -29,17 +29,29 @@ DECLARE
     v_response_body CLOB;
 BEGIN
     pkg_aox_subscription_billing_api.pr_save_einvoice_artifacts(
-        pi_service_token => owa_util.get_cgi_env('HTTP_X_SERVICE_TOKEN'),
+        pi_service_token => :service_token,
         pi_invoice_id    => TO_NUMBER(:id),
         pi_body          => :body_text,
         po_status_code   => v_status_code,
         po_response_body => v_response_body
     );
-    :status := v_status_code;
+    :status_code := v_status_code;
     owa_util.mime_header('application/json', TRUE);
     IF v_response_body IS NOT NULL THEN htp.prn(v_response_body); END IF;
 END;
         ]'
+    );
+
+    ORDS.define_parameter(
+        p_module_name        => 'hasel',
+        p_pattern            => 'internal/subscription-invoices/:id/einvoice-artifacts',
+        p_method             => 'POST',
+        p_name               => 'X-Service-Token',
+        p_bind_variable_name => 'service_token',
+        p_source_type        => 'HEADER',
+        p_param_type         => 'STRING',
+        p_access_method      => 'IN',
+        p_comments           => 'Token compartido Astro<->ORDS'
     );
 
     COMMIT;
