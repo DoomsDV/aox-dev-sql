@@ -20,7 +20,7 @@ CREATE TABLE org_subscription_invoice (
   payment_provider    VARCHAR2(50)                NULL,
   external_reference  VARCHAR2(128)               NULL,
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
-  einvoice_status       VARCHAR2(20)                DEFAULT 'NONE' NOT NULL,
+  einvoice_status       VARCHAR2(30)                DEFAULT 'NONE' NOT NULL,
   einvoice_cdc          VARCHAR2(44)                NULL,
   einvoice_estado_sifen VARCHAR2(20)                NULL,
   einvoice_cod_res      VARCHAR2(10)                NULL,

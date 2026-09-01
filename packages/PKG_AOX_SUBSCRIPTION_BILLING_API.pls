@@ -594,7 +594,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         -- Medio de pago segun proveedor real (no forzar tarjeta en pagos por saldo).
         CASE LOWER(NVL(v_provider, ''))
             WHEN 'credit' THEN
-                v_medio_pago := 13; -- Compensacion
+                v_medio_pago := 14; -- Compensación (E606)
                 v_des_medio  := 'Compensación';
             WHEN 'pagopar' THEN
                 v_medio_pago := 3;
@@ -643,8 +643,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_payload.put('monto', v_amount);
         v_payload.put('tipoTransaccion', 2);
         v_payload.put('desTipoTransaccion', 'Prestación de servicios');
-        v_payload.put('indPres', 3);
-        v_payload.put('desIndPres', 'Operación electrónica (venta a distancia, internet, etc.)');
+        -- Manual E011/E012: iIndPres=2 → dDesIndPres exacto "Operación electrónica" (10-30).
+        -- El texto largo "(venta a distancia…)" excede longitud y no está en el catálogo → 0160.
+        v_payload.put('indPres', 2);
+        v_payload.put('desIndPres', 'Operación electrónica');
         v_payload.put('condicion', 'contado');
         v_payload.put('medioPago', v_medio_pago);
         v_payload.put('desMedioPago', v_des_medio);
@@ -676,7 +678,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_attempts      NUMBER;
         v_emission_key  VARCHAR2(64);
         v_cdc           VARCHAR2(44);
-        v_estatus       VARCHAR2(20);
+        v_estatus       VARCHAR2(30);
         v_resp_json     json_object_t;
         v_resp_cdc      VARCHAR2(44);
         v_resp_data     json_object_t;
@@ -3860,9 +3862,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_prot_aut      VARCHAR2(30);
         v_ambiente      VARCHAR2(10);
         v_mensaje       VARCHAR2(500);
-        v_new_status    VARCHAR2(20);
+        v_new_status    VARCHAR2(30);
         v_cur_cdc       VARCHAR2(44);
-        v_cur_status    VARCHAR2(20);
+        v_cur_status    VARCHAR2(30);
         v_rows          NUMBER;
     BEGIN
         pr_assert_service_token(pi_service_token);
@@ -4105,7 +4107,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_xml_size     NUMBER;
         v_xml_mime     VARCHAR2(100);
         v_cur_cdc      VARCHAR2(44);
-        v_cur_status   VARCHAR2(20);
+        v_cur_status   VARCHAR2(30);
         v_cur_kude     VARCHAR2(500);
         v_cur_sha      VARCHAR2(64);
         v_xml_blob     BLOB;
