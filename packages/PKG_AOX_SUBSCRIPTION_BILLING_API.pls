@@ -247,6 +247,119 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         RETURN TO_CHAR(pi_ts, c_iso_fmt);
     END fn_ts_to_iso;
 
+    -- Solo Aoxdev puede consumir este fault hook de una vez. Aunque alguien
+    -- copie los parámetros, la comparación explícita de DB_NAME bloquea
+    -- producción. Queda apagado por defecto.
+    FUNCTION fn_consume_staging_fault_after_push(pi_org_id IN NUMBER) RETURN BOOLEAN IS
+        v_target_org NUMBER;
+    BEGIN
+        IF SYS_CONTEXT('USERENV', 'DB_NAME') <> 'G9549F707E8EBFA_AOXDEV'
+           OR NVL(fn_get_parameter('EINVOICE_STAGING_FAULTS_ENABLED'), '0') <> '1'
+           OR NVL(fn_get_parameter('EINVOICE_STAGING_FAULT_AFTER_PUSH_QUEUE'), '0') <> '1' THEN
+            RETURN FALSE;
+        END IF;
+
+        BEGIN
+            v_target_org := TO_NUMBER(fn_get_parameter('EINVOICE_STAGING_FAULT_ORG_ID'));
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN FALSE;
+        END;
+        IF v_target_org <> pi_org_id THEN
+            RETURN FALSE;
+        END IF;
+
+        UPDATE /*+ no_parallel */ app_parameter
+           SET param_value = '0'
+         WHERE param_key = 'EINVOICE_STAGING_FAULT_AFTER_PUSH_QUEUE'
+           AND param_value = '1';
+        RETURN SQL%ROWCOUNT = 1;
+    END fn_consume_staging_fault_after_push;
+
+    -- APEX Mail conserva los enviados en LOG y los pendientes en QUEUE. Si
+    -- ninguno es visible, el efecto post-push es ambiguo y no se crea otro mail.
+    FUNCTION fn_einvoice_mail_location(pi_mail_id IN NUMBER) RETURN VARCHAR2 IS
+        v_count NUMBER;
+    BEGIN
+        IF pi_mail_id IS NULL THEN
+            RETURN 'MISSING';
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_count
+          FROM apex_mail_log
+         WHERE mail_id = pi_mail_id;
+        IF v_count > 0 THEN
+            RETURN 'SENT';
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_count
+          FROM apex_mail_queue
+         WHERE id = pi_mail_id;
+        IF v_count > 0 THEN
+            RETURN 'QUEUED';
+        END IF;
+
+        RETURN 'MISSING';
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN 'UNKNOWN';
+    END fn_einvoice_mail_location;
+
+    PROCEDURE pr_reconcile_einvoice_mail(pi_invoice_id IN NUMBER) IS
+        v_status  org_subscription_invoice.einvoice_email_status%TYPE;
+        v_mail_id org_subscription_invoice.einvoice_email_mail_id%TYPE;
+        v_location VARCHAR2(20);
+    BEGIN
+        SELECT NVL(einvoice_email_status, 'NONE'), einvoice_email_mail_id
+          INTO v_status, v_mail_id
+          FROM org_subscription_invoice
+         WHERE id_invoice = pi_invoice_id
+         FOR UPDATE;
+
+        IF v_status NOT IN ('PENDING', 'QUEUED', 'UNKNOWN') THEN
+            RETURN;
+        END IF;
+
+        v_location := fn_einvoice_mail_location(v_mail_id);
+        IF v_location = 'SENT' THEN
+            UPDATE /*+ no_parallel */ org_subscription_invoice
+               SET einvoice_status = 'SENT',
+                   einvoice_sent_at = NVL(einvoice_sent_at, SYSTIMESTAMP),
+                   einvoice_email_status = 'SENT',
+                   einvoice_email_error = NULL,
+                   einvoice_email_lease_until = NULL,
+                   einvoice_email_reconciled_at = SYSTIMESTAMP
+             WHERE id_invoice = pi_invoice_id;
+        ELSIF v_location = 'QUEUED' THEN
+            UPDATE /*+ no_parallel */ org_subscription_invoice
+               SET einvoice_email_status = 'QUEUED',
+                   einvoice_email_error = NULL,
+                   einvoice_email_lease_until = NULL,
+                   einvoice_email_reconciled_at = SYSTIMESTAMP
+             WHERE id_invoice = pi_invoice_id;
+        ELSIF v_mail_id IS NULL THEN
+            UPDATE /*+ no_parallel */ org_subscription_invoice
+               SET einvoice_email_status = 'FAILED',
+                   einvoice_email_error = NVL(einvoice_email_error, 'Claim de correo sin mail_id; reintento seguro'),
+                   einvoice_email_lease_until = NULL,
+                   einvoice_email_reconciled_at = SYSTIMESTAMP
+             WHERE id_invoice = pi_invoice_id;
+        ELSE
+            UPDATE /*+ no_parallel */ org_subscription_invoice
+               SET einvoice_email_status = 'UNKNOWN',
+                   einvoice_email_error = 'mail_id no encontrado en APEX Mail; no se reenvía automáticamente',
+                   einvoice_email_lease_until = NULL,
+                   einvoice_email_reconciled_at = SYSTIMESTAMP
+             WHERE id_invoice = pi_invoice_id;
+        END IF;
+        COMMIT;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            NULL;
+    END pr_reconcile_einvoice_mail;
+
     FUNCTION fn_is_forma_pago_allowed(pi_forma_pago IN NUMBER) RETURN BOOLEAN IS
     BEGIN
         RETURN pi_forma_pago IN (c_forma_pago_bancard, c_forma_pago_qr);
@@ -679,8 +792,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_emission_key  VARCHAR2(64);
         v_cdc           VARCHAR2(44);
         v_estatus       VARCHAR2(30);
+        v_estado_sifen  VARCHAR2(20);
+        v_cod_res       VARCHAR2(10);
         v_resp_json     json_object_t;
         v_resp_cdc      VARCHAR2(44);
+        v_resp_estado   VARCHAR2(20);
+        v_resp_cod_res  VARCHAR2(10);
+        v_resp_code     VARCHAR2(100);
         v_resp_data     json_object_t;
         v_terminal_fail BOOLEAN;
     BEGIN
@@ -704,6 +822,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         FOR i IN 1 .. v_ids.COUNT LOOP
             v_id_outbox := v_ids(i);
             v_resp_cdc := NULL;
+            v_resp_estado := NULL;
+            v_resp_cod_res := NULL;
+            v_resp_code := NULL;
             BEGIN
                 SELECT invoice_id, org_id_organization, attempts,
                        NVL(emission_key, 'INV-' || TO_CHAR(invoice_id))
@@ -721,13 +842,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                  WHERE id_outbox = v_id_outbox;
                 COMMIT;
 
-                SELECT einvoice_cdc, einvoice_status
-                  INTO v_cdc, v_estatus
+                SELECT einvoice_cdc, einvoice_status, einvoice_estado_sifen, einvoice_cod_res
+                  INTO v_cdc, v_estatus, v_estado_sifen, v_cod_res
                   FROM org_subscription_invoice
                  WHERE id_invoice = v_invoice_id;
 
-                -- Solo DONE con resultado terminal verificable en Oracle.
-                IF v_cdc IS NOT NULL OR v_estatus IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE', 'SENT') THEN
+                -- Solo DONE con la autorización SIFEN verificable en Oracle.
+                IF v_cdc IS NOT NULL
+                   AND v_estatus IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE', 'SENT')
+                   AND UPPER(NVL(v_estado_sifen, '')) = 'APROBADO'
+                   AND TRIM(v_cod_res) = '0260' THEN
                     UPDATE subscription_einvoice_outbox
                        SET status = 'DONE',
                            processed_at = systimestamp,
@@ -791,19 +915,35 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                     IF v_resp_json.has('data') AND NOT v_resp_json.get('data').is_null THEN
                         v_resp_data := TREAT(v_resp_json.get('data') AS json_object_t);
                         v_resp_cdc := v_resp_data.get_string('cdc');
+                        IF v_resp_data.has('estado') THEN
+                            v_resp_estado := v_resp_data.get_string('estado');
+                        END IF;
+                        IF v_resp_data.has('codRes') THEN
+                            v_resp_cod_res := v_resp_data.get_string('codRes');
+                        END IF;
                     END IF;
                     IF v_resp_cdc IS NULL AND v_resp_json.has('cdc') THEN
                         v_resp_cdc := v_resp_json.get_string('cdc');
                     END IF;
+                    IF v_resp_json.has('code') THEN
+                        v_resp_code := v_resp_json.get_string('code');
+                    END IF;
                 EXCEPTION
                     WHEN OTHERS THEN
                         v_resp_cdc := NULL;
+                        v_resp_estado := NULL;
+                        v_resp_cod_res := NULL;
+                        v_resp_code := NULL;
                 END;
 
-                IF v_resp_cdc IS NOT NULL THEN
+                IF v_resp_cdc IS NOT NULL
+                   AND UPPER(NVL(v_resp_estado, '')) = 'APROBADO'
+                   AND TRIM(v_resp_cod_res) = '0260' THEN
                     -- Persistencia best-effort si el callback ORDS aun no corrio.
                     UPDATE /*+ no_parallel */ org_subscription_invoice
                        SET einvoice_cdc    = NVL(einvoice_cdc, v_resp_cdc),
+                           einvoice_estado_sifen = 'APROBADO',
+                           einvoice_cod_res = '0260',
                            einvoice_status = CASE
                                                WHEN einvoice_status IN (
                                                       'SENT_PENDING_ARTIFACTS',
@@ -823,6 +963,25 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                            lease_owner = NULL,
                            lease_until = NULL
                      WHERE id_outbox = v_id_outbox;
+                ELSIF v_resp_cdc IS NOT NULL
+                      AND UPPER(NVL(v_resp_estado, '')) = 'RECHAZADO' THEN
+                    UPDATE /*+ no_parallel */ org_subscription_invoice
+                       SET einvoice_estado_sifen = v_resp_estado,
+                           einvoice_cod_res = v_resp_cod_res,
+                           einvoice_status = 'FAILED',
+                           einvoice_error = SUBSTR('SIFEN rechazo' ||
+                               CASE WHEN v_resp_cod_res IS NOT NULL THEN ' codRes=' || v_resp_cod_res END, 1, 500)
+                     WHERE id_invoice = v_invoice_id
+                       AND einvoice_cdc IS NULL
+                       AND NVL(einvoice_status, 'NONE') IN ('NONE', 'PENDING', 'FAILED');
+                    UPDATE subscription_einvoice_outbox
+                       SET status = 'FAILED',
+                           processed_at = systimestamp,
+                           last_error = SUBSTR('SIFEN rechazo' ||
+                               CASE WHEN v_resp_cod_res IS NOT NULL THEN ' codRes=' || v_resp_cod_res END, 1, 500),
+                           lease_owner = NULL,
+                           lease_until = NULL
+                     WHERE id_outbox = v_id_outbox;
                 ELSIF v_status_code BETWEEN 200 AND 299 THEN
                     -- 2xx sin CDC: NO cerrar DONE (evita PENDING muerto). Reintento con lease.
                     UPDATE subscription_einvoice_outbox
@@ -833,9 +992,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                            processed_at = NULL
                      WHERE id_outbox = v_id_outbox;
                 ELSE
+                    -- La key ya tiene un DE firmado en recuperación: conservar la
+                    -- outbox y esperar al worker, jamás marcar la invoice como fallida.
                     v_terminal_fail := (NVL(v_attempts, 0) + 1 >= v_max_attempts)
                                        OR (v_status_code BETWEEN 400 AND 499
-                                           AND v_status_code NOT IN (408, 429));
+                                           AND v_status_code NOT IN (408, 409, 429));
                     IF v_terminal_fail THEN
                         UPDATE subscription_einvoice_outbox
                            SET status = 'FAILED',
@@ -929,8 +1090,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_lang_ctx       INTEGER := DBMS_LOB.DEFAULT_LANG_CTX;
         v_warning        INTEGER;
         v_hash_hex       VARCHAR2(64);
+        v_mail_persisted BOOLEAN := FALSE;
+        v_push_started   BOOLEAN := FALSE;
     BEGIN
-        -- Claim atomico con lease real: NONE/FAILED o PENDING expirado.
+        -- Claim atomico con lease real: NONE/FAILED o PENDING expirado sin
+        -- mail_id. Un mail_id existente se reconcilia, nunca se reemplaza.
         UPDATE /*+ no_parallel */ org_subscription_invoice
            SET einvoice_email_status = 'PENDING',
                einvoice_email_attempts = NVL(einvoice_email_attempts, 0) + 1,
@@ -946,6 +1110,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                    NVL(einvoice_email_status, 'NONE') IN ('NONE', 'FAILED')
                 OR (
                        einvoice_email_status = 'PENDING'
+                   AND einvoice_email_mail_id IS NULL
                    AND (einvoice_email_lease_until IS NULL
                         OR einvoice_email_lease_until < systimestamp)
                    )
@@ -1051,8 +1216,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             p_mime_type   => 'application/pdf'
         );
 
-        -- Un solo push_queue tras ambos adjuntos.
+        -- Punto de no retorno: el mismo commit persiste el mail APEX y su
+        -- identidad en la invoice antes de pedir la entrega.
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_email_status = 'QUEUED',
+               einvoice_email_error = NULL,
+               einvoice_email_lease_until = NULL,
+               einvoice_email_mail_id = v_mail_id,
+               einvoice_email_to = TRIM(v_billing_email),
+               einvoice_email_queued_at = SYSTIMESTAMP
+         WHERE id_invoice = pi_invoice_id
+           AND einvoice_email_status = 'PENDING';
+        COMMIT;
+        v_mail_persisted := TRUE;
+
+        -- Un solo push_queue tras ambos adjuntos y el registro durable.
+        v_push_started := TRUE;
         apex_mail.push_queue;
+        IF fn_consume_staging_fault_after_push(v_org_id) THEN
+            RAISE_APPLICATION_ERROR(-20093, 'Fallo staging inyectado después de apex_mail.push_queue.');
+        END IF;
 
         UPDATE /*+ no_parallel */ org_subscription_invoice
            SET einvoice_status            = 'SENT',
@@ -1087,14 +1270,30 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                     WHEN OTHERS THEN NULL;
                 END;
             END IF;
-            -- Fallo de email: NO tocar einvoice_status FE/artefactos ni permitir nueva emision.
-            UPDATE /*+ no_parallel */ org_subscription_invoice
-               SET einvoice_email_status = 'FAILED',
-                   einvoice_email_error  = SUBSTR(v_error_message, 1, 500),
-                   einvoice_email_lease_until = NULL,
-                   einvoice_email_mail_id = NVL(v_mail_id, einvoice_email_mail_id)
-             WHERE id_invoice = pi_invoice_id
-               AND NVL(einvoice_email_status, 'NONE') <> 'SENT';
+            IF NOT v_mail_persisted THEN
+                -- No hay mail_id durable: revertir el posible APEX_MAIL.SEND
+                -- parcial antes de habilitar un reintento que cree otro mail.
+                ROLLBACK;
+                UPDATE /*+ no_parallel */ org_subscription_invoice
+                   SET einvoice_email_status = 'FAILED',
+                       einvoice_email_error = SUBSTR(v_error_message, 1, 500),
+                       einvoice_email_lease_until = NULL
+                 WHERE id_invoice = pi_invoice_id
+                   AND NVL(einvoice_email_status, 'NONE') <> 'SENT';
+            ELSE
+                -- Tras registrar mail_id, una caída luego de push_queue es
+                -- ambigua: no permitir un segundo apex_mail.send.
+                UPDATE /*+ no_parallel */ org_subscription_invoice
+                   SET einvoice_email_status = CASE
+                           WHEN v_push_started THEN 'UNKNOWN'
+                           ELSE 'QUEUED'
+                       END,
+                       einvoice_email_error = SUBSTR(v_error_message, 1, 500),
+                       einvoice_email_lease_until = NULL,
+                       einvoice_email_reconciled_at = SYSTIMESTAMP
+                 WHERE id_invoice = pi_invoice_id
+                   AND NVL(einvoice_email_status, 'NONE') <> 'SENT';
+            END IF;
             COMMIT;
             pkg_aox_util.pr_log_api(
                 pi_api_name        => 'ESIGN_EINVOICE',
@@ -1115,13 +1314,40 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_limit PLS_INTEGER := LEAST(GREATEST(NVL(pi_limit, 20), 1), 100);
         v_max_attempts NUMBER := 5;
     BEGIN
-        -- Recuperar PENDING con lease vencido sin reabrir FE.
+        -- Todo mail_id durable se reconcilia antes de considerar un nuevo
+        -- apex_mail.send. UNKNOWN nunca pasa a FAILED automáticamente.
+        FOR rec IN (
+            SELECT id_invoice
+              FROM org_subscription_invoice
+             WHERE einvoice_sent_at IS NULL
+               AND (
+                     NVL(einvoice_email_status, 'NONE') IN ('QUEUED', 'UNKNOWN')
+                     OR (
+                         einvoice_email_status = 'PENDING'
+                         AND einvoice_email_mail_id IS NOT NULL
+                     )
+                   )
+               AND (pi_org_id IS NULL OR org_id_organization = pi_org_id)
+             ORDER BY id_invoice
+             FETCH FIRST v_limit ROWS ONLY
+        ) LOOP
+            BEGIN
+                pr_reconcile_einvoice_mail(rec.id_invoice);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+        END LOOP;
+
+        -- Un PENDING vencido sin mail_id puede fallar y reintentarse: la
+        -- transacción APEX parcial se revierte dentro de pr_send_einvoice_email.
         UPDATE /*+ no_parallel */ org_subscription_invoice
            SET einvoice_email_status = 'FAILED',
                einvoice_email_error  = NVL(einvoice_email_error, 'PENDING lease caducado; reintento automatico'),
                einvoice_email_lease_until = NULL
          WHERE einvoice_email_status = 'PENDING'
            AND einvoice_sent_at IS NULL
+           AND einvoice_email_mail_id IS NULL
            AND einvoice_cdc IS NOT NULL
            AND einvoice_kude_url IS NOT NULL
            AND einvoice_xml_firmado IS NOT NULL
@@ -3908,7 +4134,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             RETURN;
         END IF;
 
-        IF UPPER(NVL(v_estado, '')) = 'APROBADO' AND v_cdc IS NOT NULL THEN
+        IF UPPER(NVL(v_estado, '')) = 'APROBADO'
+           AND TRIM(v_cod_res) = '0260'
+           AND v_cdc IS NOT NULL THEN
             v_new_status := 'SENT_PENDING_ARTIFACTS';
         ELSE
             v_new_status := 'FAILED';

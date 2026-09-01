@@ -32,6 +32,8 @@ CREATE TABLE org_subscription_invoice (
   einvoice_email_status   VARCHAR2(20)                DEFAULT 'NONE' NOT NULL,
   einvoice_email_error    VARCHAR2(500)               NULL,
   einvoice_email_attempts NUMBER                      DEFAULT 0 NOT NULL,
+  einvoice_email_queued_at TIMESTAMP(6) WITH TIME ZONE NULL,
+  einvoice_email_reconciled_at TIMESTAMP(6) WITH TIME ZONE NULL,
   einvoice_xml_firmado       CLOB                          NULL,
   einvoice_xml_sha256        VARCHAR2(64)                  NULL,
   einvoice_xml_size          NUMBER                        NULL,
@@ -98,7 +100,7 @@ ALTER TABLE org_subscription_invoice
 PROMPT ALTER TABLE org_subscription_invoice ADD CONSTRAINT chk_orginv_einvoice_email_status CHECK
 ALTER TABLE org_subscription_invoice
   ADD CONSTRAINT chk_orginv_einvoice_email_status CHECK (
-    einvoice_email_status IN ('NONE', 'PENDING', 'SENT', 'FAILED')
+    einvoice_email_status IN ('NONE', 'PENDING', 'QUEUED', 'UNKNOWN', 'SENT', 'FAILED')
   )
 /
 
@@ -164,7 +166,7 @@ COMMENT ON COLUMN org_subscription_invoice.einvoice_ambiente IS 'Ambiente SIFEN 
 COMMENT ON COLUMN org_subscription_invoice.einvoice_sent_at IS 'Cuando se encolo el email de factura con XML+PDF al billing_email efectivo.';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_error IS 'Ultimo error del ciclo de emision SIFEN (no de email).';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_email_status IS
-  'Correo con adjuntos XML+PDF: NONE | PENDING (lease) | SENT | FAILED. Independiente del ciclo SIFEN.';
+  'Correo con adjuntos XML+PDF: NONE | PENDING | QUEUED | UNKNOWN | SENT | FAILED.';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_email_error IS
   'Ultimo error al enviar el mail FACTURASUSCRIPCIONV2 (no debe reabrir emision FE).';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_email_attempts IS
@@ -183,3 +185,7 @@ COMMENT ON COLUMN org_subscription_invoice.einvoice_email_mail_id IS
   'apex_mail.send mail_id del ultimo intento.';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_email_to IS
   'Snapshot del billing_email efectivo usado en el envio.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_email_queued_at IS
+  'Momento en que el mail_id y sus dos adjuntos quedaron confirmados antes de push_queue.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_email_reconciled_at IS
+  'Última reconciliación del mail_id contra APEX Mail.';
