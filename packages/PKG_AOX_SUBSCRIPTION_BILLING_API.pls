@@ -1089,6 +1089,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_xml_mime       VARCHAR2(100);
         v_billing_name   org_billing_profile.billing_name%TYPE;
         v_billing_email  org_billing_profile.billing_email%TYPE;
+        v_invoice_number VARCHAR2(20);
+        v_app_base_url   VARCHAR2(500);
         v_pdf_blob       BLOB;
         v_xml_blob       BLOB;
         v_mail_id        NUMBER;
@@ -1203,13 +1205,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         );
         v_apex_session_created := TRUE;
 
+        IF REGEXP_LIKE(v_cdc, '^[[:digit:]]{44}$') THEN
+            v_invoice_number := SUBSTR(v_cdc, 12, 3) || '-' ||
+                                SUBSTR(v_cdc, 15, 3) || '-' ||
+                                SUBSTR(v_cdc, 18, 7);
+        ELSE
+            v_invoice_number := v_cdc;
+        END IF;
+        v_app_base_url := RTRIM(
+            NVL(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://staging.hasel.app'),
+            '/'
+        );
+
         v_mail_id := apex_mail.send(
             p_to                 => TRIM(v_billing_email),
             p_from               => NVL(fn_get_parameter('MAIL_FROM_ADDRESS'), 'noreply@hasel.app'),
-            p_template_static_id => 'FACTURASUSCRIPCIONV2',
+            p_template_static_id => 'FACTURASUSCRIPCIONV3',
             p_placeholders       => '{' ||
                                     '"NOMBRE": "' || fn_json_escape(v_billing_name) || '",' ||
-                                    '"CDC": "' || fn_json_escape(v_cdc) || '"' ||
+                                    '"NUMERO_FACTURA": "' || fn_json_escape(v_invoice_number) || '",' ||
+                                    '"CDC": "' || fn_json_escape(v_cdc) || '",' ||
+                                    '"BASE_URL": "' || fn_json_escape(v_app_base_url) || '"' ||
                                     '}'
         );
 
