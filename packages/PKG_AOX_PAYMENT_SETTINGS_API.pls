@@ -6,6 +6,44 @@ CREATE OR REPLACE PACKAGE pkg_aox_payment_settings_api IS
         pi_org_id IN NUMBER
     ) RETURN NUMBER;
 
+    FUNCTION fn_org_enforcement_level(
+        pi_org_id IN NUMBER
+    ) RETURN VARCHAR2;
+
+    FUNCTION fn_org_is_unpublished(
+        pi_org_id IN NUMBER
+    ) RETURN NUMBER;
+
+    FUNCTION fn_blocks_public_booking(
+        pi_org_id IN NUMBER
+    ) RETURN NUMBER;
+
+    PROCEDURE pr_assert_public_access(
+        pi_org_id IN NUMBER
+    );
+
+    PROCEDURE pr_assert_new_internal_appointment(
+        pi_org_id IN NUMBER
+    );
+
+    PROCEDURE pr_ensure_settings_row(
+        pi_org_id IN NUMBER
+    );
+
+    PROCEDURE pr_escalate_refund_enforcement(
+        pi_org_id        IN NUMBER,
+        pi_reason        IN VARCHAR2,
+        pi_dispute_id    IN NUMBER DEFAULT NULL,
+        pi_actor_user_id IN NUMBER DEFAULT NULL,
+        pi_max_level     IN VARCHAR2 DEFAULT 'PUBLIC_UNPUBLISHED'
+    );
+
+    PROCEDURE pr_restore_refund_enforcement(
+        pi_org_id        IN NUMBER,
+        pi_reason        IN VARCHAR2,
+        pi_actor_user_id IN NUMBER
+    );
+
     /** Monto de seña del servicio (0 si no aplica / plan / SIPAP off). */
     FUNCTION fn_calculate_deposit(
         pi_ser_id IN NUMBER,
@@ -41,6 +79,225 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
     END pr_assert_admin;
+
+    FUNCTION fn_level_rank(pi_level IN VARCHAR2) RETURN NUMBER IS
+    BEGIN
+        RETURN CASE UPPER(TRIM(NVL(pi_level, 'NONE')))
+            WHEN 'NONE' THEN 0
+            WHEN 'DEPOSITS_ONLY' THEN 1
+            WHEN 'PUBLIC_BOOKINGS' THEN 2
+            WHEN 'PUBLIC_UNPUBLISHED' THEN 3
+            WHEN 'OPERATIONS_SUSPENDED' THEN 4
+            ELSE 0
+        END;
+    END fn_level_rank;
+
+    FUNCTION fn_rank_level(pi_rank IN NUMBER) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN CASE pi_rank
+            WHEN 1 THEN 'DEPOSITS_ONLY'
+            WHEN 2 THEN 'PUBLIC_BOOKINGS'
+            WHEN 3 THEN 'PUBLIC_UNPUBLISHED'
+            WHEN 4 THEN 'OPERATIONS_SUSPENDED'
+            ELSE 'NONE'
+        END;
+    END fn_rank_level;
+
+    PROCEDURE pr_ensure_settings_row(pi_org_id IN NUMBER) IS
+    BEGIN
+        IF NVL(pi_org_id, 0) <= 0 THEN
+            RETURN;
+        END IF;
+        INSERT INTO org_payment_settings (org_id_organization, deposits_enabled)
+        SELECT pi_org_id, 0
+          FROM dual
+         WHERE NOT EXISTS (
+            SELECT 1 FROM org_payment_settings WHERE org_id_organization = pi_org_id
+         );
+    EXCEPTION
+        WHEN DUP_VAL_ON_INDEX THEN
+            NULL;
+    END pr_ensure_settings_row;
+
+    FUNCTION fn_org_enforcement_level(
+        pi_org_id IN NUMBER
+    ) RETURN VARCHAR2 IS
+        v_level VARCHAR2(30);
+    BEGIN
+        IF NVL(pi_org_id, 0) <= 0 THEN
+            RETURN 'NONE';
+        END IF;
+        BEGIN
+            SELECT /*+ no_parallel */ NVL(refund_enforcement_level, 'NONE')
+              INTO v_level
+              FROM org_payment_settings
+             WHERE org_id_organization = pi_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RETURN 'NONE';
+        END;
+        RETURN UPPER(TRIM(v_level));
+    END fn_org_enforcement_level;
+
+    FUNCTION fn_org_is_unpublished(
+        pi_org_id IN NUMBER
+    ) RETURN NUMBER IS
+    BEGIN
+        IF fn_org_enforcement_level(pi_org_id) IN ('PUBLIC_UNPUBLISHED', 'OPERATIONS_SUSPENDED') THEN
+            RETURN 1;
+        END IF;
+        RETURN 0;
+    END fn_org_is_unpublished;
+
+    FUNCTION fn_blocks_public_booking(
+        pi_org_id IN NUMBER
+    ) RETURN NUMBER IS
+    BEGIN
+        IF fn_org_enforcement_level(pi_org_id) IN (
+            'PUBLIC_BOOKINGS',
+            'PUBLIC_UNPUBLISHED',
+            'OPERATIONS_SUSPENDED'
+        ) THEN
+            RETURN 1;
+        END IF;
+        RETURN 0;
+    END fn_blocks_public_booking;
+
+    PROCEDURE pr_assert_public_access(
+        pi_org_id IN NUMBER
+    ) IS
+    BEGIN
+        IF fn_blocks_public_booking(pi_org_id) = 1 THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_forbidden,
+                'La agenda online no esta disponible en este momento. Contacta al local o a soporte Hasel.'
+            );
+        END IF;
+    END pr_assert_public_access;
+
+    PROCEDURE pr_assert_new_internal_appointment(
+        pi_org_id IN NUMBER
+    ) IS
+    BEGIN
+        IF fn_org_enforcement_level(pi_org_id) = 'OPERATIONS_SUSPENDED' THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_forbidden,
+                'La agenda esta suspendida por Operaciones de Hasel. Contacta a soporte.'
+            );
+        END IF;
+    END pr_assert_new_internal_appointment;
+
+    PROCEDURE pr_sync_deposits_flag(
+        pi_org_id IN NUMBER,
+        pi_level  IN VARCHAR2
+    ) IS
+        v_suspended NUMBER := CASE WHEN NVL(pi_level, 'NONE') = 'NONE' THEN 0 ELSE 1 END;
+    BEGIN
+        UPDATE org_payment_settings
+           SET deposits_suspended        = v_suspended,
+               deposits_enabled          = CASE WHEN v_suspended = 1 THEN 0 ELSE deposits_enabled END,
+               deposits_suspended_at     = CASE
+                                             WHEN v_suspended = 1 THEN NVL(deposits_suspended_at, CURRENT_TIMESTAMP)
+                                             ELSE NULL
+                                           END,
+               deposits_suspended_reason = CASE
+                                             WHEN v_suspended = 1 THEN NVL(deposits_suspended_reason, refund_enforcement_reason)
+                                             ELSE NULL
+                                           END,
+               updated_at                = CURRENT_TIMESTAMP
+         WHERE org_id_organization = pi_org_id;
+    END pr_sync_deposits_flag;
+
+    PROCEDURE pr_escalate_refund_enforcement(
+        pi_org_id        IN NUMBER,
+        pi_reason        IN VARCHAR2,
+        pi_dispute_id    IN NUMBER DEFAULT NULL,
+        pi_actor_user_id IN NUMBER DEFAULT NULL,
+        pi_max_level     IN VARCHAR2 DEFAULT 'PUBLIC_UNPUBLISHED'
+    ) IS
+        v_from      VARCHAR2(30);
+        v_to        VARCHAR2(30);
+        v_from_rank NUMBER;
+        v_to_rank   NUMBER;
+        v_max_rank  NUMBER;
+    BEGIN
+        pr_ensure_settings_row(pi_org_id);
+
+        SELECT /*+ no_parallel */ NVL(refund_enforcement_level, 'NONE')
+          INTO v_from
+          FROM org_payment_settings
+         WHERE org_id_organization = pi_org_id
+         FOR UPDATE;
+
+        v_from_rank := fn_level_rank(v_from);
+        v_max_rank := fn_level_rank(NVL(pi_max_level, 'PUBLIC_UNPUBLISHED'));
+        v_to_rank := LEAST(v_from_rank + 1, v_max_rank, 4);
+        IF v_to_rank <= v_from_rank THEN
+            RETURN;
+        END IF;
+        v_to := fn_rank_level(v_to_rank);
+
+        UPDATE org_payment_settings
+           SET refund_enforcement_level  = v_to,
+               refund_enforcement_at     = CURRENT_TIMESTAMP,
+               refund_enforcement_reason = SUBSTR(NVL(pi_reason, 'Escalada automatica de disputa.'), 1, 400),
+               refund_enforcement_by     = pi_actor_user_id,
+               updated_at                = CURRENT_TIMESTAMP
+         WHERE org_id_organization = pi_org_id;
+
+        pr_sync_deposits_flag(pi_org_id, v_to);
+
+        INSERT INTO org_refund_enforcement_audit (
+            org_id_organization, dispute_id, from_level, to_level, reason, actor_user_id
+        ) VALUES (
+            pi_org_id, pi_dispute_id, v_from, v_to, SUBSTR(NVL(pi_reason, 'Escalada'), 1, 400), pi_actor_user_id
+        );
+    END pr_escalate_refund_enforcement;
+
+    PROCEDURE pr_restore_refund_enforcement(
+        pi_org_id        IN NUMBER,
+        pi_reason        IN VARCHAR2,
+        pi_actor_user_id IN NUMBER
+    ) IS
+        v_from VARCHAR2(30);
+    BEGIN
+        IF NVL(pi_actor_user_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Solo Operaciones de Hasel puede restaurar el acceso.');
+        END IF;
+        IF TRIM(pi_reason) IS NULL THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Indica el motivo de la restauracion.');
+        END IF;
+
+        pr_ensure_settings_row(pi_org_id);
+
+        SELECT /*+ no_parallel */ NVL(refund_enforcement_level, 'NONE')
+          INTO v_from
+          FROM org_payment_settings
+         WHERE org_id_organization = pi_org_id
+         FOR UPDATE;
+
+        IF v_from = 'NONE' THEN
+            RETURN;
+        END IF;
+
+        UPDATE org_payment_settings
+           SET refund_enforcement_level  = 'NONE',
+               refund_enforcement_at     = CURRENT_TIMESTAMP,
+               refund_enforcement_reason = SUBSTR(pi_reason, 1, 400),
+               refund_enforcement_by     = pi_actor_user_id,
+               deposits_suspended        = 0,
+               deposits_suspended_at     = NULL,
+               deposits_suspended_reason = NULL,
+               updated_at                = CURRENT_TIMESTAMP
+         WHERE org_id_organization = pi_org_id;
+
+        INSERT INTO org_refund_enforcement_audit (
+            org_id_organization, from_level, to_level, reason, actor_user_id
+        ) VALUES (
+            pi_org_id, v_from, 'NONE', SUBSTR(pi_reason, 1, 400), pi_actor_user_id
+        );
+    END pr_restore_refund_enforcement;
+
 
     FUNCTION fn_org_deposits_enabled(
         pi_org_id IN NUMBER
@@ -149,6 +406,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
         v_suspended        NUMBER := 0;
         v_suspended_at     TIMESTAMP WITH TIME ZONE;
         v_suspended_reason VARCHAR2(400);
+        v_enforcement      VARCHAR2(30);
         v_found            BOOLEAN := FALSE;
         v_has_feature      NUMBER;
     BEGIN
@@ -165,7 +423,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
                    NVL(ops.refund_strike_count, 0),
                    NVL(ops.deposits_suspended, 0),
                    ops.deposits_suspended_at,
-                   ops.deposits_suspended_reason
+                   ops.deposits_suspended_reason,
+                   NVL(ops.refund_enforcement_level, 'NONE')
               INTO v_deposits,
                    v_policy,
                    v_bank_id,
@@ -177,7 +436,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
                    v_strike_count,
                    v_suspended,
                    v_suspended_at,
-                   v_suspended_reason
+                   v_suspended_reason,
+                   v_enforcement
               FROM org_payment_settings ops
               LEFT JOIN ref_sipap_bank b
                 ON b.id_bank = ops.bank_id
@@ -210,6 +470,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
         v_data.put('plan_allows_deposits', v_has_feature);
         v_data.put('refund_strike_count', CASE WHEN v_found THEN v_strike_count ELSE 0 END);
         v_data.put('deposits_suspended', CASE WHEN v_found THEN v_suspended ELSE 0 END);
+        v_data.put('refund_enforcement_level', CASE WHEN v_found THEN v_enforcement ELSE 'NONE' END);
         v_data.put('max_refund_strikes', 3);
         v_data.put('banks', fn_banks_array());
         IF v_suspended_reason IS NOT NULL THEN

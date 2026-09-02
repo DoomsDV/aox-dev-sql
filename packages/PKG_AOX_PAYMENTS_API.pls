@@ -320,7 +320,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
               JOIN org_refund_dispute d ON d.app_id_appointment = pt.app_id_appointment
              WHERE pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
-               AND d.dispute_status IN ('OPEN', 'EVIDENCE_PROCESSING')
+               AND d.dispute_status IN ('OPENED', 'PROOF_RECEIVED')
           );
 
         SELECT /*+ no_parallel */ COUNT(*)
@@ -398,6 +398,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                    NVL(claim_agg.open_claims, 0) AS open_claims,
                    d.dispute_status,
                    d.proof_due_at,
+                   d.ops_review_due_at,
                    d.current_evidence_id
               FROM payment_transaction pt
               JOIN appointment a ON a.id_appointment = pt.app_id_appointment
@@ -504,12 +505,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                 IF rec.dispute_status IS NOT NULL THEN
                     v_item.put('refund_dispute_status', rec.dispute_status);
                     v_item.put('refund_dispute_due_at', fn_iso_ts(rec.proof_due_at));
+                    v_item.put('refund_dispute_ops_due_at', fn_iso_ts(rec.ops_review_due_at));
                     v_item.put(
                         'refund_dispute_has_proof',
                         CASE WHEN rec.current_evidence_id IS NOT NULL THEN 1 ELSE 0 END
                     );
-                    IF rec.dispute_status IN ('OPEN', 'EVIDENCE_PROCESSING') THEN
+                    IF rec.dispute_status IN ('OPENED', 'PROOF_RECEIVED') THEN
                         v_item.put('ui_status', 'refund_dispute');
+                    ELSIF rec.dispute_status IN ('UNDER_REVIEW', 'REFUND_SETTLED', 'TIMED_OUT', 'RESOLVED_BY_OPS', 'DISMISSED') THEN
+                        v_item.put('ui_status', NVL(v_item.get_string('ui_status'), 'refund_dispute'));
                     END IF;
                 END IF;
                 IF NVL(rec.refund_status, 'NONE') = 'PENDING' THEN
@@ -591,7 +595,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
               JOIN org_refund_dispute d ON d.app_id_appointment = pt.app_id_appointment
              WHERE pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
-               AND d.dispute_status IN ('OPEN', 'EVIDENCE_PROCESSING')
+               AND d.dispute_status IN ('OPENED', 'PROOF_RECEIVED')
           );
 
         po_status_code := pkg_aox_util.c_success_ok_code;
@@ -872,13 +876,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                refund_marked_by = v_user_id,
                updated_at      = CURRENT_TIMESTAMP
          WHERE id_appointment = v_app_id;
-
-        UPDATE org_refund_claim
-           SET claim_status = 'RESOLVED',
-               resolved_at  = CURRENT_TIMESTAMP,
-               resolved_by  = v_user_id
-         WHERE app_id_appointment = v_app_id
-           AND claim_status = 'OPEN';
 
         COMMIT;
 

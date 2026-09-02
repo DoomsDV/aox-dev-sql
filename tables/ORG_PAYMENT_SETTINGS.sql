@@ -12,6 +12,10 @@ CREATE TABLE org_payment_settings (
   deposits_suspended  NUMBER(1,0)                 DEFAULT 0 NOT NULL,
   deposits_suspended_at TIMESTAMP(6) WITH TIME ZONE NULL,
   deposits_suspended_reason VARCHAR2(400)         NULL,
+  refund_enforcement_level VARCHAR2(30)           DEFAULT 'NONE' NOT NULL,
+  refund_enforcement_at TIMESTAMP(6) WITH TIME ZONE NULL,
+  refund_enforcement_reason VARCHAR2(400)         NULL,
+  refund_enforcement_by NUMBER                    NULL,
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   updated_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   updated_by_user     NUMBER                      NULL
@@ -72,6 +76,19 @@ ALTER TABLE org_payment_settings
   )
 /
 
+PROMPT ALTER TABLE org_payment_settings ADD CONSTRAINT chk_org_payset_enforcement CHECK
+ALTER TABLE org_payment_settings
+  ADD CONSTRAINT chk_org_payset_enforcement CHECK (
+    refund_enforcement_level IN (
+      'NONE',
+      'DEPOSITS_ONLY',
+      'PUBLIC_BOOKINGS',
+      'PUBLIC_UNPUBLISHED',
+      'OPERATIONS_SUSPENDED'
+    )
+  )
+/
+
 COMMENT ON TABLE org_payment_settings IS
   'Configuracion de cobro de senas por transferencia SIPAP (1:1 org). Separado de Pagopar de suscripcion Hasel.';
 /
@@ -97,5 +114,9 @@ COMMENT ON COLUMN org_payment_settings.refund_strike_count IS
 /
 
 COMMENT ON COLUMN org_payment_settings.deposits_suspended IS
-  '1 = senas suspendidas tras 3 strikes.';
+  '1 = senas suspendidas. Derivado de refund_enforcement_level <> NONE.';
+/
+
+COMMENT ON COLUMN org_payment_settings.refund_enforcement_level IS
+  'NONE | DEPOSITS_ONLY | PUBLIC_BOOKINGS | PUBLIC_UNPUBLISHED | OPERATIONS_SUSPENDED. Solo Operaciones Hasel lo restaura.';
 /

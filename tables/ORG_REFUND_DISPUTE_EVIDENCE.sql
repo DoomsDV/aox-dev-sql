@@ -15,7 +15,11 @@ CREATE TABLE org_refund_dispute_evidence (
   ocr_confidence        NUMBER                      NULL,
   ocr_raw               CLOB                        NULL,
   extractor_version     VARCHAR2(40)                DEFAULT 'refund_proof_v1' NOT NULL,
-  ocr_checked_at        TIMESTAMP(6) WITH TIME ZONE NULL
+  ocr_checked_at        TIMESTAMP(6) WITH TIME ZONE NULL,
+  review_decision       VARCHAR2(30)                NULL,
+  reviewed_by           NUMBER                      NULL,
+  reviewed_at           TIMESTAMP(6) WITH TIME ZONE NULL,
+  review_notes          VARCHAR2(500)               NULL
 )
 /
 
@@ -48,6 +52,14 @@ ALTER TABLE org_refund_dispute_evidence
   )
 /
 
+PROMPT ALTER TABLE org_refund_dispute_evidence ADD CONSTRAINT chk_refund_evidence_decision CHECK
+ALTER TABLE org_refund_dispute_evidence
+  ADD CONSTRAINT chk_refund_evidence_decision CHECK (
+    review_decision IS NULL
+    OR review_decision IN ('CANDIDATE', 'REJECTED', 'SETTLED', 'ADVERSE')
+  )
+/
+
 COMMENT ON TABLE org_refund_dispute_evidence IS
-  'Pruebas de transferencia de reembolso (append-only). No reutiliza payment_transaction.receipt_url.';
+  'Pruebas de transferencia de reembolso (append-only). OCR extrae metadatos; no acredita fondos ni liquida el caso.';
 /

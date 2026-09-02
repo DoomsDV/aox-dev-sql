@@ -560,6 +560,24 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
     BEGIN
         v_target_date := TO_DATE(pi_target_date, 'YYYY-MM-DD');
 
+        DECLARE
+            v_org_id NUMBER;
+        BEGIN
+            SELECT org_id_organization INTO v_org_id
+              FROM professional
+             WHERE id_professional = pi_pro_id;
+            IF pkg_aox_payment_settings_api.fn_blocks_public_booking(v_org_id) = 1 THEN
+                po_status_code := pkg_aox_util.c_success_ok_code;
+                v_response_json.put('status', 'success');
+                v_response_json.put('data', v_slots_arr);
+                po_response_body := v_response_json.to_clob();
+                RETURN;
+            END IF;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                NULL;
+        END;
+
         -- Llamamos a tu función mágica y armamos el array
         FOR rec IN (
             SELECT
@@ -652,6 +670,24 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             po_response_body := v_response_json.to_clob();
             RETURN;
         END IF;
+
+        DECLARE
+            v_org_id NUMBER;
+        BEGIN
+            SELECT org_id_organization INTO v_org_id
+              FROM professional
+             WHERE id_professional = pi_pro_id;
+            IF pkg_aox_payment_settings_api.fn_blocks_public_booking(v_org_id) = 1 THEN
+                po_status_code := pkg_aox_util.c_success_ok_code;
+                v_response_json.put('status', 'success');
+                v_response_json.put('data', v_dates_arr);
+                po_response_body := v_response_json.to_clob();
+                RETURN;
+            END IF;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                NULL;
+        END;
 
         v_span_days := v_to_date - v_from_date;
         IF v_span_days > 62 THEN
@@ -789,6 +825,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 po_response_body := v_response_json.to_clob();
                 RETURN;
         END;
+
+        IF pkg_aox_payment_settings_api.fn_org_is_unpublished(v_org_id) = 1 THEN
+            po_status_code := pkg_aox_util.c_not_found_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'Profesional no encontrado.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
 
         v_profile_obj.put('id_professional'     , v_pro_id);
         v_profile_obj.put('org_id_organization' , v_org_id);
@@ -998,7 +1042,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         END;
 
         v_sub_state := pkg_aox_subscription_api.fn_get_subscription_state(v_org_id);
-        IF v_sub_state IN ('READ_ONLY', 'CANCELED', 'TRIAL_EXPIRED') THEN
+        IF v_sub_state IN ('READ_ONLY', 'CANCELED', 'TRIAL_EXPIRED')
+           OR pkg_aox_payment_settings_api.fn_org_is_unpublished(v_org_id) = 1 THEN
             v_maintenance := TRUE;
         END IF;
 
@@ -1093,6 +1138,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
               AND p.is_active = 1
               AND p.profile_slug IS NOT NULL
               AND TRIM(p.profile_slug) IS NOT NULL
+              AND pkg_aox_payment_settings_api.fn_org_is_unpublished(v_org_id) = 0
             ORDER BY full_name
         ) LOOP
             v_pro_obj := json_object_t();
@@ -1243,6 +1289,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                            AND l.is_active = 1
             WHERE m.platform_user_id = v_pu_id
               AND m.is_active = 1
+              AND pkg_aox_payment_settings_api.fn_org_is_unpublished(p.org_id_organization) = 0
             ORDER BY organization_name, l.name
         ) LOOP
             v_loc_obj := json_object_t();
@@ -1382,6 +1429,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             WHERE lower(trim(p.profile_slug)) = lower(trim(pi_prof_slug))
               AND p.is_active = 1
               AND p.profile_slug IS NOT NULL
+              AND pkg_aox_payment_settings_api.fn_org_is_unpublished(p.org_id_organization) = 0
         ) LOOP
             v_match_count  := v_match_count + 1;
             v_org_slug     := rec.organization_slug;
@@ -1549,6 +1597,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
 
         -- Gate de suscripción: reserva pública en mantenimiento si la org está en READ_ONLY / vencido.
         pkg_aox_subscription_api.pr_assert_public_booking_open(v_org_id);
+        pkg_aox_payment_settings_api.pr_assert_public_access(v_org_id);
 
         -- Validar que el cliente haya enviado sus datos
         IF v_cus_phone IS NULL OR v_cus_name IS NULL THEN
@@ -2382,6 +2431,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
 
         -- Gate de suscripción: reserva pública en mantenimiento si la org está en READ_ONLY / vencido.
         pkg_aox_subscription_api.pr_assert_public_booking_open(v_org_id);
+        pkg_aox_payment_settings_api.pr_assert_public_access(v_org_id);
 
         IF v_json_req.has('loc_id_location') THEN
             v_loc_id := v_json_req.get_number('loc_id_location');

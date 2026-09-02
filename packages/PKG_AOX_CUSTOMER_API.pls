@@ -802,26 +802,29 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
             v_validation_errors.append(v_error);
         END IF;
 
-        IF v_phone_raw IS NOT NULL THEN
-            IF NOT REGEXP_LIKE(v_phone_raw, '^\+5959[0-9]{8}$') THEN
+        IF v_phone_raw IS NULL OR LENGTH(TRIM(v_phone_raw)) = 0 THEN
+            v_error := json_object_t();
+            v_error.put('field'  , 'phone_number');
+            v_error.put('message', 'El telefono es obligatorio.');
+            v_validation_errors.append(v_error);
+        ELSIF NOT REGEXP_LIKE(v_phone_raw, '^\+5959[0-9]{8}$') THEN
+            v_error := json_object_t();
+            v_error.put('field'  , 'phone_number');
+            v_error.put('message', 'Ingresa un numero de Paraguay valido. Ej: 0981 123 456.');
+            v_validation_errors.append(v_error);
+        ELSE
+            SELECT COUNT(*)
+              INTO v_dup_count
+              FROM customer
+             WHERE org_id_organization = v_org_id
+               AND phone_number        = v_phone_raw
+               AND id_customer        != pi_cus_id;
+
+            IF v_dup_count > 0 THEN
                 v_error := json_object_t();
                 v_error.put('field'  , 'phone_number');
-                v_error.put('message', 'Ingresa un numero de Paraguay valido. Ej: 0981 123 456.');
+                v_error.put('message', 'Este numero ya esta registrado con otro cliente.');
                 v_validation_errors.append(v_error);
-            ELSE
-                SELECT COUNT(*)
-                  INTO v_dup_count
-                  FROM customer
-                 WHERE org_id_organization = v_org_id
-                   AND phone_number        = v_phone_raw
-                   AND id_customer        != pi_cus_id;
-
-                IF v_dup_count > 0 THEN
-                    v_error := json_object_t();
-                    v_error.put('field'  , 'phone_number');
-                    v_error.put('message', 'Este numero ya esta registrado con otro cliente.');
-                    v_validation_errors.append(v_error);
-                END IF;
             END IF;
         END IF;
 

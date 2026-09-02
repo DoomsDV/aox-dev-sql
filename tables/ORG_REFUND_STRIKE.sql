@@ -32,7 +32,7 @@ ALTER TABLE org_refund_strike
 
 PROMPT ALTER TABLE org_refund_strike ADD CONSTRAINT chk_refund_strike_reason CHECK
 ALTER TABLE org_refund_strike
-  ADD CONSTRAINT chk_refund_strike_reason CHECK (reason IN ('TIMEOUT'))
+  ADD CONSTRAINT chk_refund_strike_reason CHECK (reason IN ('TIMEOUT', 'OPS_ADVERSE'))
 /
 
 COMMENT ON TABLE org_refund_strike IS

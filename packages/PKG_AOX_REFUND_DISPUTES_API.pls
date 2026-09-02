@@ -2,10 +2,13 @@ PROMPT CREATE OR REPLACE PACKAGE pkg_aox_refund_disputes_api
 CREATE OR REPLACE PACKAGE pkg_aox_refund_disputes_api IS
 
     c_sla_business_hours CONSTANT NUMBER := 48;
+    c_ops_review_hours   CONSTANT NUMBER := 24;
     c_max_strikes        CONSTANT NUMBER := 3;
     c_extractor_version  CONSTANT VARCHAR2(40) := 'refund_proof_v1';
 
     FUNCTION fn_iso_ts(pi_ts IN TIMESTAMP WITH TIME ZONE) RETURN VARCHAR2;
+
+    FUNCTION fn_is_hasel_ops(pi_user_id IN NUMBER) RETURN NUMBER;
 
     FUNCTION fn_build_public_dto(
         pi_app_id            IN NUMBER,
@@ -30,6 +33,13 @@ CREATE OR REPLACE PACKAGE pkg_aox_refund_disputes_api IS
         po_response_body OUT CLOB
     );
 
+    PROCEDURE pr_confirm_public_settled(
+        pi_public_token  IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     PROCEDURE pr_get_public_proof(
         pi_public_token  IN  VARCHAR2,
         po_status_code   OUT NUMBER,
@@ -50,6 +60,22 @@ CREATE OR REPLACE PACKAGE pkg_aox_refund_disputes_api IS
         pi_transaction_id IN  NUMBER,
         po_status_code    OUT NUMBER,
         po_response_body  OUT CLOB
+    );
+
+    PROCEDURE pr_ops_resolve_dispute(
+        pi_auth_header   IN  VARCHAR2,
+        pi_dispute_id    IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    PROCEDURE pr_ops_restore_enforcement(
+        pi_auth_header   IN  VARCHAR2,
+        pi_org_id        IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
     );
 
     PROCEDURE pr_process_dispute_timeouts(
@@ -94,34 +120,71 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         RETURN SUBSTR(v_digits, -4);
     END fn_phone_last4;
 
-    FUNCTION fn_active_status(pi_status IN VARCHAR2) RETURN NUMBER IS
+    FUNCTION fn_is_hasel_ops(pi_user_id IN NUMBER) RETURN NUMBER IS
+        v_ids VARCHAR2(4000);
     BEGIN
-        IF pi_status IN ('OPEN', 'EVIDENCE_PROCESSING') THEN
+        IF NVL(pi_user_id, 0) <= 0 THEN
+            RETURN 0;
+        END IF;
+        v_ids := REPLACE(NVL(fn_get_parameter('HASEL_OPS_USER_IDS'), ''), ' ', '');
+        IF v_ids IS NULL OR LENGTH(v_ids) = 0 THEN
+            RETURN 0;
+        END IF;
+        IF INSTR(',' || v_ids || ',', ',' || TO_CHAR(pi_user_id) || ',') > 0 THEN
             RETURN 1;
         END IF;
         RETURN 0;
-    END fn_active_status;
+    END fn_is_hasel_ops;
+
+    PROCEDURE pr_assert_hasel_ops(pi_user_id IN NUMBER) IS
+    BEGIN
+        IF fn_is_hasel_ops(pi_user_id) <> 1 THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_forbidden,
+                'Solo Operaciones de Hasel puede resolver este caso.'
+            );
+        END IF;
+    END pr_assert_hasel_ops;
+
+    FUNCTION fn_is_open_status(pi_status IN VARCHAR2) RETURN NUMBER IS
+    BEGIN
+        IF pi_status IN ('OPENED', 'PROOF_RECEIVED') THEN
+            RETURN 1;
+        END IF;
+        RETURN 0;
+    END fn_is_open_status;
+
+    FUNCTION fn_is_review_status(pi_status IN VARCHAR2) RETURN NUMBER IS
+    BEGIN
+        IF pi_status IN ('PROOF_RECEIVED', 'UNDER_REVIEW') THEN
+            RETURN 1;
+        END IF;
+        RETURN 0;
+    END fn_is_review_status;
+
+    FUNCTION fn_is_terminal_status(pi_status IN VARCHAR2) RETURN NUMBER IS
+    BEGIN
+        IF pi_status IN ('REFUND_SETTLED', 'TIMED_OUT', 'RESOLVED_BY_OPS', 'DISMISSED') THEN
+            RETURN 1;
+        END IF;
+        RETURN 0;
+    END fn_is_terminal_status;
 
     FUNCTION fn_viewable_status(pi_status IN VARCHAR2) RETURN NUMBER IS
     BEGIN
-        IF pi_status IN ('EVIDENCE_ACCEPTED', 'CUSTOMER_FOLLOW_UP') THEN
+        IF pi_status IN ('UNDER_REVIEW', 'REFUND_SETTLED', 'RESOLVED_BY_OPS') THEN
             RETURN 1;
         END IF;
         RETURN 0;
     END fn_viewable_status;
 
-    PROCEDURE pr_ensure_settings_row(pi_org_id IN NUMBER) IS
+    FUNCTION fn_staff_action_status(pi_status IN VARCHAR2) RETURN NUMBER IS
     BEGIN
-        INSERT INTO org_payment_settings (org_id_organization, deposits_enabled)
-        SELECT pi_org_id, 0
-          FROM dual
-         WHERE NOT EXISTS (
-            SELECT 1 FROM org_payment_settings WHERE org_id_organization = pi_org_id
-         );
-    EXCEPTION
-        WHEN DUP_VAL_ON_INDEX THEN
-            NULL;
-    END pr_ensure_settings_row;
+        IF pi_status IN ('OPENED', 'PROOF_RECEIVED', 'UNDER_REVIEW') THEN
+            RETURN 1;
+        END IF;
+        RETURN 0;
+    END fn_staff_action_status;
 
     PROCEDURE pr_enqueue_notify(
         pi_org_id     IN NUMBER,
@@ -163,17 +226,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_obj            json_object_t := json_object_t();
         v_status         VARCHAR2(30);
         v_due            TIMESTAMP WITH TIME ZONE;
+        v_ops_due        TIMESTAMP WITH TIME ZONE;
         v_source         VARCHAR2(20);
         v_can_open       NUMBER := 0;
         v_wait_modal     NUMBER := 0;
         v_has_proof      NUMBER := 0;
+        v_can_confirm    NUMBER := 0;
         v_pending_sla    NUMBER := 0;
         v_refund_st      VARCHAR2(20) := UPPER(TRIM(NVL(pi_refund_status, 'NONE')));
-        v_last4          VARCHAR2(4);
+        v_insisted       TIMESTAMP WITH TIME ZONE;
     BEGIN
         BEGIN
-            SELECT d.dispute_status, d.proof_due_at, d.dispute_source
-              INTO v_status, v_due, v_source
+            SELECT d.dispute_status, d.proof_due_at, d.ops_review_due_at, d.dispute_source, d.customer_insisted_at
+              INTO v_status, v_due, v_ops_due, v_source, v_insisted
               FROM org_refund_dispute d
              WHERE d.app_id_appointment = pi_app_id;
         EXCEPTION
@@ -187,9 +252,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
 
         IF v_status IS NULL THEN
             IF v_refund_st = 'SENT' THEN
-                v_can_open := 1;
-                IF pi_refund_sent_at IS NOT NULL
-                   AND pkg_aox_refund_claims_api.fn_is_refund_sla_breached(pi_refund_sent_at) = 0 THEN
+                IF pkg_aox_refund_claims_api.fn_is_refund_sla_breached(pi_refund_sent_at) = 1 THEN
+                    v_can_open := 1;
+                ELSE
                     v_wait_modal := 1;
                 END IF;
             ELSIF v_refund_st = 'PENDING' AND v_pending_sla = 1 THEN
@@ -200,43 +265,54 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         IF fn_viewable_status(v_status) = 1 THEN
             v_has_proof := 1;
         END IF;
-
-        v_last4 := fn_phone_last4(pi_customer_phone);
+        IF v_status = 'UNDER_REVIEW' THEN
+            v_can_confirm := 1;
+        END IF;
 
         v_obj.put('status', v_status);
         v_obj.put('can_open', v_can_open);
         v_obj.put('wait_modal_required', v_wait_modal);
         v_obj.put('has_viewable_proof', v_has_proof);
+        v_obj.put('can_confirm_received', v_can_confirm);
+        v_obj.put('customer_insisted', CASE WHEN v_insisted IS NOT NULL THEN 1 ELSE 0 END);
         v_obj.put('proof_due_at', fn_iso_ts(v_due));
+        v_obj.put('ops_review_due_at', fn_iso_ts(v_ops_due));
         v_obj.put('refund_sent_at', fn_iso_ts(pi_refund_sent_at));
         v_obj.put('public_whatsapp', NVL(TRIM(pi_public_whatsapp), ''));
-        v_obj.put('phone_last4_hint', v_last4);
         v_obj.put('source', v_source);
         RETURN v_obj;
     END fn_build_public_dto;
 
     PROCEDURE pr_apply_timeout_strike(
-        pi_dispute_id IN NUMBER
+        pi_dispute_id IN NUMBER,
+        pi_reason     IN VARCHAR2 DEFAULT 'TIMEOUT'
     ) IS
         v_org_id     NUMBER;
         v_app_id     NUMBER;
         v_status     VARCHAR2(30);
         v_due        TIMESTAMP WITH TIME ZONE;
         v_ocr        VARCHAR2(30);
+        v_received   TIMESTAMP WITH TIME ZONE;
         v_updated    NUMBER;
         v_count      NUMBER;
+        v_reason     VARCHAR2(40) := NVL(TRIM(pi_reason), 'TIMEOUT');
     BEGIN
         SELECT /*+ no_parallel */
-               org_id_organization, app_id_appointment, dispute_status, proof_due_at
-          INTO v_org_id, v_app_id, v_status, v_due
+               org_id_organization, app_id_appointment, dispute_status, proof_due_at, evidence_received_at
+          INTO v_org_id, v_app_id, v_status, v_due, v_received
           FROM org_refund_dispute
          WHERE id_dispute = pi_dispute_id
          FOR UPDATE SKIP LOCKED;
 
-        IF v_status NOT IN ('OPEN', 'EVIDENCE_PROCESSING') THEN
+        IF fn_is_terminal_status(v_status) = 1 THEN
             RETURN;
         END IF;
         IF v_due IS NULL OR CURRENT_TIMESTAMP <= v_due THEN
+            RETURN;
+        END IF;
+
+        -- Evidencia a tiempo (aunque MANUAL_REVIEW) pasa a revision, no a strike.
+        IF v_received IS NOT NULL AND v_received <= v_due AND v_status IN ('PROOF_RECEIVED', 'UNDER_REVIEW') THEN
             RETURN;
         END IF;
 
@@ -251,17 +327,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                 v_ocr := NULL;
         END;
 
-        IF v_ocr IN ('PROCESSING', 'ACCEPTED', 'MANUAL_REVIEW') THEN
+        IF v_ocr IN ('ACCEPTED', 'MANUAL_REVIEW') AND v_received IS NOT NULL AND v_received <= v_due THEN
             RETURN;
         END IF;
 
         UPDATE org_refund_dispute
-           SET dispute_status = 'EXPIRED_STRIKE',
+           SET dispute_status = 'TIMED_OUT',
                close_reason   = 'TIMEOUT',
+               resolution_code = 'TIMEOUT',
                closed_at      = CURRENT_TIMESTAMP,
+               resolved_at    = CURRENT_TIMESTAMP,
                updated_at     = CURRENT_TIMESTAMP
          WHERE id_dispute = pi_dispute_id
-           AND dispute_status IN ('OPEN', 'EVIDENCE_PROCESSING')
+           AND dispute_status IN ('OPENED', 'PROOF_RECEIVED', 'UNDER_REVIEW')
         RETURNING 1 INTO v_updated;
 
         IF NVL(v_updated, 0) <> 1 THEN
@@ -272,30 +350,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
             INSERT INTO org_refund_strike (
                 org_id_organization, dispute_id, reason
             ) VALUES (
-                v_org_id, pi_dispute_id, 'TIMEOUT'
+                v_org_id, pi_dispute_id, v_reason
             );
         EXCEPTION
             WHEN DUP_VAL_ON_INDEX THEN
                 RETURN;
         END;
 
-        pr_ensure_settings_row(v_org_id);
+        pkg_aox_payment_settings_api.pr_ensure_settings_row(v_org_id);
         UPDATE org_payment_settings
            SET refund_strike_count = NVL(refund_strike_count, 0) + 1,
                updated_at          = CURRENT_TIMESTAMP
          WHERE org_id_organization = v_org_id
         RETURNING refund_strike_count INTO v_count;
 
-        IF v_count >= c_max_strikes THEN
-            UPDATE org_payment_settings
-               SET deposits_suspended        = 1,
-                   deposits_enabled          = 0,
-                   deposits_suspended_at     = CURRENT_TIMESTAMP,
-                   deposits_suspended_reason = 'Suspension automatica: 3 strikes por disputa de reembolso vencida.',
-                   updated_at                = CURRENT_TIMESTAMP
-             WHERE org_id_organization = v_org_id
-               AND NVL(deposits_suspended, 0) = 0;
-        END IF;
+        pkg_aox_payment_settings_api.pr_escalate_refund_enforcement(
+            pi_org_id        => v_org_id,
+            pi_reason        => 'Timeout de disputa de reembolso (strike ' || TO_CHAR(v_count) || ').',
+            pi_dispute_id    => pi_dispute_id,
+            pi_max_level     => 'PUBLIC_UNPUBLISHED'
+        );
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
             NULL;
@@ -317,13 +391,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_sent_at      TIMESTAMP WITH TIME ZONE;
         v_phone        VARCHAR2(40);
         v_confirm      VARCHAR2(20);
-        v_force_open   NUMBER := 0;
         v_source       VARCHAR2(20);
         v_dispute_id   NUMBER;
         v_created      NUMBER := 0;
         v_due          TIMESTAMP WITH TIME ZONE;
         v_existing_st  VARCHAR2(30);
         v_whatsapp     VARCHAR2(20);
+        v_notes        VARCHAR2(500);
     BEGIN
         pkg_aox_util.pr_assert_rate_limit(
             pi_scope        => 'PUBLIC_REFUND_DISPUTE',
@@ -344,12 +418,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_json := json_object_t.parse(pi_body);
         v_confirm := fn_digits(v_json.get_string('phone_last4'));
         BEGIN
-            IF v_json.get_boolean('confirm_open') THEN
-                v_force_open := 1;
-            END IF;
+            v_notes := SUBSTR(TRIM(v_json.get_string('notes')), 1, 500);
         EXCEPTION
             WHEN OTHERS THEN
-                v_force_open := NVL(v_json.get_number('confirm_open'), 0);
+                v_notes := NULL;
         END;
 
         SELECT a.id_appointment,
@@ -392,7 +464,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                 NULL;
         END;
 
-        IF v_refund_st = 'SENT' THEN
+        IF v_refund_st = 'SENT'
+           AND pkg_aox_refund_claims_api.fn_is_refund_sla_breached(v_sent_at) = 1 THEN
             v_source := 'CUSTOMER_SENT';
         ELSIF v_refund_st = 'PENDING'
           AND pkg_aox_refund_claims_api.fn_is_refund_sla_breached(v_alias_at) = 1 THEN
@@ -417,9 +490,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
             v_org_id,
             v_app_id,
             v_source,
-            'OPEN',
+            'OPENED',
             v_due,
-            CASE WHEN v_force_open = 1 THEN 'Cliente abrio disputa antes del plazo de espera bancaria.' ELSE NULL END
+            v_notes
         ) RETURNING id_dispute INTO v_dispute_id;
         v_created := 1;
 
@@ -442,7 +515,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
             END
         );
         v_data.put('id_dispute', v_dispute_id);
-        v_data.put('dispute_status', 'OPEN');
+        v_data.put('dispute_status', 'OPENED');
         v_data.put('proof_due_at', fn_iso_ts(v_due));
         v_data.put('notified', 1);
         v_response.put('data', v_data);
@@ -514,35 +587,33 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
          WHERE app_id_appointment = v_app_id
          FOR UPDATE;
 
-        IF v_status NOT IN ('EVIDENCE_ACCEPTED', 'CUSTOMER_FOLLOW_UP') THEN
+        IF v_status <> 'UNDER_REVIEW' THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_validation,
-                'Todavia no hay una prueba aceptada para insistir.'
+                'Todavia no hay una prueba en revision para insistir.'
             );
         END IF;
 
-        IF v_status = 'EVIDENCE_ACCEPTED' THEN
-            UPDATE org_refund_dispute
-               SET dispute_status = 'CUSTOMER_FOLLOW_UP',
-                   close_reason   = 'CUSTOMER_INSISTED',
-                   notes          = SUBSTR(NVL(notes || ' | ', '') || 'Cliente insiste: el dinero no aparece.', 1, 500),
-                   updated_at     = CURRENT_TIMESTAMP
-             WHERE id_dispute = v_dispute_id;
-            pr_enqueue_notify(
-                pi_org_id     => v_org_id,
-                pi_dispute_id => v_dispute_id,
-                pi_event      => 'CUSTOMER_INSISTED',
-                pi_payload    => '{"appointment_id":' || v_app_id || '}'
-            );
-        END IF;
+        UPDATE org_refund_dispute
+           SET customer_insisted_at = NVL(customer_insisted_at, CURRENT_TIMESTAMP),
+               notes          = SUBSTR(NVL(notes || ' | ', '') || 'Cliente insiste: el dinero no aparece.', 1, 500),
+               updated_at     = CURRENT_TIMESTAMP
+         WHERE id_dispute = v_dispute_id;
+
+        pr_enqueue_notify(
+            pi_org_id     => v_org_id,
+            pi_dispute_id => v_dispute_id,
+            pi_event      => 'CUSTOMER_INSISTED',
+            pi_payload    => '{"appointment_id":' || v_app_id || '}'
+        );
 
         COMMIT;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response.put('status', 'success');
-        v_response.put('message', 'Registramos que el dinero sigue sin aparecer. Contacta al comercio o a Hasel.');
+        v_response.put('message', 'Registramos que el dinero sigue sin aparecer. Operaciones de Hasel lo revisara.');
         v_data.put('id_dispute', v_dispute_id);
-        v_data.put('dispute_status', 'CUSTOMER_FOLLOW_UP');
+        v_data.put('dispute_status', 'UNDER_REVIEW');
         v_data.put('public_whatsapp', NVL(TRIM(v_whatsapp), ''));
         v_response.put('data', v_data);
         po_response_body := v_response.to_clob();
@@ -560,6 +631,101 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
             ROLLBACK;
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_insist_public;
+
+    PROCEDURE pr_confirm_public_settled(
+        pi_public_token  IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_json       json_object_t;
+        v_response   json_object_t := json_object_t();
+        v_data       json_object_t := json_object_t();
+        v_app_id     NUMBER;
+        v_phone      VARCHAR2(40);
+        v_confirm    VARCHAR2(20);
+        v_dispute_id NUMBER;
+        v_status     VARCHAR2(30);
+        v_updated    NUMBER;
+    BEGIN
+        pkg_aox_util.pr_assert_rate_limit(
+            pi_scope        => 'PUBLIC_REFUND_CONFIRM',
+            pi_key          => TRIM(pi_public_token),
+            pi_max_attempts => 8,
+            pi_window_sec   => 86400
+        );
+
+        IF pi_body IS NULL OR DBMS_LOB.GETLENGTH(pi_body) = 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Confirma que sos el titular de la reserva.');
+        END IF;
+        v_json := json_object_t.parse(pi_body);
+        v_confirm := fn_digits(v_json.get_string('phone_last4'));
+
+        SELECT a.id_appointment, c.phone_number
+          INTO v_app_id, v_phone
+          FROM appointment a
+          JOIN customer c ON c.id_customer = a.cus_id_customer
+         WHERE a.public_manage_token = TRIM(pi_public_token)
+         FOR UPDATE OF a.id_appointment;
+
+        IF fn_phone_last4(v_phone) IS NULL OR v_confirm IS NULL OR v_confirm <> fn_phone_last4(v_phone) THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Los ultimos 4 digitos del telefono no coinciden.'
+            );
+        END IF;
+
+        SELECT id_dispute, dispute_status
+          INTO v_dispute_id, v_status
+          FROM org_refund_dispute
+         WHERE app_id_appointment = v_app_id
+         FOR UPDATE;
+
+        IF v_status <> 'UNDER_REVIEW' THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'Este caso no esta en revision para confirmar el reembolso.'
+            );
+        END IF;
+
+        UPDATE org_refund_dispute
+           SET dispute_status  = 'REFUND_SETTLED',
+               close_reason    = 'CUSTOMER_CONFIRMED',
+               resolution_code = 'CUSTOMER_CONFIRMED',
+               closed_at       = CURRENT_TIMESTAMP,
+               resolved_at     = CURRENT_TIMESTAMP,
+               updated_at      = CURRENT_TIMESTAMP
+         WHERE id_dispute = v_dispute_id
+           AND dispute_status = 'UNDER_REVIEW'
+        RETURNING 1 INTO v_updated;
+
+        IF NVL(v_updated, 0) <> 1 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El caso ya no admite confirmacion.');
+        END IF;
+
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('message', 'Confirmamos que recibiste el reembolso. El caso queda liquidado.');
+        v_data.put('id_dispute', v_dispute_id);
+        v_data.put('dispute_status', 'REFUND_SETTLED');
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            ROLLBACK;
+            po_status_code := pkg_aox_util.c_not_found_code;
+            pkg_aox_util.pr_build_api_error_response(
+                pi_status_code   => po_status_code,
+                pi_api_code      => pkg_aox_util.c_api_code_not_found,
+                pi_message       => 'Disputa no encontrada.',
+                po_response_body => po_response_body
+            );
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_confirm_public_settled;
 
     PROCEDURE pr_put_proof_payload(
         pi_object_key    IN VARCHAR2,
@@ -755,6 +921,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_response      json_object_t := json_object_t();
         v_data          json_object_t := json_object_t();
         v_msg           VARCHAR2(400);
+        v_next_status   VARCHAR2(30);
+        v_ops_due       TIMESTAMP WITH TIME ZONE;
+        v_late          NUMBER := 0;
     BEGIN
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
         IF v_role_id NOT IN (pkg_aox_util.fn_rol('ADMIN'), pkg_aox_util.fn_rol('RECEPCIONISTA')) THEN
@@ -797,11 +966,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
             );
         END IF;
 
+        v_blob := apex_web_service.clobbase642blob(v_base64);
+        v_size := DBMS_LOB.GETLENGTH(v_blob);
+        v_sha := RAWTOHEX(DBMS_CRYPTO.HASH(v_blob, DBMS_CRYPTO.HASH_SH256));
+
         IF v_idem_key IS NOT NULL THEN
             v_idem_hash := RAWTOHEX(DBMS_CRYPTO.HASH(
                 UTL_I18N.STRING_TO_RAW(
-                    TO_CHAR(pi_transaction_id) || '|' || NVL(v_filename, '') || '|' || v_mime || '|' ||
-                    TO_CHAR(DBMS_LOB.GETLENGTH(v_base64)),
+                    TO_CHAR(pi_transaction_id) || '|' || NVL(v_filename, '') || '|' || v_mime || '|' || v_sha,
                     'AL32UTF8'
                 ),
                 DBMS_CRYPTO.HASH_SH256
@@ -858,7 +1030,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
          WHERE app_id_appointment = v_app_id
          FOR UPDATE;
 
-        IF v_disp_status NOT IN ('OPEN', 'EVIDENCE_PROCESSING') THEN
+        IF fn_staff_action_status(v_disp_status) = 0 THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_validation,
                 'Esta disputa ya no acepta una nueva prueba.'
@@ -866,13 +1038,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         END IF;
 
         UPDATE org_refund_dispute
-           SET dispute_status = 'EVIDENCE_PROCESSING',
+           SET dispute_status = 'PROOF_RECEIVED',
+               evidence_received_at = NVL(evidence_received_at, CURRENT_TIMESTAMP),
                updated_at     = CURRENT_TIMESTAMP
          WHERE id_dispute = v_dispute_id;
 
-        v_blob := apex_web_service.clobbase642blob(v_base64);
-        v_size := DBMS_LOB.GETLENGTH(v_blob);
-        v_sha := RAWTOHEX(DBMS_CRYPTO.HASH(v_blob, DBMS_CRYPTO.HASH_SH256));
+        SELECT CASE WHEN CURRENT_TIMESTAMP > proof_due_at THEN 1 ELSE 0 END
+          INTO v_late
+          FROM org_refund_dispute
+         WHERE id_dispute = v_dispute_id;
 
         SELECT NVL(MAX(attempt_n), 0) + 1
           INTO v_attempt
@@ -940,33 +1114,42 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                ocr_checked_at = CURRENT_TIMESTAMP
          WHERE id_evidence = v_ev_id;
 
-        IF v_ocr_status = 'ACCEPTED' THEN
+        -- OCR nunca liquida. ACCEPTED/MANUAL_REVIEW = candidato a revision.
+        IF v_ocr_status IN ('ACCEPTED', 'MANUAL_REVIEW') THEN
+            v_ops_due := pkg_aox_refund_claims_api.fn_add_business_hours(CURRENT_TIMESTAMP, c_ops_review_hours);
+            v_next_status := 'UNDER_REVIEW';
             UPDATE org_refund_dispute
-               SET dispute_status = 'EVIDENCE_ACCEPTED',
-                   close_reason   = 'PROOF_OK',
-                   closed_at      = CURRENT_TIMESTAMP,
-                   closed_by      = v_user_id,
-                   updated_at     = CURRENT_TIMESTAMP
+               SET dispute_status   = 'UNDER_REVIEW',
+                   ops_review_due_at = NVL(ops_review_due_at, v_ops_due),
+                   updated_at       = CURRENT_TIMESTAMP
              WHERE id_dispute = v_dispute_id;
-            v_msg := 'Comprobante aceptado. El cliente ya puede ver la prueba.';
+            UPDATE org_refund_dispute_evidence
+               SET review_decision = 'CANDIDATE'
+             WHERE id_evidence = v_ev_id;
+            IF v_ocr_status = 'ACCEPTED' THEN
+                v_msg := 'Comprobante recibido. Queda en revision; el OCR no acredita la transferencia.';
+            ELSE
+                v_msg := 'Comprobante recibido. Quedo en revision manual con plazo de Operaciones.';
+            END IF;
         ELSIF v_ocr_status = 'TECHNICAL_FAILURE' THEN
+            v_next_status := 'OPENED';
             UPDATE org_refund_dispute
-               SET dispute_status = 'OPEN',
+               SET dispute_status = 'OPENED',
                    updated_at     = CURRENT_TIMESTAMP
              WHERE id_dispute = v_dispute_id;
             v_msg := 'No pudimos leer el archivo. Intenta de nuevo antes del vencimiento. No cuenta como strike.';
-        ELSIF v_ocr_status = 'REJECTED_DEFINITE' THEN
+        ELSE
+            v_next_status := 'OPENED';
             UPDATE org_refund_dispute
-               SET dispute_status = 'OPEN',
+               SET dispute_status = 'OPENED',
                    updated_at     = CURRENT_TIMESTAMP
              WHERE id_dispute = v_dispute_id;
             v_msg := 'El comprobante no se pudo validar. Subi otra foto antes del vencimiento.';
-        ELSE
-            UPDATE org_refund_dispute
-               SET dispute_status = 'OPEN',
-                   updated_at     = CURRENT_TIMESTAMP
-             WHERE id_dispute = v_dispute_id;
-            v_msg := 'Comprobante recibido. Quedo en revision; no genera strike.';
+        END IF;
+
+        IF v_late = 1 AND v_ocr_status IN ('REJECTED_DEFINITE', 'TECHNICAL_FAILURE') THEN
+            pr_apply_timeout_strike(v_dispute_id);
+            SELECT dispute_status INTO v_next_status FROM org_refund_dispute WHERE id_dispute = v_dispute_id;
         END IF;
 
         COMMIT;
@@ -978,7 +1161,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_data.put('id_dispute', v_dispute_id);
         v_data.put('id_evidence', v_ev_id);
         v_data.put('ocr_status', v_ocr_status);
-        v_data.put('dispute_status', CASE WHEN v_ocr_status = 'ACCEPTED' THEN 'EVIDENCE_ACCEPTED' ELSE 'OPEN' END);
+        v_data.put('dispute_status', v_next_status);
         v_response.put('data', v_data);
         po_response_body := v_response.to_clob();
 
@@ -1052,6 +1235,202 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_get_staff_proof;
 
+    PROCEDURE pr_ops_resolve_dispute(
+        pi_auth_header   IN  VARCHAR2,
+        pi_dispute_id    IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_user_id    NUMBER;
+        v_json       json_object_t;
+        v_code       VARCHAR2(40);
+        v_notes      VARCHAR2(500);
+        v_status     VARCHAR2(30);
+        v_org_id     NUMBER;
+        v_app_id     NUMBER;
+        v_next       VARCHAR2(30);
+        v_close      VARCHAR2(40);
+        v_updated    NUMBER;
+        v_response   json_object_t := json_object_t();
+        v_data       json_object_t := json_object_t();
+        v_ev_id      NUMBER;
+    BEGIN
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        pr_assert_hasel_ops(v_user_id);
+
+        IF pi_body IS NULL OR DBMS_LOB.GETLENGTH(pi_body) = 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Indica resolution_code.');
+        END IF;
+        v_json := json_object_t.parse(pi_body);
+        v_code := UPPER(TRIM(v_json.get_string('resolution_code')));
+        BEGIN
+            v_notes := SUBSTR(TRIM(v_json.get_string('notes')), 1, 500);
+        EXCEPTION
+            WHEN OTHERS THEN v_notes := NULL;
+        END;
+        IF v_code NOT IN ('SETTLED', 'DISMISS', 'ADVERSE', 'ISSUE_CREDIT') THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'resolution_code invalido. Usa SETTLED, DISMISS, ADVERSE o ISSUE_CREDIT.'
+            );
+        END IF;
+
+        SELECT org_id_organization, app_id_appointment, dispute_status, current_evidence_id
+          INTO v_org_id, v_app_id, v_status, v_ev_id
+          FROM org_refund_dispute
+         WHERE id_dispute = pi_dispute_id
+         FOR UPDATE;
+
+        IF fn_is_terminal_status(v_status) = 1 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El caso ya esta cerrado.');
+        END IF;
+
+        IF v_code = 'SETTLED' THEN
+            v_next := 'REFUND_SETTLED';
+            v_close := 'OPS_SETTLED';
+        ELSIF v_code = 'DISMISS' THEN
+            v_next := 'DISMISSED';
+            v_close := 'OPS_DISMISSED';
+        ELSIF v_code = 'ADVERSE' THEN
+            v_next := 'TIMED_OUT';
+            v_close := 'OPS_ADVERSE';
+        ELSE
+            v_next := 'RESOLVED_BY_OPS';
+            v_close := 'OPS_CREDIT';
+        END IF;
+
+        UPDATE org_refund_dispute
+           SET dispute_status  = v_next,
+               close_reason    = v_close,
+               resolution_code = v_code,
+               notes           = SUBSTR(NVL(notes || ' | ', '') || NVL(v_notes, v_code), 1, 500),
+               closed_at       = CURRENT_TIMESTAMP,
+               closed_by       = v_user_id,
+               resolved_at     = CURRENT_TIMESTAMP,
+               resolved_by     = v_user_id,
+               updated_at      = CURRENT_TIMESTAMP
+         WHERE id_dispute = pi_dispute_id
+           AND dispute_status NOT IN ('REFUND_SETTLED', 'TIMED_OUT', 'RESOLVED_BY_OPS', 'DISMISSED')
+        RETURNING 1 INTO v_updated;
+
+        IF NVL(v_updated, 0) <> 1 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'No se pudo resolver el caso.');
+        END IF;
+
+        IF v_ev_id IS NOT NULL THEN
+            UPDATE org_refund_dispute_evidence
+               SET review_decision = CASE
+                                       WHEN v_code = 'SETTLED' THEN 'SETTLED'
+                                       WHEN v_code = 'ADVERSE' THEN 'ADVERSE'
+                                       WHEN v_code = 'DISMISS' THEN 'REJECTED'
+                                       ELSE review_decision
+                                     END,
+                   reviewed_by     = v_user_id,
+                   reviewed_at     = CURRENT_TIMESTAMP,
+                   review_notes    = v_notes
+             WHERE id_evidence = v_ev_id;
+        END IF;
+
+        IF v_code = 'ADVERSE' THEN
+            BEGIN
+                INSERT INTO org_refund_strike (
+                    org_id_organization, dispute_id, reason
+                ) VALUES (
+                    v_org_id, pi_dispute_id, 'OPS_ADVERSE'
+                );
+                UPDATE org_payment_settings
+                   SET refund_strike_count = NVL(refund_strike_count, 0) + 1,
+                       updated_at          = CURRENT_TIMESTAMP
+                 WHERE org_id_organization = v_org_id;
+                pkg_aox_payment_settings_api.pr_escalate_refund_enforcement(
+                    pi_org_id        => v_org_id,
+                    pi_reason        => NVL(v_notes, 'Resolucion adversa de Operaciones.'),
+                    pi_dispute_id    => pi_dispute_id,
+                    pi_actor_user_id => v_user_id,
+                    pi_max_level     => 'PUBLIC_UNPUBLISHED'
+                );
+            EXCEPTION
+                WHEN DUP_VAL_ON_INDEX THEN
+                    NULL;
+            END;
+        ELSIF v_code = 'ISSUE_CREDIT' THEN
+            pkg_aox_refund_compensation_api.pr_issue_customer_compensation(
+                pi_dispute_id    => pi_dispute_id,
+                pi_actor_user_id => v_user_id,
+                pi_notes         => v_notes
+            );
+        END IF;
+
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('message', 'Caso resuelto por Operaciones.');
+        v_data.put('id_dispute', pi_dispute_id);
+        v_data.put('dispute_status', v_next);
+        v_data.put('resolution_code', v_code);
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            ROLLBACK;
+            po_status_code := pkg_aox_util.c_not_found_code;
+            pkg_aox_util.pr_build_api_error_response(
+                pi_status_code   => po_status_code,
+                pi_api_code      => pkg_aox_util.c_api_code_not_found,
+                pi_message       => 'Disputa no encontrada.',
+                po_response_body => po_response_body
+            );
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_ops_resolve_dispute;
+
+    PROCEDURE pr_ops_restore_enforcement(
+        pi_auth_header   IN  VARCHAR2,
+        pi_org_id        IN  NUMBER,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_user_id  NUMBER;
+        v_json     json_object_t;
+        v_reason   VARCHAR2(400);
+        v_response json_object_t := json_object_t();
+        v_data     json_object_t := json_object_t();
+    BEGIN
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        pr_assert_hasel_ops(v_user_id);
+        IF NVL(pi_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'organization_id invalido.');
+        END IF;
+        IF pi_body IS NULL OR DBMS_LOB.GETLENGTH(pi_body) = 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Indica el motivo.');
+        END IF;
+        v_json := json_object_t.parse(pi_body);
+        v_reason := SUBSTR(TRIM(v_json.get_string('reason')), 1, 400);
+
+        pkg_aox_payment_settings_api.pr_restore_refund_enforcement(
+            pi_org_id        => pi_org_id,
+            pi_reason        => v_reason,
+            pi_actor_user_id => v_user_id
+        );
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('message', 'Sancion operativa restaurada.');
+        v_data.put('org_id_organization', pi_org_id);
+        v_data.put('refund_enforcement_level', 'NONE');
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_ops_restore_enforcement;
+
     PROCEDURE pr_process_dispute_timeouts(
         pi_batch_size IN NUMBER DEFAULT 100
     ) IS
@@ -1060,13 +1439,63 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         FOR rec IN (
             SELECT /*+ no_parallel */ d.id_dispute
               FROM org_refund_dispute d
-             WHERE d.dispute_status IN ('OPEN', 'EVIDENCE_PROCESSING')
+             WHERE d.dispute_status IN ('OPENED', 'PROOF_RECEIVED')
                AND d.proof_due_at < CURRENT_TIMESTAMP
              ORDER BY d.proof_due_at
              FETCH FIRST v_limit ROWS ONLY
         ) LOOP
             BEGIN
                 pr_apply_timeout_strike(rec.id_dispute);
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    ROLLBACK;
+            END;
+        END LOOP;
+
+        -- Evidencia a tiempo atascada en PROOF_RECEIVED: pasar a UNDER_REVIEW sin liquidar.
+        FOR rec IN (
+            SELECT /*+ no_parallel */ d.id_dispute
+              FROM org_refund_dispute d
+             WHERE d.dispute_status = 'PROOF_RECEIVED'
+               AND d.evidence_received_at IS NOT NULL
+               AND d.evidence_received_at <= d.proof_due_at
+               AND d.evidence_received_at < CURRENT_TIMESTAMP - NUMTODSINTERVAL(15, 'MINUTE')
+             FETCH FIRST v_limit ROWS ONLY
+        ) LOOP
+            BEGIN
+                UPDATE org_refund_dispute
+                   SET dispute_status    = 'UNDER_REVIEW',
+                       ops_review_due_at = NVL(
+                           ops_review_due_at,
+                           pkg_aox_refund_claims_api.fn_add_business_hours(CURRENT_TIMESTAMP, c_ops_review_hours)
+                       ),
+                       updated_at        = CURRENT_TIMESTAMP
+                 WHERE id_dispute = rec.id_dispute
+                   AND dispute_status = 'PROOF_RECEIVED';
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    ROLLBACK;
+            END;
+        END LOOP;
+
+        -- Revision de Operaciones vencida: avisar, no liquidar ni strike.
+        FOR rec IN (
+            SELECT /*+ no_parallel */ d.id_dispute, d.org_id_organization, d.app_id_appointment
+              FROM org_refund_dispute d
+             WHERE d.dispute_status = 'UNDER_REVIEW'
+               AND d.ops_review_due_at IS NOT NULL
+               AND d.ops_review_due_at < CURRENT_TIMESTAMP
+             FETCH FIRST v_limit ROWS ONLY
+        ) LOOP
+            BEGIN
+                pr_enqueue_notify(
+                    pi_org_id     => rec.org_id_organization,
+                    pi_dispute_id => rec.id_dispute,
+                    pi_event      => 'OPS_REVIEW_OVERDUE',
+                    pi_payload    => '{"appointment_id":' || rec.app_id_appointment || '}'
+                );
                 COMMIT;
             EXCEPTION
                 WHEN OTHERS THEN
@@ -1118,6 +1547,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                 IF rec.event_code = 'DISPUTE_OPENED' THEN
                     v_title := 'Disputa de reembolso';
                     v_body := 'Un cliente abrio una disputa. Adjunta el comprobante de transferencia en 48 horas habiles.';
+                ELSIF rec.event_code = 'OPS_REVIEW_OVERDUE' THEN
+                    v_title := 'Revision de disputa vencida';
+                    v_body := 'Hay una disputa en revision cuyo plazo de Operaciones vencio.';
                 ELSE
                     v_title := 'Cliente insiste con el reembolso';
                     v_body := 'El cliente indica que el dinero sigue sin aparecer. Revisalo en Cobros.';
@@ -1173,14 +1605,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
     ) IS
     BEGIN
         UPDATE org_refund_dispute
-           SET dispute_status = 'DISMISSED',
-               close_reason   = 'WAIVED',
-               closed_at      = CURRENT_TIMESTAMP,
-               closed_by      = pi_user_id,
-               notes          = SUBSTR(NVL(notes || ' | ', '') || 'WAIVED: ' || pi_reason, 1, 500),
-               updated_at     = CURRENT_TIMESTAMP
+           SET dispute_status  = 'DISMISSED',
+               close_reason    = 'WAIVED',
+               resolution_code = 'WAIVED',
+               closed_at       = CURRENT_TIMESTAMP,
+               closed_by       = pi_user_id,
+               resolved_at     = CURRENT_TIMESTAMP,
+               resolved_by     = pi_user_id,
+               notes           = SUBSTR(NVL(notes || ' | ', '') || 'WAIVED: ' || pi_reason, 1, 500),
+               updated_at      = CURRENT_TIMESTAMP
          WHERE app_id_appointment = pi_app_id
-           AND dispute_status IN ('OPEN', 'EVIDENCE_PROCESSING');
+           AND dispute_status IN ('OPENED', 'PROOF_RECEIVED', 'UNDER_REVIEW');
     END pr_dismiss_for_appointment;
 
 END pkg_aox_refund_disputes_api;

@@ -570,6 +570,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         po_new_id := NULL;
         po_misaligned_reason := NULL;
 
+        pkg_aox_payment_settings_api.pr_assert_new_internal_appointment(pi_org_id);
+
         v_loc_id     := pi_row_json.get_number('loc_id_location');
         v_pro_id     := pi_row_json.get_number('pro_id_professional');
         v_ser_id     := pi_row_json.get_number('ser_id_service');

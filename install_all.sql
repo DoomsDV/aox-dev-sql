@@ -221,6 +221,10 @@ PROMPT [45/45] org_payment_settings
 @@tables\ORG_REFUND_DISPUTE_EVIDENCE.sql
 @@tables\ORG_REFUND_STRIKE.sql
 @@tables\ORG_REFUND_NOTIFY_OUTBOX.sql
+@@tables\ORG_REFUND_ENFORCEMENT_AUDIT.sql
+@@tables\ORG_REFUND_DISPUTE_COMPENSATION.sql
+@@tables\ORG_REFUND_DISPUTE_LEDGER.sql
+@@tables\CUSTOMER_PHONE_AUDIT.sql
 
 PROMPT --- Seed catalogo de bancos SIPAP Paraguay ---
 MERGE INTO ref_sipap_bank t
@@ -392,6 +396,7 @@ PROMPT --- FASE 3: Paquetes - nucleo ---
 @@packages\PKG_AOX_PAYMENTS_API.pls
 
 @@packages\PKG_AOX_REFUND_CLAIMS_API.pls
+@@packages\PKG_AOX_REFUND_COMPENSATION_API.pls
 @@packages\PKG_AOX_REFUND_DISPUTES_API.pls
 @@packages\PKG_AOX_BUCKET.pls
 @@packages\PKG_AOX_META_API.pls

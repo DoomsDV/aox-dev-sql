@@ -4,14 +4,20 @@ CREATE TABLE org_refund_dispute (
   org_id_organization   NUMBER                      NOT NULL,
   app_id_appointment    NUMBER                      NOT NULL,
   dispute_source        VARCHAR2(20)                NOT NULL,
-  dispute_status        VARCHAR2(30)                DEFAULT 'OPEN' NOT NULL,
+  dispute_status        VARCHAR2(30)                DEFAULT 'OPENED' NOT NULL,
   proof_due_at          TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+  evidence_received_at  TIMESTAMP(6) WITH TIME ZONE NULL,
+  ops_review_due_at     TIMESTAMP(6) WITH TIME ZONE NULL,
   current_evidence_id   NUMBER                      NULL,
   close_reason          VARCHAR2(40)                NULL,
+  resolution_code       VARCHAR2(40)                NULL,
   notes                 VARCHAR2(500)               NULL,
   opened_at             TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  customer_insisted_at  TIMESTAMP(6) WITH TIME ZONE NULL,
   closed_at             TIMESTAMP(6) WITH TIME ZONE NULL,
   closed_by             NUMBER                      NULL,
+  resolved_at           TIMESTAMP(6) WITH TIME ZONE NULL,
+  resolved_by           NUMBER                      NULL,
   created_at            TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   updated_at            TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 )
@@ -25,6 +31,11 @@ CREATE UNIQUE INDEX uq_refund_dispute_appointment
 PROMPT CREATE INDEX idx_refund_dispute_timeout
 CREATE INDEX idx_refund_dispute_timeout
   ON org_refund_dispute (dispute_status, proof_due_at)
+/
+
+PROMPT CREATE INDEX idx_refund_dispute_ops_review
+CREATE INDEX idx_refund_dispute_ops_review
+  ON org_refund_dispute (dispute_status, ops_review_due_at)
 /
 
 PROMPT CREATE INDEX idx_refund_dispute_org_status
@@ -60,11 +71,12 @@ PROMPT ALTER TABLE org_refund_dispute ADD CONSTRAINT chk_refund_dispute_status C
 ALTER TABLE org_refund_dispute
   ADD CONSTRAINT chk_refund_dispute_status CHECK (
     dispute_status IN (
-      'OPEN',
-      'EVIDENCE_PROCESSING',
-      'EVIDENCE_ACCEPTED',
-      'EXPIRED_STRIKE',
-      'CUSTOMER_FOLLOW_UP',
+      'OPENED',
+      'PROOF_RECEIVED',
+      'UNDER_REVIEW',
+      'REFUND_SETTLED',
+      'TIMED_OUT',
+      'RESOLVED_BY_OPS',
       'DISMISSED'
     )
   )
@@ -74,7 +86,17 @@ PROMPT ALTER TABLE org_refund_dispute ADD CONSTRAINT chk_refund_dispute_close CH
 ALTER TABLE org_refund_dispute
   ADD CONSTRAINT chk_refund_dispute_close CHECK (
     close_reason IS NULL
-    OR close_reason IN ('PROOF_OK', 'TIMEOUT', 'WAIVED', 'CUSTOMER_INSISTED')
+    OR close_reason IN (
+      'PROOF_OK',
+      'TIMEOUT',
+      'WAIVED',
+      'CUSTOMER_INSISTED',
+      'CUSTOMER_CONFIRMED',
+      'OPS_SETTLED',
+      'OPS_DISMISSED',
+      'OPS_ADVERSE',
+      'OPS_CREDIT'
+    )
   )
 /
 
@@ -84,4 +106,16 @@ COMMENT ON TABLE org_refund_dispute IS
 
 COMMENT ON COLUMN org_refund_dispute.proof_due_at IS
   'Vencimiento de 48 horas habiles (lun-vie, America/Asuncion) para subir prueba aceptable.';
+/
+
+COMMENT ON COLUMN org_refund_dispute.evidence_received_at IS
+  'Primera evidencia cargada a tiempo. No liquida el caso.';
+/
+
+COMMENT ON COLUMN org_refund_dispute.ops_review_due_at IS
+  'SLA de 24 horas habiles de Operaciones Hasel cuando el caso entra a UNDER_REVIEW.';
+/
+
+COMMENT ON COLUMN org_refund_dispute.dispute_status IS
+  'OPENED | PROOF_RECEIVED | UNDER_REVIEW | REFUND_SETTLED | TIMED_OUT | RESOLVED_BY_OPS | DISMISSED. CREDIT_ISSUED/DEBT_OPEN viven en el agregado de compensacion.';
 /
