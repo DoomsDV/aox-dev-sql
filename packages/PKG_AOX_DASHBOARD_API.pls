@@ -285,6 +285,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_month_start      TIMESTAMP;
         v_next_month_start TIMESTAMP;
         v_prev_month_start TIMESTAMP;
+        v_prev_mtd_end     TIMESTAMP;
         v_today_start      TIMESTAMP;
         v_tomorrow_start   TIMESTAMP;
 
@@ -294,6 +295,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_prev_month_rev   NUMBER := 0;
         v_avg_ticket       NUMBER := 0;
         v_pending_expected NUMBER := 0;
+        v_pending_count    NUMBER := 0;
         v_mom_delta        NUMBER;
 
         v_response_json    json_object_t := json_object_t();
@@ -345,6 +347,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_month_start      := CAST(TRUNC(v_now_local, 'MM') AS TIMESTAMP);
         v_next_month_start := ADD_MONTHS(v_month_start, 1);
         v_prev_month_start := ADD_MONTHS(v_month_start, -1);
+        -- Mismo tramo transcurrido del mes anterior (MTD vs MTD).
+        v_prev_mtd_end     := v_prev_month_start + (v_now_local - v_month_start);
 
         -- Ingreso de hoy (citas ya ocurridas hoy).
         SELECT NVL(SUM(NVL(s.price, 0)), 0)
@@ -368,7 +372,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
            AND a.start_time >= v_month_start
            AND a.start_time < v_now_local;
 
-        -- Ingreso del mes anterior (mes completo).
+        -- Ingreso del mismo tramo del mes anterior (hasta el mismo día/hora).
         SELECT NVL(SUM(NVL(s.price, 0)), 0)
           INTO v_prev_month_rev
           FROM appointment a
@@ -377,17 +381,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
            AND (v_is_admin OR a.pro_id_professional = v_prof_id)
            AND a.status IN ('CONFIRMADO', 'COMPLETADO')
            AND a.start_time >= v_prev_month_start
-           AND a.start_time < v_month_start;
+           AND a.start_time < v_prev_mtd_end;
 
-        -- Ingreso esperado por citas futuras confirmadas/pendientes.
-        SELECT NVL(SUM(NVL(s.price, 0)), 0)
-          INTO v_pending_expected
+        -- Ingreso esperado por citas futuras del mes en curso.
+        SELECT NVL(SUM(NVL(s.price, 0)), 0), COUNT(*)
+          INTO v_pending_expected, v_pending_count
           FROM appointment a
           LEFT JOIN service s ON s.id_service = a.ser_id_service
          WHERE a.org_id_organization = v_org_id
            AND (v_is_admin OR a.pro_id_professional = v_prof_id)
            AND a.status IN ('PENDIENTE', 'CONFIRMADO')
-           AND a.start_time >= v_now_local;
+           AND a.start_time >= v_now_local
+           AND a.start_time < v_next_month_start;
 
         -- Total de clientes: base de la organización para ADMIN, cartera propia
         -- (pacientes únicos atendidos) para PROFESIONAL.
@@ -521,8 +526,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         ELSE
             v_data_obj.put('mom_delta_pct', v_mom_delta);
         END IF;
-        v_data_obj.put('pending_expected_revenue', v_pending_expected);
-        v_data_obj.put('total_clients'           , v_total_clients);
+        v_data_obj.put('pending_expected_revenue' , v_pending_expected);
+        v_data_obj.put('pending_appointments_month', v_pending_count);
+        v_data_obj.put('total_clients'            , v_total_clients);
         v_data_obj.put('new_clients_month'       , v_new_clients);
         v_data_obj.put('active_clients_month'    , v_active_clients);
         v_data_obj.put('upcoming_clients_7d'     , v_upcoming_clients);
