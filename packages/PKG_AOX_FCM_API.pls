@@ -75,6 +75,25 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         RETURN v_base || '/panel/calendar?org_member_id=' || pi_org_member_id;
     END fn_calendar_push_url;
 
+    FUNCTION fn_cobros_push_url(
+        pi_org_member_id  IN NUMBER,
+        pi_appointment_id IN NUMBER DEFAULT NULL
+    ) RETURN VARCHAR2 IS
+        v_base VARCHAR2(500) := RTRIM(NVL(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://hasel.app'), '/');
+        v_url  VARCHAR2(1000);
+        v_sep  VARCHAR2(2) := '?';
+    BEGIN
+        v_url := v_base || '/panel/cobros';
+        IF pi_org_member_id IS NOT NULL AND pi_org_member_id > 0 THEN
+            v_url := v_url || v_sep || 'org_member_id=' || pi_org_member_id;
+            v_sep := '&';
+        END IF;
+        IF pi_appointment_id IS NOT NULL AND pi_appointment_id > 0 THEN
+            v_url := v_url || v_sep || 'appointment=' || pi_appointment_id;
+        END IF;
+        RETURN v_url;
+    END fn_cobros_push_url;
+
     FUNCTION fn_dashboard_push_url RETURN VARCHAR2 IS
         v_base VARCHAR2(500) := RTRIM(NVL(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://hasel.app'), '/');
     BEGIN
@@ -485,9 +504,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         INNER JOIN organization o ON o.id_organization = m.org_id_organization
         WHERE p.id_professional = pi_pro_id;
 
-        v_push_url  := fn_calendar_push_url(v_org_member_id);
-        v_push_body := fn_format_push_body(v_org_name, pi_body);
         v_inbox_type := fn_infer_inbox_ntype(pi_ntype, pi_process_name);
+        IF v_inbox_type = 'PAYMENT' THEN
+            v_push_url := fn_cobros_push_url(v_org_member_id, pi_appointment_id);
+        ELSE
+            v_push_url := fn_calendar_push_url(v_org_member_id);
+        END IF;
+        v_push_body := fn_format_push_body(v_org_name, pi_body);
 
         IF NOT fn_is_digest_process(pi_process_name) THEN
             pkg_aox_inbox_api.pr_enqueue(
@@ -529,7 +552,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                 pi_org_member_id  => admin_rec.id_org_member,
                 pi_title          => pi_title,
                 pi_body           => pi_body,
-                pi_url            => fn_calendar_push_url(admin_rec.id_org_member),
+                pi_url            => CASE
+                    WHEN v_inbox_type = 'PAYMENT' THEN fn_cobros_push_url(admin_rec.id_org_member, pi_appointment_id)
+                    ELSE fn_calendar_push_url(admin_rec.id_org_member)
+                END,
                 pi_process_name   => pi_process_name || '.ADMIN_FANOUT',
                 pi_ntype          => v_inbox_type,
                 pi_appointment_id => pi_appointment_id
@@ -583,9 +609,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         WHERE m.id_org_member = pi_org_member_id
           AND m.is_active = 1;
 
-        v_push_url   := NVL(NULLIF(TRIM(pi_url), ''), fn_calendar_push_url(pi_org_member_id));
-        v_push_body  := fn_format_push_body(v_org_name, pi_body);
         v_inbox_type := fn_infer_inbox_ntype(pi_ntype, pi_process_name);
+        IF NULLIF(TRIM(pi_url), '') IS NOT NULL THEN
+            v_push_url := TRIM(pi_url);
+        ELSIF v_inbox_type = 'PAYMENT' THEN
+            v_push_url := fn_cobros_push_url(pi_org_member_id, pi_appointment_id);
+        ELSE
+            v_push_url := fn_calendar_push_url(pi_org_member_id);
+        END IF;
+        v_push_body  := fn_format_push_body(v_org_name, pi_body);
 
         IF NOT fn_is_digest_process(pi_process_name) THEN
             pkg_aox_inbox_api.pr_enqueue(

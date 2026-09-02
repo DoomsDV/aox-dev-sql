@@ -682,7 +682,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                 pi_appointment_id => v_app_id,
                 pi_title          => 'Seña aprobada',
                 pi_body           => 'El comprobante SIPAP fue validado. Turno confirmado.',
-                pi_process_name   => 'PKG_AOX_PAYMENTS_API.PR_APPROVE_PAYMENT.FCM_NOTIFY'
+                pi_process_name   => 'PKG_AOX_PAYMENTS_API.PR_APPROVE_PAYMENT.FCM_NOTIFY',
+                pi_ntype          => 'PAYMENT'
             );
         EXCEPTION
             WHEN OTHERS THEN NULL;
@@ -722,6 +723,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_org_id   NUMBER;
         v_user_id  NUMBER;
         v_app_id   NUMBER;
+        v_pro_id   NUMBER;
         v_pay_st   VARCHAR2(20);
         v_receipt  VARCHAR2(1000);
         v_reason   VARCHAR2(400);
@@ -750,13 +752,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
 
         BEGIN
             SELECT /*+ no_parallel */
-                   pt.app_id_appointment, pt.payment_status, pt.receipt_url
-              INTO v_app_id, v_pay_st, v_receipt
+                   pt.app_id_appointment, pt.payment_status, pt.receipt_url, a.pro_id_professional
+              INTO v_app_id, v_pay_st, v_receipt, v_pro_id
               FROM payment_transaction pt
+              JOIN appointment a ON a.id_appointment = pt.app_id_appointment
              WHERE pt.id_transaction = pi_transaction_id
                AND pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
-             FOR UPDATE;
+             FOR UPDATE OF pt.ocr_status;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 RAISE_APPLICATION_ERROR(-20004, 'Cobro no encontrado.');
@@ -793,7 +796,46 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                 pi_appointment_id => v_app_id
             );
         EXCEPTION
-            WHEN OTHERS THEN NULL;
+            WHEN OTHERS THEN
+                pkg_aox_util.pr_log_api(
+                    pi_api_name       => 'WHATSAPP',
+                    pi_process_name   => 'PKG_AOX_PAYMENTS_API.PR_REJECT_PAYMENT.WA',
+                    pi_http_method    => 'JOB',
+                    pi_endpoint       => 'whatsapp/payment-reject',
+                    pi_status         => 'ERROR',
+                    pi_status_code    => 500,
+                    pi_error_code     => SQLCODE,
+                    pi_error_message  => SQLERRM,
+                    pi_error_stack    => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                    pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                    pi_request_params => 'appointment_id=' || v_app_id
+                );
+        END;
+
+        BEGIN
+            pkg_aox_fcm_api.pr_notify_professional_appointment(
+                pi_pro_id         => v_pro_id,
+                pi_appointment_id => v_app_id,
+                pi_title          => 'Comprobante rechazado',
+                pi_body           => 'Se rechazó el comprobante SIPAP. El cliente puede subir otro.',
+                pi_process_name   => 'PKG_AOX_PAYMENTS_API.PR_REJECT_PAYMENT.FCM_NOTIFY',
+                pi_ntype          => 'PAYMENT'
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_util.pr_log_api(
+                    pi_api_name       => 'FCM',
+                    pi_process_name   => 'PKG_AOX_PAYMENTS_API.PR_REJECT_PAYMENT.FCM_NOTIFY',
+                    pi_http_method    => 'PUSH',
+                    pi_endpoint       => 'inbox/payment-reject',
+                    pi_status         => 'ERROR',
+                    pi_status_code    => 500,
+                    pi_error_code     => SQLCODE,
+                    pi_error_message  => SQLERRM,
+                    pi_error_stack    => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                    pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                    pi_request_params => 'appointment_id=' || v_app_id
+                );
         END;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
@@ -820,6 +862,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_org_id      NUMBER;
         v_user_id     NUMBER;
         v_app_id      NUMBER;
+        v_pro_id      NUMBER;
         v_refund_st   VARCHAR2(20);
         v_refund_amt  NUMBER;
         v_response    json_object_t := json_object_t();
@@ -837,9 +880,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         BEGIN
             SELECT /*+ no_parallel */
                    pt.app_id_appointment,
+                   a.pro_id_professional,
                    a.refund_status,
                    a.refund_amount
-              INTO v_app_id, v_refund_st, v_refund_amt
+              INTO v_app_id, v_pro_id, v_refund_st, v_refund_amt
               FROM payment_transaction pt
               JOIN appointment a ON a.id_appointment = pt.app_id_appointment
              WHERE pt.id_transaction = pi_transaction_id
@@ -885,7 +929,47 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                 pi_appointment_id => v_app_id
             );
         EXCEPTION
-            WHEN OTHERS THEN NULL;
+            WHEN OTHERS THEN
+                pkg_aox_util.pr_log_api(
+                    pi_api_name       => 'WHATSAPP',
+                    pi_process_name   => 'PKG_AOX_PAYMENTS_API.PR_MARK_REFUND_SENT.WA',
+                    pi_http_method    => 'JOB',
+                    pi_endpoint       => 'whatsapp/refund-sent',
+                    pi_status         => 'ERROR',
+                    pi_status_code    => 500,
+                    pi_error_code     => SQLCODE,
+                    pi_error_message  => SQLERRM,
+                    pi_error_stack    => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                    pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                    pi_request_params => 'appointment_id=' || v_app_id
+                );
+        END;
+
+        BEGIN
+            pkg_aox_fcm_api.pr_notify_professional_appointment(
+                pi_pro_id         => v_pro_id,
+                pi_appointment_id => v_app_id,
+                pi_title          => 'Reembolso enviado',
+                pi_body           => 'El reembolso SIPAP se marcó como enviado. Gs. '
+                    || TRIM(TO_CHAR(NVL(v_refund_amt, 0), 'FM999G999G999')),
+                pi_process_name   => 'PKG_AOX_PAYMENTS_API.PR_MARK_REFUND_SENT.FCM_NOTIFY',
+                pi_ntype          => 'PAYMENT'
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_util.pr_log_api(
+                    pi_api_name       => 'FCM',
+                    pi_process_name   => 'PKG_AOX_PAYMENTS_API.PR_MARK_REFUND_SENT.FCM_NOTIFY',
+                    pi_http_method    => 'PUSH',
+                    pi_endpoint       => 'inbox/refund-sent',
+                    pi_status         => 'ERROR',
+                    pi_status_code    => 500,
+                    pi_error_code     => SQLCODE,
+                    pi_error_message  => SQLERRM,
+                    pi_error_stack    => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                    pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                    pi_request_params => 'appointment_id=' || v_app_id
+                );
         END;
 
         po_status_code := pkg_aox_util.c_success_ok_code;

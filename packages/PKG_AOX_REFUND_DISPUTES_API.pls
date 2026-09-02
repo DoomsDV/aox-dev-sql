@@ -1517,6 +1517,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_base := RTRIM(NVL(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://hasel.app'), '/');
         v_url := v_base || '/panel/cobros';
 
+        -- No usar FETCH FIRST ... FOR UPDATE: Oracle lo reescribe como vista
+        -- analítica y dispara ORA-02014. Limitar por ROWNUM en subconsulta y
+        -- aplicar FOR UPDATE SKIP LOCKED sobre la tabla base.
         FOR rec IN (
             SELECT /*+ no_parallel */
                    o.id_outbox,
@@ -1526,10 +1529,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                    o.payload,
                    o.attempts
               FROM org_refund_notify_outbox o
-             WHERE o.status IN ('PENDING', 'PROCESSING')
-               AND o.attempts < 8
-             ORDER BY o.created_at
-             FETCH FIRST v_limit ROWS ONLY
+             WHERE o.id_outbox IN (
+                    SELECT id_outbox
+                      FROM (
+                            SELECT id_outbox
+                              FROM org_refund_notify_outbox
+                             WHERE status IN ('PENDING', 'PROCESSING')
+                               AND attempts < 8
+                             ORDER BY created_at
+                           )
+                     WHERE ROWNUM <= v_limit
+                   )
              FOR UPDATE SKIP LOCKED
         ) LOOP
             UPDATE org_refund_notify_outbox

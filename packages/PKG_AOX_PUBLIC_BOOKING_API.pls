@@ -2707,8 +2707,32 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             pi_appointment_id => v_app_id,
             pi_title          => CASE WHEN v_refund_status = 'PENDING' THEN 'Reembolso pendiente' ELSE 'Cita cancelada' END,
             pi_body           => v_fcm_body,
-            pi_process_name   => 'PKG_AOX_PUBLIC_BOOKING_API.PR_CANCEL_PUBLIC_RESERVATION.FCM_NOTIFY'
+            pi_process_name   => 'PKG_AOX_PUBLIC_BOOKING_API.PR_CANCEL_PUBLIC_RESERVATION.FCM_NOTIFY',
+            pi_ntype          => CASE WHEN v_refund_status = 'PENDING' THEN 'PAYMENT' ELSE 'APPOINTMENT' END
         );
+
+        IF v_refund_status = 'PENDING' THEN
+            BEGIN
+                pkg_aox_meta_api.pr_enqueue_customer_refund_wa(
+                    pi_appointment_id => v_app_id
+                );
+            EXCEPTION
+                WHEN OTHERS THEN
+                    pkg_aox_util.pr_log_api(
+                        pi_api_name        => 'WHATSAPP',
+                        pi_process_name    => 'PKG_AOX_PUBLIC_BOOKING_API.PR_CANCEL_PUBLIC_RESERVATION.WA',
+                        pi_http_method     => 'JOB',
+                        pi_endpoint        => 'whatsapp/customer-refund',
+                        pi_status          => 'ERROR',
+                        pi_status_code     => 500,
+                        pi_error_code      => SQLCODE,
+                        pi_error_message   => SQLERRM,
+                        pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                        pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                        pi_request_params  => 'appointment_id=' || v_app_id
+                    );
+            END;
+        END IF;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response_json.put('status', 'success');

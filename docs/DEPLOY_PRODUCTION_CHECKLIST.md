@@ -235,6 +235,8 @@ SELECT job_name, enabled, state, last_start_date, next_run_date
 
 - [ ] Job existe y `enabled = TRUE` (o documentar si se deja deshabilitado hasta go-live Pagopar).
 
+Jobs de disputas/cobros: ver [JOBS_COBROS.md](JOBS_COBROS.md) (`HASEL_REFUND_DISPUTE_CHECK`, `failure_count`).
+
 ---
 
 ## Fase 4 — Recompilación completa de paquetes
