@@ -2850,7 +2850,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             pi_body           => NVL(TRIM(v_cus_name), 'Un cliente')
                 || ' cargo su alias. Reembolso pendiente: Gs. '
                 || TO_CHAR(NVL(v_refund_amt, 0), 'FM999G999G999'),
-            pi_process_name   => 'PKG_AOX_PUBLIC_BOOKING_API.PR_SUBMIT_REFUND_ALIAS.FCM_NOTIFY'
+            pi_process_name   => 'PKG_AOX_PUBLIC_BOOKING_API.PR_SUBMIT_REFUND_ALIAS.FCM_NOTIFY',
+            pi_ntype          => 'PAYMENT'
         );
 
         po_status_code := pkg_aox_util.c_success_ok_code;
@@ -3171,7 +3172,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                     v_msg := 'Pago verificado. Tu turno quedo confirmado.';
                 ELSIF v_ref_ok OR v_amt_ok THEN
                     v_ocr_status := 'MANUAL_REVIEW';
-                    v_msg := 'Comprobante recibido. El comercio confirmara el pago.';
+                    v_msg := 'Comprobante recibido. El comercio confirmará el pago.';
                 ELSE
                     v_ocr_status := 'MISMATCH';
                     v_msg := 'Los datos del comprobante no coinciden. El comercio lo revisara.';
@@ -3208,7 +3209,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                     pi_appointment_id => v_app_id,
                     pi_title          => 'Seña confirmada',
                     pi_body           => 'Se verifico el comprobante SIPAP. Turno confirmado.',
-                    pi_process_name   => 'PKG_AOX_PUBLIC_BOOKING_API.PR_UPLOAD_PUBLIC_RECEIPT.FCM_NOTIFY'
+                    pi_process_name   => 'PKG_AOX_PUBLIC_BOOKING_API.PR_UPLOAD_PUBLIC_RECEIPT.FCM_NOTIFY',
+                    pi_ntype          => 'PAYMENT'
                 );
             EXCEPTION
                 WHEN OTHERS THEN NULL;
