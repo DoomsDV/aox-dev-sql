@@ -6,7 +6,8 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
      * Centraliza las llamadas a la Graph API.
      */
 
-    -- Envía notificación de cita confirmada vía WhatsApp Cloud API
+    -- Retirado: plantilla Meta cita_confirmada ya no existe.
+    -- El alta de citas usa pr_enqueue_booking_confirmation_wa (META_WA_TEMPLATE_BOOKING).
     PROCEDURE pr_send_whatsapp_notification (
         pi_phone_number  IN VARCHAR2,
         pi_customer_name IN VARCHAR2,
@@ -39,7 +40,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
         pi_appointment_id IN appointment.id_appointment%TYPE
     );
 
-    -- Envía la plantilla cancelacion_reserva_manual_hasel_v2 cuando staff cancela/elimina la reserva.
+    -- Envía la plantilla cancelacion_reserva_manual_hasel_v3 cuando staff cancela/elimina la reserva.
     PROCEDURE pr_send_booking_cancelled_wa (
         pi_appointment_id IN appointment.id_appointment%TYPE
     );
@@ -69,7 +70,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
         pi_appointment_id IN appointment.id_appointment%TYPE
     );
 
-    -- Envía la plantilla confirmar_asistencia_reserva_v2 para reservas próximas.
+    -- Envía la plantilla confirmar_asistencia_reserva_v3 para reservas próximas.
     PROCEDURE pr_send_attendance_request_wa (
         pi_appointment_id IN appointment.id_appointment%TYPE
     );
@@ -388,12 +389,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_phone_id      VARCHAR2(100);
         v_status_code   NUMBER;
         v_payload       CLOB;
+        v_template_name VARCHAR2(100);
     BEGIN
         -- 1. Limpiar el teléfono (solo números)
         v_clean_phone := REGEXP_REPLACE(pi_phone_number, '[^0-9]', '');
 
         IF v_clean_phone LIKE '09%' THEN
             v_clean_phone := NVL(fn_get_parameter('WHATSAPP_DEFAULT_COUNTRY_CODE'), '595') || SUBSTR(v_clean_phone, 2);
+        END IF;
+
+        v_template_name := TRIM(fn_get_parameter('META_WA_TEMPLATE_LEGACY'));
+        IF v_template_name IS NULL OR LOWER(v_template_name) = 'cita_confirmada' THEN
+            RETURN;
         END IF;
 
         v_phone_id   := fn_get_meta_phone_number_id();
@@ -409,7 +416,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_body_json.put('to', v_clean_phone);
         v_body_json.put('type', 'template');
 
-        v_template.put('name', NVL(fn_get_parameter('META_WA_TEMPLATE_LEGACY'), 'cita_confirmada'));
+        v_template.put('name', v_template_name);
         v_language.put('code', NVL(fn_get_parameter('META_WA_TEMPLATE_LANG'), 'es'));
         v_template.put('language', v_language);
 
@@ -450,7 +457,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
 
         pkg_aox_util.pr_log_whatsapp_template(
             pi_process_name    => 'PKG_AOX_META_API.PR_SEND_WHATSAPP_NOTIFICATION',
-            pi_template_name   => NVL(fn_get_parameter('META_WA_TEMPLATE_LEGACY'), 'cita_confirmada'),
+            pi_template_name   => v_template_name,
             pi_phone_number    => v_clean_phone,
             pi_status          => CASE WHEN v_status_code BETWEEN 200 AND 299 THEN 'SUCCESS' ELSE 'ERROR' END,
             pi_status_code     => v_status_code,
@@ -462,7 +469,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         WHEN OTHERS THEN
             pkg_aox_util.pr_log_whatsapp_template(
                 pi_process_name    => 'PKG_AOX_META_API.PR_SEND_WHATSAPP_NOTIFICATION',
-                pi_template_name   => NVL(fn_get_parameter('META_WA_TEMPLATE_LEGACY'), 'cita_confirmada'),
+                pi_template_name   => v_template_name,
                 pi_phone_number    => v_clean_phone,
                 pi_status          => 'ERROR',
                 pi_status_code     => v_status_code,
@@ -912,11 +919,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             APEX_JSON.write('to', v_clean_phone);
             APEX_JSON.write('type', 'template');
             APEX_JSON.open_object('template');
-                APEX_JSON.write('name', fn_get_parameter('META_WA_TEMPLATE_CANCEL'));
+                APEX_JSON.write(
+                    'name',
+                    NVL(
+                        fn_get_parameter('META_WA_TEMPLATE_CANCEL'),
+                        'cancelacion_reserva_manual_hasel_v3'
+                    )
+                );
                 APEX_JSON.open_object('language');
                     APEX_JSON.write('code', NVL(fn_get_parameter('META_WA_TEMPLATE_LANG'), 'es'));
                 APEX_JSON.close_object;
                 APEX_JSON.open_array('components');
+                    -- Body v3: {{1}} cliente, {{2}} establecimiento (org.name, no sucursal), {{3}} fecha+hora
                     APEX_JSON.open_object;
                         APEX_JSON.write('type', 'body');
                         APEX_JSON.open_array('parameters');
@@ -925,6 +939,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
                             APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', TO_CHAR(v_start_time, 'DD-MM-YYYY HH24:MI')); APEX_JSON.close_object;
                         APEX_JSON.close_array;
                     APEX_JSON.close_object;
+                    -- Botón URL: sufijo org_slug/p/pro_slug (ej. fisio-av/p/dann-vergara)
                     APEX_JSON.open_object;
                         APEX_JSON.write('type', 'button');
                         APEX_JSON.write('sub_type', 'url');
@@ -1386,7 +1401,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             APEX_JSON.write('to', v_clean_phone);
             APEX_JSON.write('type', 'template');
             APEX_JSON.open_object('template');
-                APEX_JSON.write('name', fn_get_parameter('META_WA_TEMPLATE_ATTENDANCE'));
+                APEX_JSON.write(
+                    'name',
+                    NVL(
+                        fn_get_parameter('META_WA_TEMPLATE_ATTENDANCE'),
+                        'confirmar_asistencia_reserva_v3'
+                    )
+                );
                 APEX_JSON.open_object('language');
                     APEX_JSON.write('code', NVL(fn_get_parameter('META_WA_TEMPLATE_LANG'), 'es'));
                 APEX_JSON.close_object;

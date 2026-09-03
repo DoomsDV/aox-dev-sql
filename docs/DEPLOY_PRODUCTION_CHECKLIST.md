@@ -429,7 +429,7 @@ El backend (`PKG_AOX_META_API`) envía ese slug en botones de:
 
 | Plantilla | Origen en código |
 |-----------|------------------|
-| Cancelación manual | Parámetro `META_WA_TEMPLATE_CANCEL` (ej. `cancelacion_reserva_manual_hasel`) |
+| Cancelación manual | Parámetro `META_WA_TEMPLATE_CANCEL` (`cancelacion_reserva_manual_hasel_v3`; botón `org/p/pro`) |
 | Cancelación automática (timeout asistencia) | Parámetro `META_WA_TEMPLATE_AUTO_CANCEL` (ej. `cancelacion_auto_hasel_v3`) |
 | Confirmación / modificación / asistencia | `META_WA_TEMPLATE_BOOKING`, `META_WA_TEMPLATE_MODIFIED`, `META_WA_TEMPLATE_ATTENDANCE` |
 
@@ -442,7 +442,7 @@ El backend (`PKG_AOX_META_API`) envía ese slug en botones de:
 ```text
 META_PHONE_NUMBER_ID
 META_WA_TEMPLATE_LANG          (ej. es)
-META_WA_TEMPLATE_CANCEL        (cancelacion_reserva_manual_hasel)
+META_WA_TEMPLATE_CANCEL        (cancelacion_reserva_manual_hasel_v3)
 META_WA_TEMPLATE_BOOKING
 META_WA_TEMPLATE_MODIFIED
 META_WA_TEMPLATE_ATTENDANCE

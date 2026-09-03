@@ -501,7 +501,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ai_tools IS
         v_lock_dummy    NUMBER;
         v_response      json_object_t := json_object_t();
         v_data          json_object_t := json_object_t();
-        v_prof_name     VARCHAR2(200);
     BEGIN
         IF TRIM(pi_customer_name) IS NULL THEN
             RETURN fn_json_response('needs_input', 'Necesito el nombre del cliente.');
@@ -599,18 +598,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ai_tools IS
         RETURNING id_appointment INTO v_new_id;
 
         BEGIN
-            SELECT NVL(p.display_name, TRIM(u.first_name || ' ' || u.last_name))
-            INTO v_prof_name
-            FROM professional p
-            JOIN app_user u
-              ON u.id_user = p.usr_id_user
-            WHERE p.id_professional = v_prof_id;
-
-            pkg_aox_meta_api.pr_send_whatsapp_notification(
-                pi_phone_number  => TRIM(pi_customer_phone),
-                pi_customer_name => TRIM(pi_customer_name),
-                pi_date_time     => TO_CHAR(v_start_time, 'DD/MM/YYYY HH24:MI'),
-                pi_professional  => v_prof_name
+            pkg_aox_meta_api.pr_enqueue_booking_confirmation_wa(
+                pi_appointment_id => v_new_id
             );
         EXCEPTION
             WHEN OTHERS THEN
