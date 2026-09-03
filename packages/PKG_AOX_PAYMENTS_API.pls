@@ -571,10 +571,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
             RETURN;
         END IF;
 
-        SELECT /*+ no_parallel */ COUNT(*)
+        -- NEW-A: se cuenta por app_id_appointment (no por id_transaction) para que dos
+        -- payment_transaction del mismo turno (p.ej. reintento con misma Idempotency-Key
+        -- que no fue absorbido) no infle el badge con "2 pendientes" de una sola cita.
+        SELECT /*+ no_parallel */ COUNT(DISTINCT app_id_appointment)
           INTO v_count
           FROM (
-            SELECT pt.id_transaction
+            SELECT pt.app_id_appointment
               FROM payment_transaction pt
              WHERE pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
@@ -583,14 +586,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                AND NVL(pt.ocr_status, 'PENDING') IN ('PENDING', 'MISMATCH', 'MANUAL_REVIEW', 'FAILED')
                AND NOT (pt.reviewed_at IS NOT NULL AND pt.ocr_status = 'MISMATCH')
             UNION
-            SELECT pt.id_transaction
+            SELECT pt.app_id_appointment
               FROM payment_transaction pt
               JOIN appointment a ON a.id_appointment = pt.app_id_appointment
              WHERE pt.org_id_organization = v_org_id
                AND pt.provider = 'sipap'
                AND a.refund_status = 'PENDING'
             UNION
-            SELECT pt.id_transaction
+            SELECT pt.app_id_appointment
               FROM payment_transaction pt
               JOIN org_refund_dispute d ON d.app_id_appointment = pt.app_id_appointment
              WHERE pt.org_id_organization = v_org_id
