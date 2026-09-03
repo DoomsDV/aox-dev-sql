@@ -430,7 +430,7 @@ El backend (`PKG_AOX_META_API`) envía ese slug en botones de:
 | Plantilla | Origen en código |
 |-----------|------------------|
 | Cancelación manual | Parámetro `META_WA_TEMPLATE_CANCEL` (ej. `cancelacion_reserva_manual_hasel`) |
-| Cancelación automática (timeout asistencia) | Parámetro `META_WA_TEMPLATE_AUTO_CANCEL` (ej. `cancelacion_auto_hasel_v2`) |
+| Cancelación automática (timeout asistencia) | Parámetro `META_WA_TEMPLATE_AUTO_CANCEL` (ej. `cancelacion_auto_hasel_v3`) |
 | Confirmación / modificación / asistencia | `META_WA_TEMPLATE_BOOKING`, `META_WA_TEMPLATE_MODIFIED`, `META_WA_TEMPLATE_ATTENDANCE` |
 
 **Para el deploy de hoy:**

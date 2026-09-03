@@ -1652,14 +1652,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
                                     'name',
                                     NVL(
                                         fn_get_parameter('META_WA_TEMPLATE_AUTO_CANCEL'),
-                                        'cancelacion_auto_hasel_v2'
+                                        'cancelacion_auto_hasel_v3'
                                     )
                                 );
                                 APEX_JSON.open_object('language');
                                     APEX_JSON.write('code', NVL(fn_get_parameter('META_WA_TEMPLATE_LANG'), 'es'));
                                 APEX_JSON.close_object;
                                 APEX_JSON.open_array('components');
-                                    -- Variables del cuerpo (Body)
+                                    -- Body v3: {{1}} nombre, {{2}} fecha+hora, {{3}} organización
                                     APEX_JSON.open_object;
                                         APEX_JSON.write('type', 'body');
                                         APEX_JSON.open_array('parameters');
@@ -1669,8 +1669,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
                                             APEX_JSON.close_object; -- {{1}} Nombre
                                             APEX_JSON.open_object;
                                             APEX_JSON.write('type', 'text');
-                                            APEX_JSON.write('text', TO_CHAR(rec.start_time, 'HH24:MI'));
-                                            APEX_JSON.close_object; -- {{2}} Hora
+                                            APEX_JSON.write(
+                                                'text',
+                                                TO_CHAR(rec.start_time, 'DD-MM-YYYY HH24:MI')
+                                            );
+                                            APEX_JSON.close_object; -- {{2}} Fecha y hora
                                             APEX_JSON.open_object;
                                             APEX_JSON.write('type', 'text');
                                             APEX_JSON.write('text', rec.organization_name);
