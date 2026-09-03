@@ -787,7 +787,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         update service
         set name              = trim(v_name),
             duration_minutes  = v_duration,
-            price             = v_price,
+            price             = NVL(v_price, price),
             hide_public_price = NVL(v_hide_public_price, hide_public_price),
             hidden_public_price_label = CASE
                 WHEN v_has_hidden_label = 1 THEN v_hidden_public_price_label
