@@ -2134,7 +2134,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_data_obj.put('service_image_url'   , NVL(rec.service_image_url, ''));
             v_data_obj.put('duration_minutes'    , rec.duration_minutes);
             v_data_obj.put('customer_name'       , rec.customer_name);
-            v_data_obj.put('customer_phone'      , rec.customer_phone);
+            -- No devolver customer_phone: /r/[token] pide last-4 para abrir/confirmar
+            -- disputa. Exponer el número completo hace trivial ese challenge.
             v_data_obj.put('status'              , rec.status);
             v_data_obj.put('start_time'          , TO_CHAR(rec.start_time, 'YYYY-MM-DD"T"HH24:MI:SS'));
             v_data_obj.put('end_time'            , TO_CHAR(rec.end_time, 'YYYY-MM-DD"T"HH24:MI:SS'));
