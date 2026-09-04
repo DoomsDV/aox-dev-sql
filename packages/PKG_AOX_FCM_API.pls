@@ -51,6 +51,28 @@ CREATE OR REPLACE PACKAGE pkg_aox_fcm_api IS
         pi_dedupe_key     IN VARCHAR2 DEFAULT NULL
     );
 
+    -- Variante con resultado para workers transaccionales (p.ej. outbox de disputas).
+    -- Mantiene separado el resultado de la campanita del resultado de FCM.
+    PROCEDURE pr_notify_org_member_checked(
+        pi_org_member_id    IN NUMBER,
+        pi_title            IN VARCHAR2,
+        pi_body             IN VARCHAR2,
+        pi_url              IN VARCHAR2,
+        pi_process_name     IN VARCHAR2,
+        pi_ntype            IN VARCHAR2,
+        pi_appointment_id   IN NUMBER,
+        pi_holiday_id       IN NUMBER,
+        pi_campaign_id      IN NUMBER,
+        pi_action_type      IN VARCHAR2,
+        pi_action_payload   IN CLOB,
+        pi_dedupe_key       IN VARCHAR2,
+        po_inbox_ok         OUT NUMBER,
+        po_push_attempted   OUT NUMBER,
+        po_push_succeeded   OUT NUMBER,
+        po_push_failed      OUT NUMBER,
+        po_error            OUT VARCHAR2
+    );
+
     -- Job matutino: recordatorio diario admin/profesional (ventana 7-8 AM, TZ app)
     PROCEDURE pr_process_daily_morning_digest(
         pi_batch_size IN NUMBER DEFAULT 500
@@ -65,6 +87,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
     c_process_digest  CONSTANT VARCHAR2(100) := 'PKG_AOX_FCM_API.PR_PROCESS_DAILY_MORNING_DIGEST';
     c_digest_start_h  CONSTANT PLS_INTEGER    := 7;
     c_digest_end_h    CONSTANT PLS_INTEGER    := 8;
+
+    PROCEDURE pr_send_push_checked(
+        pi_token   IN VARCHAR2,
+        pi_title   IN VARCHAR2,
+        pi_body    IN VARCHAR2,
+        pi_url     IN VARCHAR2,
+        po_success OUT NUMBER,
+        po_error   OUT VARCHAR2
+    );
 
     FUNCTION fn_calendar_push_url(pi_org_member_id IN NUMBER) RETURN VARCHAR2 IS
         v_base VARCHAR2(500) := RTRIM(NVL(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://hasel.app'), '/');
@@ -406,6 +437,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         pi_body  IN VARCHAR2,
         pi_url   IN VARCHAR2 DEFAULT NULL
     ) IS
+        l_success NUMBER;
+        l_error   VARCHAR2(4000);
+    BEGIN
+        pr_send_push_checked(
+            pi_token       => pi_token,
+            pi_title       => pi_title,
+            pi_body        => pi_body,
+            pi_url         => pi_url,
+            po_success     => l_success,
+            po_error       => l_error
+        );
+    END pr_send_push;
+
+    PROCEDURE pr_send_push_checked(
+        pi_token   IN VARCHAR2,
+        pi_title   IN VARCHAR2,
+        pi_body    IN VARCHAR2,
+        pi_url     IN VARCHAR2,
+        po_success OUT NUMBER,
+        po_error   OUT VARCHAR2
+    ) IS
         l_body         CLOB;
         l_response     CLOB;
         l_status_code  NUMBER;
@@ -413,6 +465,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         l_firebase_url VARCHAR2(1000) := fn_get_parameter('FCM_PUSH_SERVICE_URL');
         l_fcm_bearer   VARCHAR2(4000) := fn_get_parameter('FCM_PUSH_SERVICE_BEARER');
     BEGIN
+        po_success := 0;
+        po_error   := NULL;
+
         IF l_firebase_url IS NULL THEN
             RAISE_APPLICATION_ERROR(-20070, 'No existe el parámetro FCM_PUSH_SERVICE_URL.');
         END IF;
@@ -455,8 +510,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
             pi_response_body   => l_response
         );
 
+        IF l_status_code BETWEEN 200 AND 299 THEN
+            po_success := 1;
+        ELSE
+            po_error := SUBSTR(
+                'FCM HTTP ' || NVL(TO_CHAR(l_status_code), 'NULL') || ': '
+                || DBMS_LOB.SUBSTR(l_response, 300, 1),
+                1,
+                4000
+            );
+        END IF;
     EXCEPTION
         WHEN OTHERS THEN
+            po_error := SUBSTR(SQLERRM, 1, 4000);
             pkg_aox_util.pr_log_push_fcm(
                 pi_process_name    => 'PKG_AOX_FCM_API.PR_SEND_PUSH',
                 pi_fcm_token       => pi_token,
@@ -470,7 +536,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                 pi_request_payload => l_body,
                 pi_response_body   => l_response
             );
-    END pr_send_push;
+    END pr_send_push_checked;
 
     PROCEDURE pr_notify_professional_appointment(
         pi_pro_id         IN NUMBER,
@@ -661,6 +727,133 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
             );
             NULL;
     END pr_notify_org_member;
+
+    PROCEDURE pr_notify_org_member_checked(
+        pi_org_member_id    IN NUMBER,
+        pi_title            IN VARCHAR2,
+        pi_body             IN VARCHAR2,
+        pi_url              IN VARCHAR2,
+        pi_process_name     IN VARCHAR2,
+        pi_ntype            IN VARCHAR2,
+        pi_appointment_id   IN NUMBER,
+        pi_holiday_id       IN NUMBER,
+        pi_campaign_id      IN NUMBER,
+        pi_action_type      IN VARCHAR2,
+        pi_action_payload   IN CLOB,
+        pi_dedupe_key       IN VARCHAR2,
+        po_inbox_ok         OUT NUMBER,
+        po_push_attempted   OUT NUMBER,
+        po_push_succeeded   OUT NUMBER,
+        po_push_failed      OUT NUMBER,
+        po_error            OUT VARCHAR2
+    ) IS
+        v_platform_user_id platform_user.id_platform_user%TYPE;
+        v_org_id           organization.id_organization%TYPE;
+        v_org_name         organization.name%TYPE;
+        v_push_url         VARCHAR2(1000);
+        v_push_body        VARCHAR2(4000);
+        v_inbox_type       VARCHAR2(20);
+        v_inbox_count      NUMBER := 0;
+        v_push_success     NUMBER := 0;
+        v_push_error       VARCHAR2(4000);
+    BEGIN
+        po_inbox_ok       := 0;
+        po_push_attempted := 0;
+        po_push_succeeded := 0;
+        po_push_failed    := 0;
+        po_error          := NULL;
+
+        IF NULLIF(TRIM(pi_dedupe_key), '') IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20072, 'La notificacion checked requiere dedupe_key.');
+        END IF;
+
+        SELECT m.platform_user_id,
+               m.org_id_organization,
+               o.name
+          INTO v_platform_user_id,
+               v_org_id,
+               v_org_name
+          FROM org_member m
+          JOIN organization o ON o.id_organization = m.org_id_organization
+         WHERE m.id_org_member = pi_org_member_id
+           AND m.is_active = 1;
+
+        v_inbox_type := fn_infer_inbox_ntype(pi_ntype, pi_process_name);
+        IF NULLIF(TRIM(pi_url), '') IS NOT NULL THEN
+            v_push_url := TRIM(pi_url);
+        ELSIF v_inbox_type = 'PAYMENT' THEN
+            v_push_url := fn_cobros_push_url(pi_org_member_id, pi_appointment_id);
+        ELSE
+            v_push_url := fn_calendar_push_url(pi_org_member_id);
+        END IF;
+        v_push_body := fn_format_push_body(v_org_name, pi_body);
+
+        IF NOT fn_is_digest_process(pi_process_name) THEN
+            pkg_aox_inbox_api.pr_enqueue(
+                pi_org_id          => v_org_id,
+                pi_org_member_id   => pi_org_member_id,
+                pi_ntype           => v_inbox_type,
+                pi_title           => pi_title,
+                pi_body            => pi_body,
+                pi_action_type     => NVL(pi_action_type, 'OPEN_URL'),
+                pi_action_url      => v_push_url,
+                pi_action_payload  => pi_action_payload,
+                pi_appointment_id  => pi_appointment_id,
+                pi_holiday_id      => pi_holiday_id,
+                pi_campaign_id     => pi_campaign_id,
+                pi_dedupe_key      => pi_dedupe_key
+            );
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_inbox_count
+          FROM user_notification n
+         WHERE n.org_id_organization = v_org_id
+           AND n.org_member_id = pi_org_member_id
+           AND n.dedupe_key = pi_dedupe_key;
+
+        IF v_inbox_count = 0 THEN
+            RAISE_APPLICATION_ERROR(-20073, 'No se pudo crear la notificacion de campanita.');
+        END IF;
+        po_inbox_ok := 1;
+
+        FOR device IN (
+            SELECT f.fcm_token
+              FROM user_fcm_devices f
+             WHERE f.platform_user_id = v_platform_user_id
+        ) LOOP
+            po_push_attempted := po_push_attempted + 1;
+            pr_send_push_checked(
+                pi_token   => device.fcm_token,
+                pi_title   => pi_title,
+                pi_body    => v_push_body,
+                pi_url     => v_push_url,
+                po_success => v_push_success,
+                po_error   => v_push_error
+            );
+            IF v_push_success = 1 THEN
+                po_push_succeeded := po_push_succeeded + 1;
+            ELSE
+                po_push_failed := po_push_failed + 1;
+                po_error := SUBSTR(
+                    CASE
+                        WHEN po_error IS NULL THEN NVL(v_push_error, 'FCM fallo sin detalle')
+                        ELSE po_error || ' | ' || NVL(v_push_error, 'FCM fallo sin detalle')
+                    END,
+                    1,
+                    400
+                );
+            END IF;
+        END LOOP;
+    EXCEPTION
+        WHEN OTHERS THEN
+            po_error := SUBSTR(
+                NVL(po_error || ' | ', '') || SQLERRM,
+                1,
+                400
+            );
+            RAISE;
+    END pr_notify_org_member_checked;
 
     PROCEDURE pr_log_digest_sent(
         pi_org_member_id IN NUMBER,

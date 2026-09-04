@@ -2,7 +2,7 @@
 
 ## `HASEL_REFUND_DISPUTE_CHECK`
 
-Corre cada 15 minutos:
+Corre cada 15 minutos como red de seguridad:
 
 ```sql
 BEGIN
@@ -12,11 +12,27 @@ END;
 ```
 
 - Timeouts/strikes: `pr_process_dispute_timeouts` (commit por fila).
-- Campanita de disputa: `pr_process_notify_outbox` lee `org_refund_notify_outbox`.
+- `DISPUTE_OPENED` y `CUSTOMER_INSISTED` intentan entregar campanita + FCM
+  inmediatamente después del commit del request público.
+- `OPS_REVIEW_OVERDUE` se encola desde el job.
+- `pr_process_notify_outbox` procesa los pendientes, fallidos y `PROCESSING`
+  recuperables; es el camino de reintento, no el camino feliz.
 
 ### ORA-02014 (arreglado 2026-09-02)
 
 `FETCH FIRST n ROWS ONLY FOR UPDATE SKIP LOCKED` sobre la tabla de outbox fallaba el 100% de las corridas (`ORA-02014`). El `SELECT` ahora limita con subconsulta + `ROWNUM` y aplica `FOR UPDATE SKIP LOCKED` sobre la tabla base.
+
+### ORA-01002 (arreglado 2026-09-04)
+
+No usar `COMMIT` dentro de un `FOR rec IN (SELECT ... FOR UPDATE ...)`.
+El fetch implícito queda inválido después del primer commit y el siguiente
+registro puede fallar con `ORA-01002: fetch out of sequence`. El worker primero
+captura los IDs con `BULK COLLECT`, cierra el cursor y recién después procesa
+cada fila con commit independiente.
+
+Los errores de campanita o respuestas HTTP no-2xx de FCM dejan la fila
+reintentable (`PENDING`) hasta agotar ocho intentos. Una campanita ya existente
+por `dedupe_key` no se duplica; los pushes fallidos se vuelven a intentar.
 
 ### Cómo chequear salud
 
