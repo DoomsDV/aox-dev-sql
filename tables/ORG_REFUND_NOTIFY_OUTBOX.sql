@@ -10,8 +10,9 @@ CREATE TABLE org_refund_notify_outbox (
   attempts              NUMBER                      DEFAULT 0 NOT NULL,
   last_error            VARCHAR2(400)               NULL,
   payload               CLOB                        NULL,
-  created_at            TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
-  processed_at          TIMESTAMP(6) WITH TIME ZONE NULL
+  created_at              TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  processed_at            TIMESTAMP(6) WITH TIME ZONE NULL,
+  processing_started_at   TIMESTAMP(6) WITH TIME ZONE NULL
 )
 /
 
@@ -28,6 +29,11 @@ ALTER TABLE org_refund_notify_outbox
 PROMPT CREATE INDEX idx_refund_notify_pending
 CREATE INDEX idx_refund_notify_pending
   ON org_refund_notify_outbox (status, created_at)
+/
+
+PROMPT CREATE INDEX idx_refund_notify_processing
+CREATE INDEX idx_refund_notify_processing
+  ON org_refund_notify_outbox (status, processing_started_at, created_at)
 /
 
 PROMPT ALTER TABLE org_refund_notify_outbox ADD CONSTRAINT chk_refund_notify_channel CHECK

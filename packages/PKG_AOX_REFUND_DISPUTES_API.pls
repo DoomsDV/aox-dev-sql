@@ -5,6 +5,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_refund_disputes_api IS
     c_ops_review_hours   CONSTANT NUMBER := 24;
     c_max_strikes        CONSTANT NUMBER := 3;
     c_extractor_version  CONSTANT VARCHAR2(40) := 'refund_proof_v1';
+    c_notify_lease_min   CONSTANT NUMBER := 5;
 
     FUNCTION fn_iso_ts(pi_ts IN TIMESTAMP WITH TIME ZONE) RETURN VARCHAR2;
 
@@ -231,15 +232,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                   FROM org_refund_notify_outbox
                  WHERE dedupe_key = v_dedupe_key;
 
-                IF v_status = 'FAILED' THEN
+                IF v_status = 'FAILED'
+                   OR (v_status = 'DONE' AND pi_event = 'CUSTOMER_INSISTED') THEN
                     UPDATE org_refund_notify_outbox
-                       SET status       = 'PENDING',
-                           attempts     = CASE
-                                              WHEN NVL(v_attempts, 0) >= 8 THEN 0
-                                              ELSE attempts
-                                          END,
-                           last_error   = NULL,
-                           processed_at = NULL
+                       SET status                 = 'PENDING',
+                           attempts               = CASE
+                                                        WHEN NVL(v_attempts, 0) >= 8 THEN 0
+                                                        ELSE attempts
+                                                    END,
+                           last_error             = NULL,
+                           processed_at           = NULL,
+                           processing_started_at  = NULL
                      WHERE id_outbox = po_outbox_id;
                 END IF;
             EXCEPTION
@@ -487,11 +490,34 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
               FROM org_refund_dispute
              WHERE app_id_appointment = v_app_id;
 
+            pr_enqueue_notify(
+                pi_org_id      => v_org_id,
+                pi_dispute_id  => v_dispute_id,
+                pi_event       => 'DISPUTE_OPENED',
+                pi_payload     => '{"appointment_id":' || v_app_id || '}',
+                po_outbox_id   => v_outbox_id
+            );
+
+            COMMIT;
+            BEGIN
+                pr_process_notify_outbox_row(
+                    pi_outbox_id => v_outbox_id,
+                    po_notified  => v_notified,
+                    po_pending   => v_notify_retry
+                );
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_notified     := 0;
+                    v_notify_retry := 1;
+            END;
+
             po_status_code := pkg_aox_util.c_success_ok_code;
             v_response.put('status', 'success');
             v_response.put('message', 'Ya tenias una disputa abierta para este reembolso.');
             v_data.put('id_dispute', v_dispute_id);
             v_data.put('dispute_status', v_existing_st);
+            v_data.put('notified', v_notified);
+            v_data.put('notification_queued', v_notify_retry);
             v_response.put('data', v_data);
             po_response_body := v_response.to_clob();
             RETURN;
@@ -541,11 +567,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         );
 
         COMMIT;
-        pr_process_notify_outbox_row(
-            pi_outbox_id => v_outbox_id,
-            po_notified  => v_notified,
-            po_pending   => v_notify_retry
-        );
+        BEGIN
+            pr_process_notify_outbox_row(
+                pi_outbox_id => v_outbox_id,
+                po_notified  => v_notified,
+                po_pending   => v_notify_retry
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_notified     := 0;
+                v_notify_retry := 1;
+        END;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response.put('status', 'success');
@@ -655,11 +687,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         );
 
         COMMIT;
-        pr_process_notify_outbox_row(
-            pi_outbox_id => v_outbox_id,
-            po_notified  => v_notified,
-            po_pending   => v_notify_retry
-        );
+        BEGIN
+            pr_process_notify_outbox_row(
+                pi_outbox_id => v_outbox_id,
+                po_notified  => v_notified,
+                po_pending   => v_notify_retry
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_notified     := 0;
+                v_notify_retry := 1;
+        END;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response.put('status', 'success');
@@ -1585,6 +1623,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_push_failed       NUMBER;
         v_staff_error       VARCHAR2(400);
         v_error             VARCHAR2(400);
+        v_next_attempts     NUMBER;
     BEGIN
         po_notified := 0;
         po_pending  := 0;
@@ -1594,8 +1633,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         END IF;
 
         BEGIN
-            SELECT status
-              INTO v_status
+            SELECT status, attempts
+              INTO v_status, v_attempts
               FROM org_refund_notify_outbox
              WHERE id_outbox = pi_outbox_id;
 
@@ -1621,20 +1660,41 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                    v_attempts
               FROM org_refund_notify_outbox
              WHERE id_outbox = pi_outbox_id
-               AND status IN ('PENDING', 'PROCESSING', 'FAILED')
+               AND (
+                       status = 'PENDING'
+                    OR (
+                           status = 'PROCESSING'
+                       AND processing_started_at IS NOT NULL
+                       AND processing_started_at < CURRENT_TIMESTAMP - NUMTODSINTERVAL(c_notify_lease_min, 'MINUTE')
+                       )
+                   )
                AND attempts < 8
              FOR UPDATE SKIP LOCKED;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
-                po_pending := 1;
+                BEGIN
+                    SELECT status, attempts
+                      INTO v_status, v_attempts
+                      FROM org_refund_notify_outbox
+                     WHERE id_outbox = pi_outbox_id;
+
+                    IF v_status = 'DONE' THEN
+                        po_notified := 1;
+                    ELSIF v_status IN ('PENDING', 'PROCESSING', 'FAILED') AND NVL(v_attempts, 0) < 8 THEN
+                        po_pending := 1;
+                    END IF;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        NULL;
+                END;
                 RETURN;
         END;
 
         UPDATE org_refund_notify_outbox
-           SET status       = 'PROCESSING',
-               attempts     = v_attempts + 1,
-               processed_at = NULL,
-               last_error   = NULL
+           SET status                = 'PROCESSING',
+               processing_started_at = CURRENT_TIMESTAMP,
+               processed_at          = NULL,
+               last_error            = NULL
          WHERE id_outbox = pi_outbox_id;
         COMMIT;
 
@@ -1674,6 +1734,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
             ) LOOP
                 v_staff_count := v_staff_count + 1;
                 v_staff_error := NULL;
+                v_inbox_ok := 0;
+                v_push_attempted := 0;
+                v_push_succeeded := 0;
+                v_push_failed := 0;
 
                 BEGIN
                     pkg_aox_fcm_api.pr_notify_org_member_checked(
@@ -1706,9 +1770,21 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                             1,
                             400
                         );
+                    ELSIF v_inbox_ok = 1
+                      AND NVL(v_push_attempted, 0) > 0
+                      AND NVL(v_push_succeeded, 0) = 0 THEN
+                        v_push_failed_count := v_push_failed_count + 1;
+                        v_error := SUBSTR(
+                            NVL(v_error || ' | ', '') || NVL(v_staff_error, 'FCM fallo sin detalle'),
+                            1,
+                            400
+                        );
                     END IF;
                 EXCEPTION
                     WHEN OTHERS THEN
+                        IF v_inbox_ok = 1 THEN
+                            v_push_failed_count := v_push_failed_count + 1;
+                        END IF;
                         v_error := SUBSTR(
                             CASE
                                 WHEN v_error IS NULL THEN NVL(v_staff_error, SQLERRM)
@@ -1728,7 +1804,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                 RAISE_APPLICATION_ERROR(-20076, 'No se pudo crear la campanita para todos los destinatarios.');
             END IF;
 
-            po_notified := 1;
+            v_next_attempts := NVL(v_attempts, 0) + 1;
+
             IF v_push_failed_count > 0 THEN
                 v_error := SUBSTR(
                     NVL(v_error, 'Uno o mas envios FCM fallaron.'),
@@ -1736,19 +1813,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                     400
                 );
                 UPDATE org_refund_notify_outbox
-                   SET status       = CASE WHEN v_attempts + 1 >= 8 THEN 'FAILED' ELSE 'PENDING' END,
-                       processed_at = CASE WHEN v_attempts + 1 >= 8 THEN CURRENT_TIMESTAMP ELSE NULL END,
-                       last_error   = v_error
+                   SET status                = CASE WHEN v_next_attempts >= 8 THEN 'FAILED' ELSE 'PENDING' END,
+                       attempts              = v_next_attempts,
+                       processed_at          = CASE WHEN v_next_attempts >= 8 THEN CURRENT_TIMESTAMP ELSE NULL END,
+                       processing_started_at = NULL,
+                       last_error            = v_error
                  WHERE id_outbox = pi_outbox_id;
-                po_pending := CASE WHEN v_attempts + 1 >= 8 THEN 0 ELSE 1 END;
+                po_pending := CASE WHEN v_next_attempts >= 8 THEN 0 ELSE 1 END;
             ELSE
                 UPDATE org_refund_notify_outbox
-                   SET status       = 'DONE',
-                       processed_at = CURRENT_TIMESTAMP,
-                       last_error   = NULL
+                   SET status                = 'DONE',
+                       processed_at          = CURRENT_TIMESTAMP,
+                       processing_started_at = NULL,
+                       last_error            = NULL
                  WHERE id_outbox = pi_outbox_id;
             END IF;
             COMMIT;
+            po_notified := 1;
         EXCEPTION
             WHEN OTHERS THEN
                 v_error := SUBSTR(
@@ -1760,19 +1841,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                     400
                 );
                 ROLLBACK;
+                v_next_attempts := NVL(v_attempts, 0) + 1;
                 UPDATE org_refund_notify_outbox
-                   SET status       = CASE WHEN v_attempts + 1 >= 8 THEN 'FAILED' ELSE 'PENDING' END,
-                       processed_at = CASE WHEN v_attempts + 1 >= 8 THEN CURRENT_TIMESTAMP ELSE NULL END,
-                       last_error   = v_error
+                   SET status                = CASE WHEN v_next_attempts >= 8 THEN 'FAILED' ELSE 'PENDING' END,
+                       attempts              = v_next_attempts,
+                       processed_at          = CASE WHEN v_next_attempts >= 8 THEN CURRENT_TIMESTAMP ELSE NULL END,
+                       processing_started_at = NULL,
+                       last_error            = v_error
                  WHERE id_outbox = pi_outbox_id;
                 COMMIT;
-                po_pending := CASE WHEN v_attempts + 1 >= 8 THEN 0 ELSE 1 END;
-                po_notified := CASE
-                                   WHEN v_staff_count > 0
-                                    AND v_inbox_ok_count = v_staff_count
-                                   THEN 1
-                                   ELSE 0
-                               END;
+                po_pending  := CASE WHEN v_next_attempts >= 8 THEN 0 ELSE 1 END;
+                po_notified := 0;
         END;
     END pr_process_notify_outbox_row;
 
@@ -1786,14 +1865,29 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_row_pending   NUMBER;
     BEGIN
         -- No usar FETCH FIRST ... FOR UPDATE: Oracle lo reescribe como vista
-        -- analitica y dispara ORA-02014. BULK COLLECT cierra el cursor antes
-        -- de que el worker haga COMMIT por fila, evitando tambien ORA-01002.
+        -- analitica y dispara ORA-02014. Subconsulta + ROWNUM ordena por FIFO,
+        -- cierra el cursor antes del COMMIT por fila y evita ORA-01002.
         SELECT /*+ no_parallel */ id_outbox
           BULK COLLECT INTO v_ids
           FROM org_refund_notify_outbox
-         WHERE status IN ('PENDING', 'PROCESSING', 'FAILED')
-           AND attempts < 8
-           AND ROWNUM <= v_limit
+         WHERE id_outbox IN (
+                   SELECT id_outbox
+                     FROM (
+                              SELECT id_outbox
+                                FROM org_refund_notify_outbox
+                               WHERE (
+                                         status = 'PENDING'
+                                      OR (
+                                             status = 'PROCESSING'
+                                         AND processing_started_at IS NOT NULL
+                                         AND processing_started_at < CURRENT_TIMESTAMP - NUMTODSINTERVAL(c_notify_lease_min, 'MINUTE')
+                                         )
+                                     )
+                                 AND attempts < 8
+                               ORDER BY created_at
+                          )
+                    WHERE ROWNUM <= v_limit
+               )
          FOR UPDATE SKIP LOCKED;
 
         IF v_ids.COUNT > 0 THEN

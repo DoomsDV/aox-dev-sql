@@ -15,8 +15,10 @@ END;
 - `DISPUTE_OPENED` y `CUSTOMER_INSISTED` intentan entregar campanita + FCM
   inmediatamente después del commit del request público.
 - `OPS_REVIEW_OVERDUE` se encola desde el job.
-- `pr_process_notify_outbox` procesa los pendientes, fallidos y `PROCESSING`
-  recuperables; es el camino de reintento, no el camino feliz.
+- `pr_process_notify_outbox` procesa los pendientes y los `PROCESSING`
+  stale (lease de 5 minutos); es el camino de reintento, no el camino feliz.
+- `notified` en la API publica = campanita durable creada; `notification_queued=1`
+  indica que FCM sigue pendiente o en curso en otro worker.
 
 ### ORA-02014 (arreglado 2026-09-02)
 
@@ -33,6 +35,10 @@ cada fila con commit independiente.
 Los errores de campanita o respuestas HTTP no-2xx de FCM dejan la fila
 reintentable (`PENDING`) hasta agotar ocho intentos. Una campanita ya existente
 por `dedupe_key` no se duplica; los pushes fallidos se vuelven a intentar.
+
+`PROCESSING` fresco no se reclama dos veces: `processing_started_at` actua como
+lease y solo filas stale (>5 min) vuelven al worker. Los intentos suben al fallar,
+no al reclamar la fila.
 
 ### Cómo chequear salud
 

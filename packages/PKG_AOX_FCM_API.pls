@@ -810,7 +810,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
           FROM user_notification n
          WHERE n.org_id_organization = v_org_id
            AND n.org_member_id = pi_org_member_id
-           AND n.dedupe_key = pi_dedupe_key;
+           AND n.dedupe_key = pi_dedupe_key
+           AND n.deleted_at IS NULL;
 
         IF v_inbox_count = 0 THEN
             RAISE_APPLICATION_ERROR(-20073, 'No se pudo crear la notificacion de campanita.');
@@ -852,7 +853,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                 1,
                 400
             );
-            RAISE;
     END pr_notify_org_member_checked;
 
     PROCEDURE pr_log_digest_sent(
