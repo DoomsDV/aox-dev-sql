@@ -58,6 +58,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_today_count      NUMBER := 0;
         v_today_completed  NUMBER := 0;
         v_pending_count    NUMBER := 0;
+        v_unconfirmed_count NUMBER := 0;
         v_my_customers     NUMBER := 0;
         v_total_org        NUMBER := 0;
 
@@ -137,6 +138,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
             AND start_time                            >= v_now_local
             AND status IN ('PENDIENTE', 'CONFIRMADO');
 
+        -- Card "Por confirmar": solo PENDIENTE (hoy en adelante). No mezclar CONFIRMADO.
+        SELECT COUNT(*)
+        INTO v_unconfirmed_count
+        FROM appointment
+        WHERE org_id_organization = v_org_id
+          AND (v_is_org_viewer OR pro_id_professional = v_prof_id)
+          AND status = 'PENDIENTE'
+          AND start_time >= v_today_start;
+
         IF v_is_org_viewer THEN
             SELECT COUNT(*)
               INTO v_total_org
@@ -163,6 +173,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_kpis_obj.put('today_appointments'           , v_today_count);
         v_kpis_obj.put('today_completed_appointments' , v_today_completed);
         v_kpis_obj.put('pending_appointments'         , v_pending_count);
+        v_kpis_obj.put('unconfirmed_appointments'     , v_unconfirmed_count);
         v_kpis_obj.put('my_customers'                 , v_my_customers);
 
         IF v_is_org_viewer THEN
