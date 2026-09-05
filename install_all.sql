@@ -335,7 +335,7 @@ MERGE INTO ref_addon t
 USING (
   SELECT 1 AS id_addon, 'ODONTOGRAM_3D' AS code, 'Odontograma 3D' AS name,
          'Ficha clinica interactiva 3D y evolucion de tratamientos.' AS short_description,
-         'ODONTOGRAM_3D' AS feature_code, 100000 AS price_amount, 'PYG' AS currency,
+         'ODONTOGRAM_3D' AS feature_code, 69000 AS price_amount, 'PYG' AS currency,
          'MONTHLY' AS billing_period, 1 AS is_active, 1 AS sort_order, 'DENTAL' AS audience_code,
          1 AS requires_specialty_bridge
     FROM dual
