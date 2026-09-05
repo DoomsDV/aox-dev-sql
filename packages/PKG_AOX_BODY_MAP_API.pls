@@ -200,11 +200,26 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_body_map_api IS
         v_snapshot_json CLOB;
         v_captured_iso  VARCHAR2(80);
         v_captured_ts   TIMESTAMP WITH TIME ZONE;
+        v_app_status    appointment.status%TYPE;
     BEGIN
         v_org_id  := fn_require_org_id(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
         pr_assert_customer_in_org(v_org_id, pi_customer_id);
         pr_assert_appointment_for_customer(v_org_id, pi_customer_id, pi_appointment_id);
+
+        SELECT status
+          INTO v_app_status
+          FROM appointment
+         WHERE id_appointment = pi_appointment_id
+           AND org_id_organization = v_org_id
+           AND cus_id_customer = pi_customer_id;
+
+        IF v_app_status IN ('COMPLETADO', 'CANCELADO') THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'No se puede editar el mapa de una cita cerrada.'
+            );
+        END IF;
 
         pkg_aox_subscription_api.pr_assert_org_has_feature(v_org_id, c_feature);
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
