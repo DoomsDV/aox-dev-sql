@@ -25,6 +25,16 @@ CREATE OR REPLACE PACKAGE pkg_aox_fcm_api IS
         pi_url   IN VARCHAR2 DEFAULT NULL
     );
 
+    -- Envío FCM con resultado (puente ops / campañas).
+    PROCEDURE pr_send_push_checked(
+        pi_token   IN VARCHAR2,
+        pi_title   IN VARCHAR2,
+        pi_body    IN VARCHAR2,
+        pi_url     IN VARCHAR2 DEFAULT NULL,
+        po_success OUT NUMBER,
+        po_error   OUT VARCHAR2
+    );
+
     -- Notificación push al profesional (multi-org vía platform_user_id)
     PROCEDURE pr_notify_professional_appointment(
         pi_pro_id         IN NUMBER,
@@ -87,15 +97,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
     c_process_digest  CONSTANT VARCHAR2(100) := 'PKG_AOX_FCM_API.PR_PROCESS_DAILY_MORNING_DIGEST';
     c_digest_start_h  CONSTANT PLS_INTEGER    := 7;
     c_digest_end_h    CONSTANT PLS_INTEGER    := 8;
-
-    PROCEDURE pr_send_push_checked(
-        pi_token   IN VARCHAR2,
-        pi_title   IN VARCHAR2,
-        pi_body    IN VARCHAR2,
-        pi_url     IN VARCHAR2,
-        po_success OUT NUMBER,
-        po_error   OUT VARCHAR2
-    );
 
     FUNCTION fn_calendar_push_url(pi_org_member_id IN NUMBER) RETURN VARCHAR2 IS
         v_base VARCHAR2(500) := RTRIM(NVL(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://hasel.app'), '/');
