@@ -1,0 +1,18 @@
+---
+description: Freeze de producción (tag prod) y convención de commits para el próximo pase a wksp_aox
+globs: "**/*"
+alwaysApply: true
+---
+
+# aox-dev-sql — tracking de producción
+
+No recrear `aox-dev-bk`. Freeze de `wksp_aox` = tag **`prod`**. Delta a llevar: `git log prod..HEAD` y `git diff prod..HEAD -- migrations/ packages/ tables/ ords/`. Plan de pase: skill `pase-produccion-hasel` (`.cursor/skills/pase-produccion-hasel/`).
+
+## Commits
+
+1. Versionar en este repo **antes** de compilar en `aoxdev`.
+2. Un commit por unidad desplegable. Mensaje = porqué + migración/paquete. Si no va a prod: `no va a prod`.
+3. Migraciones `YYYYMMDD_descripcion.sql` en orden de fecha.
+4. Tras pase cerrado: `git tag prod-YYYYMMDD` y `git tag -f prod` en el commit desplegado.
+
+No encender cobro de planes (`BILLING_ENABLED`, job de ciclo, keys Pagopar) salvo pedido explícito.
