@@ -615,7 +615,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_claimed  NUMBER := 0;
     BEGIN
         BEGIN
-            SELECT org_id_organization, NVL(gross_amount, amount), status, NVL(einvoice_status, 'NONE')
+            -- FE = monto neto cobrado (amount). Si amount=0 (100% crédito), no se encola.
+            SELECT org_id_organization, amount, status, NVL(einvoice_status, 'NONE')
               INTO v_org_id, v_amount, v_inv_stat, v_status
               FROM org_subscription_invoice
              WHERE id_invoice = pi_invoice_id
@@ -705,7 +706,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_receptor        json_object_t := json_object_t();
         v_datos_op        json_object_t := json_object_t();
     BEGIN
-        SELECT org_id_organization, description, NVL(gross_amount, amount), currency, payment_provider
+        -- Monto facturado = neto percibido (alineado con Pagopar y KuDE).
+        SELECT org_id_organization, description, amount, currency, payment_provider
           INTO v_org_id, v_desc, v_amount, v_currency, v_provider
           FROM org_subscription_invoice
          WHERE id_invoice = pi_invoice_id;
