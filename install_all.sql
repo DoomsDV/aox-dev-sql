@@ -408,6 +408,7 @@ PROMPT --- FASE 3: Paquetes - nucleo ---
 @@packages\PKG_AOX_REFUND_CLAIMS_API.pls
 @@packages\PKG_AOX_REFUND_COMPENSATION_API.pls
 @@packages\PKG_AOX_REFUND_DISPUTES_API.pls
+@@packages\PKG_AOX_OPS_ADMIN_BRIDGE.pls
 @@packages\PKG_AOX_BUCKET.pls
 @@packages\PKG_AOX_META_API.pls
 @@packages\PKG_AOX_FCM_API.pls
