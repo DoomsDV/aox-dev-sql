@@ -65,7 +65,7 @@ USING (
   UNION ALL
   SELECT 'CARIES', 'Caries', 'FINDING', 1, '#e040fb', 40, 'FACES', 1, 15 FROM dual
   UNION ALL
-  SELECT 'DEFECTIVE_RESTORATION', 'Restauracion defectuosa', 'FINDING', 1, '#e53935', 30, 'FACES', 1, 20 FROM dual
+  SELECT 'DEFECTIVE_RESTORATION', 'Restauración defectuosa', 'FINDING', 1, '#e53935', 30, 'FACES', 1, 20 FROM dual
   UNION ALL
   SELECT 'PERIODONTAL', 'Enfermedad periodontal', 'FINDING', 0, '#8d6e63', 70, 'TINT', 1, 25 FROM dual
   UNION ALL
@@ -75,17 +75,17 @@ USING (
   UNION ALL
   SELECT 'CROWN_EXISTING', 'Corona existente', 'PREEXISTING', 0, '#ffb300', 20, 'CROWN', 1, 40 FROM dual
   UNION ALL
-  SELECT 'RESTORATION', 'Restauracion', 'PREEXISTING', 1, '#00bcd4', 50, 'FACES', 1, 45 FROM dual
+  SELECT 'RESTORATION', 'Restauración', 'PREEXISTING', 1, '#00bcd4', 50, 'FACES', 1, 45 FROM dual
   UNION ALL
   SELECT 'SEALANT', 'Sellador', 'PREEXISTING', 1, '#4fc3f7', 60, 'FACES', 1, 50 FROM dual
   UNION ALL
-  SELECT 'EXTRACTION', 'Extraccion', 'PLAN', 0, '#9e9e9e', 0, 'GHOST', 1, 55 FROM dual
+  SELECT 'EXTRACTION', 'Extracción', 'PLAN', 0, '#9e9e9e', 0, 'GHOST', 1, 55 FROM dual
   UNION ALL
   SELECT 'IMPLANT_PLAN', 'Implante dental', 'PLAN', 0, '#90a4ae', 5, 'GHOST', 1, 60 FROM dual
   UNION ALL
   SELECT 'CROWN', 'Corona', 'PLAN', 0, '#ffca28', 10, 'CROWN', 1, 65 FROM dual
   UNION ALL
-  SELECT 'RESTORATION_PLAN', 'Restauracion nueva', 'PLAN', 1, '#26c6da', 45, 'FACES', 1, 70 FROM dual
+  SELECT 'RESTORATION_PLAN', 'Restauración nueva', 'PLAN', 1, '#26c6da', 45, 'FACES', 1, 70 FROM dual
   UNION ALL
   SELECT 'ENDODONTIC_PLAN', 'Endodoncia nueva', 'PLAN', 0, '#90a4ae', 48, 'TINT', 1, 75 FROM dual
 ) s
