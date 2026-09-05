@@ -41,23 +41,51 @@ BEGIN
 DECLARE
     v_status_code   NUMBER;
     v_response_body CLOB;
-    v_ts            VARCHAR2(32) := owa_util.get_cgi_env('HTTP_X_ESIGN_TIMESTAMP');
-    v_sig           VARCHAR2(512) := owa_util.get_cgi_env('HTTP_X_ESIGN_SIGNATURE');
-    v_delivery      VARCHAR2(128) := owa_util.get_cgi_env('HTTP_X_ESIGN_DELIVERY_ID');
 BEGIN
     pkg_aox_subscription_billing_api.pr_receive_esign_webhook(
-        pi_timestamp     => v_ts,
-        pi_signature     => v_sig,
-        pi_delivery_id   => v_delivery,
+        pi_timestamp     => :esign_timestamp,
+        pi_signature     => :esign_signature,
+        pi_delivery_id   => :esign_delivery_id,
         pi_body          => :body_text,
         po_status_code   => v_status_code,
         po_response_body => v_response_body
     );
-    :status := v_status_code;
+    :status_code := v_status_code;
     owa_util.mime_header('application/json', TRUE);
     IF v_response_body IS NOT NULL THEN htp.prn(v_response_body); END IF;
 END;
         ]'
+    );
+
+    ORDS.define_parameter(
+        p_module_name        => 'public',
+        p_pattern            => 'esign/webhook',
+        p_method             => 'POST',
+        p_name               => 'X-Esign-Timestamp',
+        p_bind_variable_name => 'esign_timestamp',
+        p_source_type        => 'HEADER',
+        p_param_type         => 'STRING',
+        p_access_method      => 'IN'
+    );
+    ORDS.define_parameter(
+        p_module_name        => 'public',
+        p_pattern            => 'esign/webhook',
+        p_method             => 'POST',
+        p_name               => 'X-Esign-Signature',
+        p_bind_variable_name => 'esign_signature',
+        p_source_type        => 'HEADER',
+        p_param_type         => 'STRING',
+        p_access_method      => 'IN'
+    );
+    ORDS.define_parameter(
+        p_module_name        => 'public',
+        p_pattern            => 'esign/webhook',
+        p_method             => 'POST',
+        p_name               => 'X-Esign-Delivery-Id',
+        p_bind_variable_name => 'esign_delivery_id',
+        p_source_type        => 'HEADER',
+        p_param_type         => 'STRING',
+        p_access_method      => 'IN'
     );
 
     COMMIT;
