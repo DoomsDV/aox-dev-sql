@@ -10,7 +10,8 @@ CREATE TABLE ref_addon (
   billing_period     VARCHAR2(10)   DEFAULT 'MONTHLY' NOT NULL,
   is_active          NUMBER(1,0)    DEFAULT 1 NOT NULL,
   sort_order         NUMBER         DEFAULT 0 NOT NULL,
-  audience_code      VARCHAR2(30)   NULL
+  audience_code      VARCHAR2(30)   NULL,
+  requires_specialty_bridge NUMBER(1,0) DEFAULT 0 NOT NULL
 )
 /
 
@@ -42,6 +43,13 @@ ALTER TABLE ref_addon
   )
 /
 
+PROMPT ALTER TABLE ref_addon ADD CONSTRAINT chk_ref_addon_req_bridge CHECK
+ALTER TABLE ref_addon
+  ADD CONSTRAINT chk_ref_addon_req_bridge CHECK (
+    requires_specialty_bridge IN (0, 1)
+  )
+/
+
 PROMPT ALTER TABLE ref_addon ADD CONSTRAINT chk_ref_addon_period CHECK
 ALTER TABLE ref_addon
   ADD CONSTRAINT chk_ref_addon_period CHECK (
@@ -51,5 +59,6 @@ ALTER TABLE ref_addon
 
 COMMENT ON TABLE ref_addon IS 'Catalogo de complementos mensuales (modulos, no storage). Precio de lista; el cobro Pagopar se habilita con ADDONS_BILLING_LIVE.';
 COMMENT ON COLUMN ref_addon.feature_code IS 'Codigo de entitlement org-level (ej. ODONTOGRAM_3D). Nunca va en ref_plan_feature.';
-COMMENT ON COLUMN ref_addon.audience_code IS 'DEPRECATED. Visibilidad por ref_addon_specialty (0 filas=global).';
+COMMENT ON COLUMN ref_addon.audience_code IS 'DEPRECATED. Visibilidad por ref_addon_specialty.';
+COMMENT ON COLUMN ref_addon.requires_specialty_bridge IS '1 = fail-closed sin puente en ref_addon_specialty; 0 = global si no hay puentes.';
 COMMENT ON COLUMN ref_addon.price_amount IS 'Precio mensual de lista en currency. En preview no se cobra.';

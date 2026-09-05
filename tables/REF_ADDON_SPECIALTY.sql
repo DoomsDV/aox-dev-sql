@@ -54,6 +54,6 @@ ALTER TABLE ref_addon_specialty
   ) ON DELETE CASCADE
 /
 
-COMMENT ON TABLE ref_addon_specialty IS 'Puente addon↔especialidad de org. 0 filas=global; N filas=nicho (ej. ODONTOGRAM_3D→DENTAL).';
+COMMENT ON TABLE ref_addon_specialty IS 'Puente addon↔rubro comercial. Elegibilidad = intersección con organization_specialty. Sin puente y requires_specialty_bridge=1 → no elegible.';
 COMMENT ON COLUMN ref_addon_specialty.rad_id_addon IS 'FK a ref_addon.id_addon.';
 COMMENT ON COLUMN ref_addon_specialty.osp_id_org_specialty IS 'FK a org_specialty.id_org_specialty.';
