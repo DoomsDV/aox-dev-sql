@@ -227,6 +227,17 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
         po_response_body OUT CLOB
     );
 
+    -- POST /public/v1/esign/webhook
+    -- Receptor HMAC del firmador (invoice.ready). Persiste artefactos y encola email.
+    PROCEDURE pr_receive_esign_webhook(
+        pi_timestamp     IN  VARCHAR2,
+        pi_signature     IN  VARCHAR2,
+        pi_delivery_id   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
 END pkg_aox_subscription_billing_api;
 /
 
@@ -248,6 +259,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     );
     PROCEDURE pr_notificar_emision_fe(pi_invoice_id IN NUMBER);
     PROCEDURE pr_send_einvoice_email(pi_invoice_id IN NUMBER);
+    FUNCTION fn_verify_esign_webhook_hmac(
+        p_secret     IN VARCHAR2,
+        p_timestamp  IN VARCHAR2,
+        p_body       IN CLOB,
+        p_signature  IN VARCHAR2
+    ) RETURN BOOLEAN;
 
     --------------------------------------------------------------------------
     -- Helpers
@@ -4643,6 +4660,282 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             ROLLBACK;
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_save_einvoice_artifacts;
+
+    FUNCTION fn_verify_esign_webhook_hmac(
+        p_secret     IN VARCHAR2,
+        p_timestamp  IN VARCHAR2,
+        p_body       IN CLOB,
+        p_signature  IN VARCHAR2
+    ) RETURN BOOLEAN IS
+        v_signed    VARCHAR2(32767);
+        v_mac       RAW(32);
+        v_expected  VARCHAR2(64);
+        v_sig       VARCHAR2(128);
+        v_ts        NUMBER;
+        v_now_epoch NUMBER;
+        v_part      VARCHAR2(128);
+        v_pos       NUMBER;
+    BEGIN
+        IF p_secret IS NULL OR TRIM(p_secret) IS NULL
+           OR p_timestamp IS NULL OR TRIM(p_timestamp) IS NULL
+           OR p_signature IS NULL OR TRIM(p_signature) IS NULL
+           OR p_body IS NULL THEN
+            RETURN FALSE;
+        END IF;
+
+        BEGIN
+            v_ts := TO_NUMBER(TRIM(p_timestamp));
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN FALSE;
+        END;
+
+        v_now_epoch := (CAST(SYS_EXTRACT_UTC(SYSTIMESTAMP) AS DATE) - DATE '1970-01-01') * 86400;
+        IF ABS(v_now_epoch - v_ts) > 300 THEN
+            RETURN FALSE;
+        END IF;
+
+        v_signed := TRIM(p_timestamp) || '.' || DBMS_LOB.SUBSTR(p_body, 32767, 1);
+        v_mac := DBMS_CRYPTO.MAC(
+            src => UTL_RAW.CAST_TO_RAW(v_signed),
+            typ => DBMS_CRYPTO.HMAC_SH256,
+            key => UTL_RAW.CAST_TO_RAW(p_secret)
+        );
+        v_expected := LOWER(RAWTOHEX(v_mac));
+
+        v_sig := NULL;
+        v_pos := 1;
+        LOOP
+            v_part := REGEXP_SUBSTR(p_signature, '[^,]+', 1, v_pos);
+            EXIT WHEN v_part IS NULL;
+            IF REGEXP_LIKE(TRIM(v_part), '^v1=', 'i') THEN
+                v_sig := LOWER(TRIM(REGEXP_REPLACE(v_part, '^v1=', '', 1, 1, 'i')));
+            END IF;
+            v_pos := v_pos + 1;
+        END LOOP;
+
+        IF v_sig IS NULL THEN
+            RETURN FALSE;
+        END IF;
+
+        RETURN v_sig = v_expected;
+    END fn_verify_esign_webhook_hmac;
+
+    PROCEDURE pr_receive_esign_webhook(
+        pi_timestamp     IN  VARCHAR2,
+        pi_signature     IN  VARCHAR2,
+        pi_delivery_id   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_response       json_object_t := json_object_t();
+        v_secret         VARCHAR2(256);
+        v_api_key        VARCHAR2(256);
+        v_cdc            VARCHAR2(44);
+        v_kude_url       VARCHAR2(1000);
+        v_xml_url        VARCHAR2(1000);
+        v_xml_sha        VARCHAR2(64);
+        v_xml_size       NUMBER;
+        v_xml_mime       VARCHAR2(100);
+        v_idem           VARCHAR2(128);
+        v_invoice_id     NUMBER;
+        v_cur_cdc        VARCHAR2(44);
+        v_cur_status     VARCHAR2(30);
+        v_xml_blob       BLOB;
+        v_xml_clob       CLOB;
+        v_body_json      json_object_t;
+        v_internal_json  json_object_t;
+        v_hash_hex       VARCHAR2(64);
+        v_dest_off       INTEGER := 1;
+        v_src_off        INTEGER := 1;
+        v_lang_ctx       INTEGER := DBMS_LOB.DEFAULT_LANG_CTX;
+        v_warning        INTEGER;
+        v_internal_body  CLOB;
+        v_svc            VARCHAR2(4000);
+    BEGIN
+        v_secret  := TRIM(fn_get_parameter('ESIGN_WEBHOOK_SECRET'));
+        v_api_key := TRIM(fn_get_parameter('ESIGN_API_KEY'));
+
+        IF v_secret IS NULL OR LENGTH(v_secret) = 0 THEN
+            po_status_code := 503;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Webhook no configurado (ESIGN_WEBHOOK_SECRET).');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        IF NOT fn_verify_esign_webhook_hmac(v_secret, pi_timestamp, pi_body, pi_signature) THEN
+            po_status_code := 401;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Firma HMAC invalida.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        BEGIN
+            v_body_json := json_object_t.parse(pi_body);
+            v_cdc       := v_body_json.get_string('cdc');
+            v_kude_url  := v_body_json.get_string('kude_url');
+            v_xml_url   := v_body_json.get_string('xml_url');
+            v_xml_sha   := LOWER(TRIM(v_body_json.get_string('xml_sha256')));
+            v_xml_size  := v_body_json.get_number('xml_size');
+            v_xml_mime  := v_body_json.get_string('xml_mime');
+            v_idem      := v_body_json.get_string('idempotency_key');
+        EXCEPTION
+            WHEN OTHERS THEN
+                po_status_code := pkg_aox_util.c_bad_request_code;
+                v_response.put('status', 'error');
+                v_response.put('message', 'Body JSON invalido.');
+                po_response_body := v_response.to_clob();
+                RETURN;
+        END;
+
+        IF v_cdc IS NULL OR v_kude_url IS NULL OR v_xml_url IS NULL OR v_xml_sha IS NULL THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Faltan cdc, kude_url, xml_url o xml_sha256.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        BEGIN
+            SELECT id_invoice, einvoice_cdc
+              INTO v_invoice_id, v_cur_cdc
+              FROM org_subscription_invoice
+             WHERE einvoice_cdc = TRIM(v_cdc)
+             FETCH FIRST 1 ROWS ONLY;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                IF v_idem IS NOT NULL AND REGEXP_LIKE(v_idem, '^INV-[0-9]+$', 'i') THEN
+                    BEGIN
+                        v_invoice_id := TO_NUMBER(REGEXP_SUBSTR(v_idem, '[0-9]+'));
+                        SELECT einvoice_cdc INTO v_cur_cdc
+                          FROM org_subscription_invoice
+                         WHERE id_invoice = v_invoice_id;
+                    EXCEPTION
+                        WHEN NO_DATA_FOUND THEN
+                            po_status_code := 404;
+                            v_response.put('status', 'error');
+                            v_response.put('message', 'Factura no encontrada.');
+                            po_response_body := v_response.to_clob();
+                            RETURN;
+                    END;
+                ELSE
+                    po_status_code := 404;
+                    v_response.put('status', 'error');
+                    v_response.put('message', 'Factura no encontrada para el CDC.');
+                    po_response_body := v_response.to_clob();
+                    RETURN;
+                END IF;
+        END;
+
+        IF v_cur_cdc IS NULL OR TRIM(v_cur_cdc) IS NULL THEN
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'CDC aun no registrado en la factura; reintentar.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        IF v_cur_cdc <> TRIM(v_cdc) THEN
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'CDC no coincide con la factura.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        IF v_api_key IS NULL OR LENGTH(v_api_key) = 0 THEN
+            po_status_code := 503;
+            v_response.put('status', 'error');
+            v_response.put('message', 'ESIGN_API_KEY no configurada para descargar XML.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        apex_web_service.g_request_headers.delete();
+        apex_web_service.g_request_headers(1).name  := 'Authorization';
+        apex_web_service.g_request_headers(1).value := 'Bearer ' || v_api_key;
+        apex_web_service.g_request_headers(2).name  := 'Accept';
+        apex_web_service.g_request_headers(2).value := 'application/xml';
+
+        v_xml_blob := apex_web_service.make_rest_request_b(
+            p_url         => v_xml_url,
+            p_http_method => 'GET'
+        );
+
+        IF apex_web_service.g_status_code NOT BETWEEN 200 AND 299
+           OR v_xml_blob IS NULL OR DBMS_LOB.GETLENGTH(v_xml_blob) = 0 THEN
+            po_status_code := 502;
+            v_response.put('status', 'error');
+            v_response.put('message', 'No se pudo descargar XML del firmador (' || apex_web_service.g_status_code || ').');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        v_hash_hex := LOWER(RAWTOHEX(DBMS_CRYPTO.HASH(v_xml_blob, DBMS_CRYPTO.HASH_SH256)));
+        IF v_hash_hex <> v_xml_sha THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response.put('status', 'error');
+            v_response.put('message', 'xml_sha256 no coincide con el XML descargado.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        DBMS_LOB.CREATETEMPORARY(v_xml_clob, TRUE);
+        v_dest_off := 1;
+        v_src_off  := 1;
+        DBMS_LOB.CONVERTTOCLOB(
+            dest_lob     => v_xml_clob,
+            src_blob     => v_xml_blob,
+            amount       => DBMS_LOB.LOBMAXSIZE,
+            dest_offset  => v_dest_off,
+            src_offset   => v_src_off,
+            blob_csid    => NLS_CHARSET_ID('AL32UTF8'),
+            lang_context => v_lang_ctx,
+            warning      => v_warning
+        );
+
+        IF v_xml_size IS NULL THEN
+            v_xml_size := DBMS_LOB.GETLENGTH(v_xml_clob);
+        END IF;
+        v_xml_mime := NVL(TRIM(v_xml_mime), 'application/xml; charset=UTF-8');
+
+        v_body_json := json_object_t();
+        v_internal_json := json_object_t();
+        v_internal_json.put('cdc', TRIM(v_cdc));
+        v_internal_json.put('kudeUrl', TRIM(v_kude_url));
+        v_internal_json.put('xml', v_xml_clob);
+        v_internal_json.put('xmlSha256', v_xml_sha);
+        v_internal_json.put('xmlSize', v_xml_size);
+        v_internal_json.put('xmlMime', v_xml_mime);
+        v_internal_body := v_internal_json.to_clob();
+
+        v_svc := fn_get_parameter('ESIGN_CALLBACK_SERVICE_TOKEN');
+        pr_save_einvoice_artifacts(
+            pi_service_token => v_svc,
+            pi_invoice_id    => v_invoice_id,
+            pi_body          => v_internal_body,
+            po_status_code   => po_status_code,
+            po_response_body => po_response_body
+        );
+
+        IF DBMS_LOB.ISTEMPORARY(v_xml_clob) = 1 THEN
+            DBMS_LOB.FREETEMPORARY(v_xml_clob);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            BEGIN
+                IF v_xml_clob IS NOT NULL AND DBMS_LOB.ISTEMPORARY(v_xml_clob) = 1 THEN
+                    DBMS_LOB.FREETEMPORARY(v_xml_clob);
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_receive_esign_webhook;
 
 END pkg_aox_subscription_billing_api;
 /
