@@ -425,48 +425,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
-        v_org_id   NUMBER;
-        v_code     VARCHAR2(30);
-        v_id_addon ref_addon.id_addon%TYPE;
-        v_updated  NUMBER;
     BEGIN
-        pr_assert_admin(pi_auth_header);
-        v_org_id := fn_require_org_id(pi_auth_header);
-        v_code   := fn_parse_addon_code(pi_body);
-
-        BEGIN
-            SELECT id_addon
-              INTO v_id_addon
-              FROM ref_addon
-             WHERE code = v_code;
-        EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                RAISE_APPLICATION_ERROR(
-                    pkg_aox_util.c_sqlcode_validation,
-                    'Complemento no encontrado o inactivo.'
-                );
-        END;
-
-        UPDATE /*+ no_parallel */ org_addon
-           SET status      = 'CANCELED',
-               canceled_at = SYSTIMESTAMP,
-               updated_at  = SYSTIMESTAMP
-         WHERE org_id_organization = v_org_id
-           AND rad_id_addon = v_id_addon
-           AND status = 'ACTIVE';
-
-        v_updated := SQL%ROWCOUNT;
-        IF NVL(v_updated, 0) = 0 THEN
-            RAISE_APPLICATION_ERROR(
-                pkg_aox_util.c_sqlcode_validation,
-                'El complemento no está activo.'
-            );
-        END IF;
-
-        pr_success_item(v_org_id, v_id_addon, po_status_code, po_response_body);
-    EXCEPTION
-        WHEN OTHERS THEN
-            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+        pkg_aox_subscription_billing_api.pr_cancel_module_addon(
+            pi_auth_header,
+            pi_body,
+            po_status_code,
+            po_response_body
+        );
     END pr_cancel_module_addon;
 
 END pkg_aox_addon_api;

@@ -21,7 +21,8 @@ CREATE TABLE subscription_credit_note (
   processing_started_at  TIMESTAMP(6) WITH TIME ZONE NULL,
   created_at             TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   processed_at           TIMESTAMP(6) WITH TIME ZONE NULL,
-  org_storage_addon_id   NUMBER                      NULL
+  org_storage_addon_id   NUMBER                      NULL,
+  org_addon_id           NUMBER                      NULL
 )
   INITRANS  10
   STORAGE (
