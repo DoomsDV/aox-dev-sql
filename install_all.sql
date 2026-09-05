@@ -439,6 +439,7 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 @@packages\PKG_AOX_SUBSCRIPTION_BILLING_API.pls
 @@packages\PKG_AOX_ADDON_API.pls
 @@packages\PKG_AOX_ODONTOGRAM_API.pls
+@@packages\PKG_AOX_BODY_MAP_API.pls
 @@packages\PKG_AOX_USER_API.pls
 @@packages\PKG_AOX_WORKSPACE_API.pls
 @@packages\PKG_AOX_PROFESSIONAL_API.pls

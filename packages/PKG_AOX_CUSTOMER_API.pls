@@ -85,6 +85,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_obj          json_object_t := json_object_t();
         v_has_notes    NUMBER := 0;
         v_attach_count NUMBER := 0;
+        v_body_mark_count NUMBER := 0;
         v_notes_legacy CLOB;
         v_consultation_reason CLOB;
         v_procedure_notes CLOB;
@@ -123,9 +124,24 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                   FROM appointment_attachment
                  WHERE app_id_appointment = pi_app_id;
 
+                BEGIN
+                    SELECT pkg_aox_body_map_api.fn_mark_count_from_json(bs.snapshot_json)
+                      INTO v_body_mark_count
+                      FROM customer_body_snapshot bs
+                     WHERE bs.app_id_appointment = pi_app_id
+                       AND ROWNUM = 1;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        v_body_mark_count := 0;
+                END;
+
                 v_obj.put('has_history_notes', CASE WHEN v_has_notes > 0 THEN TRUE ELSE FALSE END);
                 v_obj.put('attachment_count', v_attach_count);
-                v_obj.put('has_history', CASE WHEN (v_has_notes + v_attach_count) > 0 THEN TRUE ELSE FALSE END);
+                v_obj.put('body_mark_count', v_body_mark_count);
+                v_obj.put(
+                    'has_history',
+                    CASE WHEN (v_has_notes + v_attach_count + v_body_mark_count) > 0 THEN TRUE ELSE FALSE END
+                );
 
                 -- Detalle completo (notas + adjuntos) para el historial del perfil.
                 IF NVL(pi_include_detail, 0) = 1 THEN
