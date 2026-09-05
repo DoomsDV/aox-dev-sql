@@ -40,7 +40,7 @@ ALTER TABLE customer_body_snapshot
 PROMPT ALTER TABLE customer_body_snapshot ADD CONSTRAINT chk_body_snap_silhouette CHECK
 ALTER TABLE customer_body_snapshot
   ADD CONSTRAINT chk_body_snap_silhouette CHECK (
-    silhouette IN ('NEUTRAL', 'FEMALE', 'MALE')
+    silhouette IN ('NEUTRAL', 'FEMALE', 'MALE', 'CHILD')
   )
 /
 
