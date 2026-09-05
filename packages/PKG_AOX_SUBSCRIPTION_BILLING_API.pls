@@ -1554,6 +1554,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_bill_doc_type org_billing_profile.billing_doc_type%TYPE;
         v_bill_doc_number org_billing_profile.billing_doc_number%TYPE;
         v_bill_email    org_billing_profile.billing_email%TYPE;
+        v_doc_base      VARCHAR2(40);
+        v_doc_dv        NUMBER;
+        v_ruc_pagopar   VARCHAR2(50);
         v_comprador     json_object_t := json_object_t();
         v_item          json_object_t := json_object_t();
         v_items         json_array_t  := json_array_t();
@@ -1601,16 +1604,33 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             v_bill_doc_number := TO_CHAR(pi_org_id);
         END IF;
 
-        v_comprador.put('ruc', CASE WHEN v_bill_doc_type = 'RUC' THEN TRIM(v_bill_doc_number) ELSE '' END);
+        -- Pagopar (iniciar-transaccion 2.0) solo acepta tipo_documento = 'CI'.
+        -- Mandar 'RUC' responde "El tipo documento debe estar presente.".
+        -- El RUC fiscal va en el campo aparte `ruc` (base-DV).
+        v_bill_doc_number := TRIM(v_bill_doc_number);
+        IF REGEXP_LIKE(v_bill_doc_number, '^[0-9]+-[0-9]$') THEN
+            v_doc_base := REGEXP_SUBSTR(v_bill_doc_number, '^[0-9]+');
+            v_doc_dv   := TO_NUMBER(REGEXP_SUBSTR(v_bill_doc_number, '[0-9]$'));
+        ELSE
+            v_doc_base := REGEXP_REPLACE(v_bill_doc_number, '[^0-9]', '');
+            v_doc_dv   := fn_calcular_dv_ruc(v_doc_base);
+        END IF;
+        IF v_bill_doc_type = 'RUC' AND v_doc_base IS NOT NULL AND v_doc_dv IS NOT NULL THEN
+            v_ruc_pagopar := v_doc_base || '-' || TO_CHAR(v_doc_dv);
+        ELSE
+            v_ruc_pagopar := '';
+        END IF;
+
+        v_comprador.put('ruc', v_ruc_pagopar);
         v_comprador.put('email', v_org_email);
         v_comprador.put('ciudad', '1');
         v_comprador.put('nombre', v_org_name);
         v_comprador.put('telefono', v_org_phone);
         v_comprador.put('direccion', '');
-        v_comprador.put('documento', TRIM(v_bill_doc_number));
+        v_comprador.put('documento', v_doc_base);
         v_comprador.put('coordenadas', '');
         v_comprador.put('razon_social', v_org_name);
-        v_comprador.put('tipo_documento', v_bill_doc_type);
+        v_comprador.put('tipo_documento', 'CI');
         v_comprador.put('direccion_referencia', '');
 
         v_item.put('ciudad', '1');
