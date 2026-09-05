@@ -88,56 +88,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         pi_org_id   IN NUMBER,
         pi_addon_id IN NUMBER
     ) RETURN NUMBER IS
-        v_active   NUMBER := 0;
-        v_bridge   NUMBER := 0;
-        v_spec_id  organization.org_spe_id_specialty%TYPE;
     BEGIN
-        IF NVL(pi_org_id, 0) <= 0 OR NVL(pi_addon_id, 0) <= 0 THEN
-            RETURN 0;
-        END IF;
-
-        SELECT COUNT(*)
-          INTO v_active
-          FROM org_addon
-         WHERE org_id_organization = pi_org_id
-           AND rad_id_addon = pi_addon_id
-           AND status = 'ACTIVE';
-        IF v_active > 0 THEN
-            RETURN 1;
-        END IF;
-
-        SELECT COUNT(*)
-          INTO v_bridge
-          FROM ref_addon_specialty
-         WHERE rad_id_addon = pi_addon_id;
-        IF v_bridge = 0 THEN
-            RETURN 1;
-        END IF;
-
-        BEGIN
-            SELECT org_spe_id_specialty
-              INTO v_spec_id
-              FROM organization
-             WHERE id_organization = pi_org_id;
-        EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                RETURN 0;
-        END;
-
-        IF v_spec_id IS NULL THEN
-            RETURN 0;
-        END IF;
-
-        SELECT COUNT(*)
-          INTO v_bridge
-          FROM ref_addon_specialty
-         WHERE rad_id_addon = pi_addon_id
-           AND osp_id_org_specialty = v_spec_id;
-        IF v_bridge > 0 THEN
-            RETURN 1;
-        END IF;
-
-        RETURN 0;
+        RETURN pkg_aox_addon_eligibility.fn_addon_eligible(pi_org_id, pi_addon_id);
     END fn_addon_eligible;
 
     FUNCTION fn_parse_addon_code(

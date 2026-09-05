@@ -631,6 +631,12 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         )
         returning id_organization into v_org_id;
 
+        pkg_aox_addon_eligibility.pr_set_org_specialties(
+            pi_org_id        => v_org_id,
+            pi_specialty_ids => sys.odcinumberlist(v_id_org_specialty),
+            pi_primary_id    => v_id_org_specialty
+        );
+
         -- Crear Configuración del Workspace y Slug (unico y no reservado)
         v_org_slug := pkg_aox_util.fn_allocate_org_profile_slug(trim(v_business_name));
         insert into workspace_setting (
@@ -2251,6 +2257,12 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
             v_id_org_specialty
         )
         returning id_organization into v_org_id;
+
+        pkg_aox_addon_eligibility.pr_set_org_specialties(
+            pi_org_id        => v_org_id,
+            pi_specialty_ids => sys.odcinumberlist(v_id_org_specialty),
+            pi_primary_id    => v_id_org_specialty
+        );
 
         v_org_slug := pkg_aox_util.fn_allocate_org_profile_slug(trim(v_business_name));
         insert into workspace_setting (

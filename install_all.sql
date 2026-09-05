@@ -28,6 +28,9 @@ PROMPT [5c] api_idempotency_key
 PROMPT [6/29] organization
 @@tables\ORGANIZATION.sql
 
+PROMPT [6b/29] organization_specialty (rubros M:N)
+@@tables\ORGANIZATION_SPECIALTY.sql
+
 PROMPT [7/29] specialty
 @@tables\SPECIALTY.sql
 
@@ -202,6 +205,11 @@ PROMPT [41e3] ref_odontogram_finding (catalogo odontograma)
 PROMPT [41f] customer_odontogram_event
 @@tables\CUSTOMER_ODONTOGRAM_EVENT.sql
 
+PROMPT [41g] ref_body_region / ref_body_joint_test / customer_body_snapshot (Cuerpo)
+@@tables\REF_BODY_REGION.sql
+@@tables\REF_BODY_JOINT_TEST.sql
+@@tables\CUSTOMER_BODY_SNAPSHOT.sql
+
 PROMPT --- Historial por cita + adjuntos (Fase 4) ---
 PROMPT [42/44] appointment_session_record
 @@tables\APPOINTMENT_SESSION_RECORD.sql
@@ -328,7 +336,8 @@ USING (
   SELECT 1 AS id_addon, 'ODONTOGRAM_3D' AS code, 'Odontograma 3D' AS name,
          'Ficha clinica interactiva 3D y evolucion de tratamientos.' AS short_description,
          'ODONTOGRAM_3D' AS feature_code, 100000 AS price_amount, 'PYG' AS currency,
-         'MONTHLY' AS billing_period, 1 AS is_active, 1 AS sort_order, 'DENTAL' AS audience_code
+         'MONTHLY' AS billing_period, 1 AS is_active, 1 AS sort_order, 'DENTAL' AS audience_code,
+         1 AS requires_specialty_bridge
     FROM dual
 ) s
 ON (t.id_addon = s.id_addon)
@@ -336,10 +345,10 @@ WHEN MATCHED THEN UPDATE SET
   t.code = s.code, t.name = s.name, t.short_description = s.short_description,
   t.feature_code = s.feature_code, t.price_amount = s.price_amount, t.currency = s.currency,
   t.billing_period = s.billing_period, t.is_active = s.is_active, t.sort_order = s.sort_order,
-  t.audience_code = s.audience_code
+  t.audience_code = s.audience_code, t.requires_specialty_bridge = s.requires_specialty_bridge
 WHEN NOT MATCHED THEN
-  INSERT (id_addon, code, name, short_description, feature_code, price_amount, currency, billing_period, is_active, sort_order, audience_code)
-  VALUES (s.id_addon, s.code, s.name, s.short_description, s.feature_code, s.price_amount, s.currency, s.billing_period, s.is_active, s.sort_order, s.audience_code);
+  INSERT (id_addon, code, name, short_description, feature_code, price_amount, currency, billing_period, is_active, sort_order, audience_code, requires_specialty_bridge)
+  VALUES (s.id_addon, s.code, s.name, s.short_description, s.feature_code, s.price_amount, s.currency, s.billing_period, s.is_active, s.sort_order, s.audience_code, s.requires_specialty_bridge);
 COMMIT;
 
 DECLARE
@@ -389,6 +398,7 @@ PROMPT --- FASE 3: Paquetes - nucleo ---
 @@packages\PKG_AOX_JWT.pls
 @@packages\PKG_AOX_AUTH.pls
 -- SUBSCRIPTION_API en nucleo: BUCKET y otros paquetes dependen de sus gates/entitlements.
+@@packages\PKG_AOX_ADDON_ELIGIBILITY.pls
 @@packages\PKG_AOX_SUBSCRIPTION_API.pls
 -- Cobros SIPAP (Fase A): SERVICE_API depende de fn_org_deposits_enabled.
 @@packages\PKG_AOX_PAYMENT_SETTINGS_API.pls

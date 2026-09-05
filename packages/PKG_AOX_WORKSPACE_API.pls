@@ -154,6 +154,78 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         end;
     end fn_get_optional_number;
 
+    function fn_org_specialties_array(
+        pi_org_id in number
+    ) return json_array_t is
+        v_arr      json_array_t := json_array_t();
+        v_fallback organization.org_spe_id_specialty%type;
+    begin
+        for rec in (
+            select osp_id_org_specialty
+              from organization_specialty
+             where org_id_organization = pi_org_id
+             order by osp_id_org_specialty
+        ) loop
+            v_arr.append(rec.osp_id_org_specialty);
+        end loop;
+
+        if v_arr.get_size = 0 then
+            begin
+                select o.org_spe_id_specialty
+                  into v_fallback
+                  from organization o
+                 where o.id_organization = pi_org_id;
+                if v_fallback is not null then
+                    v_arr.append(v_fallback);
+                end if;
+            exception
+                when no_data_found then
+                    null;
+            end;
+        end if;
+
+        return v_arr;
+    end fn_org_specialties_array;
+
+    function fn_parse_specialty_ids(
+        pi_json in json_object_t
+    ) return sys.odcinumberlist is
+        v_arr json_array_t;
+        v_ids sys.odcinumberlist := sys.odcinumberlist();
+        v_val number;
+    begin
+        if pi_json is null or not pi_json.has('id_org_specialties') then
+            return null;
+        end if;
+
+        begin
+            v_arr := pi_json.get_array('id_org_specialties');
+        exception
+            when others then
+                raise_application_error(-20004, 'El campo "id_org_specialties" debe ser un arreglo.');
+        end;
+
+        if v_arr is null or v_arr.get_size = 0 then
+            raise_application_error(-20005, 'Debe seleccionar al menos un rubro.');
+        end if;
+
+        for i in 0 .. v_arr.get_size - 1 loop
+            begin
+                v_val := v_arr.get_number(i);
+            exception
+                when others then
+                    raise_application_error(-20004, 'Cada rubro en id_org_specialties debe ser numérico.');
+            end;
+            if nvl(v_val, 0) <= 0 then
+                raise_application_error(-20005, 'Rubro inválido en id_org_specialties.');
+            end if;
+            v_ids.extend;
+            v_ids(v_ids.count) := v_val;
+        end loop;
+
+        return v_ids;
+    end fn_parse_specialty_ids;
+
     procedure pr_put_ref_catalogs(
         po_org_obj in out json_object_t
     ) is
@@ -429,6 +501,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         else
             v_org_obj.put_null('id_org_specialty');
         end if;
+        v_org_obj.put('id_org_specialties', fn_org_specialties_array(v_id_organization));
         v_org_obj.put('profile_slug'            , v_profile_slug);
         v_org_obj.put('description'             , v_description);
         v_org_obj.put('public_whatsapp'         , v_public_whatsapp);
@@ -518,6 +591,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_has_unanswered_alert_action   pls_integer := 0;
         v_has_name                      pls_integer := 0;
         v_has_id_org_specialty          pls_integer := 0;
+        v_has_id_org_specialties        pls_integer := 0;
+        v_specialty_ids                 sys.odcinumberlist;
         v_has_profile_slug              pls_integer := 0;
         v_has_description               pls_integer := 0;
         v_has_public_whatsapp           pls_integer := 0;
@@ -578,6 +653,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             v_id_org_specialty := fn_get_optional_number(v_json_req, 'id_org_specialty');
             if v_id_org_specialty is not null and v_id_org_specialty > 0 then
                 v_has_id_org_specialty := 1;
+            end if;
+        end if;
+        if v_json_req.has('id_org_specialties') then
+            v_specialty_ids := fn_parse_specialty_ids(v_json_req);
+            if v_specialty_ids IS NOT NULL AND v_specialty_ids.COUNT > 0 then
+                v_has_id_org_specialties := 1;
             end if;
         end if;
         if v_json_req.has('profile_slug') THEN
@@ -923,30 +1004,32 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             v_has_cwh_id_cancel_wait := 1;
         end if;
 
-        if v_has_id_org_specialty = 1 then
+        if v_has_id_org_specialty = 1 and v_has_id_org_specialties = 0 then
+            v_specialty_ids := sys.odcinumberlist(v_id_org_specialty);
+            v_has_id_org_specialties := 1;
+        end if;
+
+        if v_has_id_org_specialties = 1 then
             declare
-                v_spec_ok pls_integer := 0;
+                v_primary organization.org_spe_id_specialty%type;
             begin
-                select count(*)
-                  into v_spec_ok
-                  from org_specialty
-                 where id_org_specialty = v_id_org_specialty
-                   and is_active = 1;
-                if v_spec_ok = 0 then
-                    raise_application_error(-20005, 'La categoría del negocio no es válida.');
-                end if;
+                v_primary := case
+                    when v_has_id_org_specialty = 1 then v_id_org_specialty
+                    else v_specialty_ids(1)
+                end;
+                pkg_aox_addon_eligibility.pr_set_org_specialties(
+                    pi_org_id        => v_org_id,
+                    pi_specialty_ids => v_specialty_ids,
+                    pi_primary_id    => v_primary
+                );
             end;
         end if;
 
-        -- 1. Actualizar Nombre / categoría de la Organización (Datos Core)
-        if v_has_name = 1 or v_has_id_org_specialty = 1 then
+        -- 1. Actualizar nombre de la Organización (Datos Core)
+        if v_has_name = 1 then
             update organization
-               set name = case when v_has_name = 1 then v_name else name end,
-                   org_spe_id_specialty = case
-                       when v_has_id_org_specialty = 1 then v_id_org_specialty
-                       else org_spe_id_specialty
-                   end
-             where id_organization  = v_org_id;
+               set name = v_name
+             where id_organization = v_org_id;
 
             if sql%rowcount = 0 then
                 raise_application_error(-20009, 'Organización no encontrada.');

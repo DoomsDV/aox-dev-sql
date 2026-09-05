@@ -436,6 +436,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         v_plan_obj          json_object_t := json_object_t();
         v_storage_obj       json_object_t := json_object_t();
         v_addon_features    json_array_t  := json_array_t();
+        v_eligible_features json_array_t  := json_array_t();
+        v_eligible_codes    sys.odcivarchar2list;
     begin
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
@@ -529,10 +531,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         end loop;
         v_data.put('addon_features', v_addon_features);
 
-        -- Rubro de la org (ej. DENTAL). Lo consume el panel para no mostrar
-        -- módulos de nicho (odontograma) en un salón, spa, etc.
-        -- Query directo: no llamar pkg_aox_addon_api acá (ese paquete ya
-        -- depende de este y un ciclo rompería el compile).
+        v_eligible_codes := pkg_aox_addon_eligibility.fn_list_eligible_feature_codes(v_org_id);
+        if v_eligible_codes IS NOT NULL THEN
+            for i in 1 .. v_eligible_codes.count loop
+                v_eligible_features.append(v_eligible_codes(i));
+            end loop;
+        end if;
+        v_data.put('eligible_addon_features', v_eligible_features);
+
+        -- Rubro principal de la org (legacy / landing). Elegibilidad de addons usa M:N.
         declare
             v_spec_code org_specialty.code%type;
         begin
