@@ -190,6 +190,9 @@ PROMPT [41c/43] org_billing_profile (datos fiscales suscripcion Hasel)
 PROMPT [41c2] subscription_einvoice_outbox (despacho FE post-PAID)
 @@tables\SUBSCRIPTION_EINVOICE_OUTBOX.sql
 
+PROMPT [41c2b] subscription_credit_note (NCE cancelación addon con FE)
+@@tables\SUBSCRIPTION_CREDIT_NOTE.sql
+
 PROMPT [41d] ref_addon (complementos mensuales / tienda)
 @@tables\REF_ADDON.sql
 

@@ -41,7 +41,8 @@ CREATE TABLE org_subscription_invoice (
   einvoice_xml_available_at  TIMESTAMP(6) WITH TIME ZONE   NULL,
   einvoice_email_lease_until TIMESTAMP(6) WITH TIME ZONE   NULL,
   einvoice_email_mail_id     NUMBER                        NULL,
-  einvoice_email_to          VARCHAR2(255)                 NULL
+  einvoice_email_to          VARCHAR2(255)                 NULL,
+  einvoice_receptor_snapshot CLOB                          NULL
 )
 /
 
@@ -189,3 +190,5 @@ COMMENT ON COLUMN org_subscription_invoice.einvoice_email_queued_at IS
   'Momento en que el mail_id y sus dos adjuntos quedaron confirmados antes de push_queue.';
 COMMENT ON COLUMN org_subscription_invoice.einvoice_email_reconciled_at IS
   'Última reconciliación del mail_id contra APEX Mail.';
+COMMENT ON COLUMN org_subscription_invoice.einvoice_receptor_snapshot IS
+  'JSON del receptor usado al emitir la FE (snapshot para NCE referenciada).';

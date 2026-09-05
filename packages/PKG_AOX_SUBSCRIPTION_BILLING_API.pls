@@ -183,6 +183,23 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
         pi_org_id IN NUMBER DEFAULT NULL
     );
 
+    -- NCE por cancelación de addon con FE previa (STORAGE_ADDON mid-cycle).
+    PROCEDURE pr_enqueue_nce_dispatch(pi_credit_note_id IN NUMBER);
+
+    PROCEDURE pr_dispatch_nce_outbox(
+        pi_limit  IN NUMBER DEFAULT 20,
+        pi_org_id IN NUMBER DEFAULT NULL
+    );
+
+    -- POST /internal/v1/subscription-credit-notes/:id/nce
+    PROCEDURE pr_save_nce_result(
+        pi_service_token  IN  VARCHAR2,
+        pi_credit_note_id IN  NUMBER,
+        pi_body           IN  CLOB,
+        po_status_code    OUT NUMBER,
+        po_response_body  OUT CLOB
+    );
+
     -- Reintenta emails de KuDE fallidos/pendientes/PENDING caducados sin reemitir FE.
     PROCEDURE pr_retry_pending_einvoice_emails(
         pi_limit  IN NUMBER DEFAULT 20,
@@ -794,6 +811,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_payload.put('medioPago', v_medio_pago);
         v_payload.put('desMedioPago', v_des_medio);
 
+        -- Snapshot receptor para NCE futura (no sobrescribir si ya existe).
+        UPDATE /*+ no_parallel */ org_subscription_invoice
+           SET einvoice_receptor_snapshot = v_receptor.to_clob()
+         WHERE id_invoice = pi_invoice_id
+           AND einvoice_receptor_snapshot IS NULL;
+
         RETURN v_payload.to_clob();
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
@@ -1095,6 +1118,394 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             END;
         END LOOP;
     END pr_dispatch_einvoice_outbox;
+
+    --------------------------------------------------------------------------
+    -- NCE (nota de crédito) por cancelación de addon con FE previa
+    --------------------------------------------------------------------------
+
+    FUNCTION fn_build_nce_payload(pi_credit_note_id IN NUMBER) RETURN CLOB IS
+        v_source_invoice_id NUMBER;
+        v_org_id            NUMBER;
+        v_amount            NUMBER;
+        v_cdc_ref           VARCHAR2(44);
+        v_motivo            NUMBER;
+        v_desc              VARCHAR2(255);
+        v_emission_key      VARCHAR2(64);
+        v_currency          VARCHAR2(3);
+        v_receptor_snap     CLOB;
+        v_establecimiento   VARCHAR2(10);
+        v_punto             VARCHAR2(10);
+        v_payload           json_object_t := json_object_t();
+        v_receptor          json_object_t;
+        v_datos_op          json_object_t := json_object_t();
+        v_billing_name      org_billing_profile.billing_name%TYPE;
+        v_doc_type          org_billing_profile.billing_doc_type%TYPE;
+        v_doc_number        org_billing_profile.billing_doc_number%TYPE;
+        v_tipo_contrib      NUMBER;
+    BEGIN
+        SELECT n.source_invoice_id,
+               n.org_id_organization,
+               n.amount,
+               n.cdc_ref,
+               n.motivo,
+               n.description,
+               NVL(n.emission_key, 'NCE-' || TO_CHAR(n.source_invoice_id)),
+               i.currency,
+               i.einvoice_receptor_snapshot
+          INTO v_source_invoice_id,
+               v_org_id,
+               v_amount,
+               v_cdc_ref,
+               v_motivo,
+               v_desc,
+               v_emission_key,
+               v_currency,
+               v_receptor_snap
+          FROM subscription_credit_note n
+          JOIN org_subscription_invoice i ON i.id_invoice = n.source_invoice_id
+         WHERE n.id_credit_note = pi_credit_note_id;
+
+        v_establecimiento := NVL(fn_get_parameter('ESIGN_ESTABLECIMIENTO'), '001');
+        v_punto           := NVL(fn_get_parameter('ESIGN_PUNTO_EXPEDICION'), '001');
+        v_datos_op.put('establecimiento', v_establecimiento);
+        v_datos_op.put('punto_expedicion', v_punto);
+
+        IF v_receptor_snap IS NOT NULL AND DBMS_LOB.GETLENGTH(v_receptor_snap) > 2 THEN
+            v_receptor := json_object_t.parse(v_receptor_snap);
+        ELSE
+            SELECT billing_name, billing_doc_type, billing_doc_number
+              INTO v_billing_name, v_doc_type, v_doc_number
+              FROM org_billing_profile
+             WHERE org_id_organization = v_org_id;
+            IF v_doc_type IS NULL OR v_doc_number IS NULL THEN
+                RETURN NULL;
+            END IF;
+            v_receptor := json_object_t();
+            v_receptor.put('tipo', LOWER(v_doc_type));
+            v_receptor.put('documento', v_doc_number);
+            v_receptor.put('nombre', v_billing_name);
+            IF UPPER(v_doc_type) = 'RUC' THEN
+                v_receptor.put('dv', fn_calcular_dv_ruc(v_doc_number));
+                IF REGEXP_LIKE(UPPER(NVL(v_billing_name, '')),
+                               '(S\.?\s*R\.?\s*L\.?)|(S\.?\s*A\.?)|EAS|LTDA|CIA\.?|COOP|SOCIEDAD') THEN
+                    v_tipo_contrib := 2;
+                ELSE
+                    v_tipo_contrib := 1;
+                END IF;
+                v_receptor.put('tipoContribuyente', v_tipo_contrib);
+                v_receptor.put('tipoOperacion', 1);
+            END IF;
+        END IF;
+
+        v_payload.put('credit_note_id', pi_credit_note_id);
+        v_payload.put('invoice_id', v_source_invoice_id);
+        v_payload.put('emission_key', v_emission_key);
+        v_payload.put('tipo', 'nce');
+        v_payload.put('cdcRef', v_cdc_ref);
+        v_payload.put('motivo', NVL(v_motivo, 2));
+        v_payload.put('datos_operacion', v_datos_op);
+        v_payload.put('receptor', v_receptor);
+        v_payload.put('moneda', NVL(v_currency, 'PYG'));
+        v_payload.put('descripcion', NVL(v_desc, 'Devolución por cancelación de complemento'));
+        v_payload.put('monto', v_amount);
+        v_payload.put('tipoTransaccion', 2);
+        v_payload.put('desTipoTransaccion', 'Prestación de servicios');
+        v_payload.put('indPres', 2);
+        v_payload.put('desIndPres', 'Operación electrónica');
+
+        RETURN v_payload.to_clob();
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN NULL;
+    END fn_build_nce_payload;
+
+    PROCEDURE pr_enqueue_nce_dispatch(pi_credit_note_id IN NUMBER) IS
+        v_org_id   NUMBER;
+        v_amount   NUMBER;
+        v_status   VARCHAR2(20);
+        v_claimed  NUMBER := 0;
+    BEGIN
+        BEGIN
+            SELECT org_id_organization, amount, status
+              INTO v_org_id, v_amount, v_status
+              FROM subscription_credit_note
+             WHERE id_credit_note = pi_credit_note_id
+             FOR UPDATE;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RETURN;
+        END;
+
+        IF NVL(v_amount, 0) <= 0 THEN
+            RETURN;
+        END IF;
+
+        IF v_status NOT IN ('PENDING', 'FAILED') THEN
+            RETURN;
+        END IF;
+
+        UPDATE /*+ no_parallel */ subscription_credit_note
+           SET status = 'PENDING',
+               nce_error = NULL,
+               emission_key = NVL(emission_key, 'NCE-' || TO_CHAR(source_invoice_id))
+         WHERE id_credit_note = pi_credit_note_id
+           AND status IN ('PENDING', 'FAILED')
+           AND nce_cdc IS NULL;
+
+        v_claimed := SQL%ROWCOUNT;
+        IF v_claimed = 0 THEN
+            RETURN;
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'ESIGN_NCE',
+                pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_ENQUEUE_NCE_DISPATCH',
+                pi_status          => 'ERROR',
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_request_body    => TO_CLOB('credit_note_id=' || pi_credit_note_id)
+            );
+    END pr_enqueue_nce_dispatch;
+
+    PROCEDURE pr_dispatch_nce_outbox(
+        pi_limit  IN NUMBER DEFAULT 20,
+        pi_org_id IN NUMBER DEFAULT NULL
+    ) IS
+        v_webhook_url   VARCHAR2(500) := fn_get_parameter('ESIGN_WEBHOOK_URL');
+        v_service_token VARCHAR2(200) := fn_get_parameter('ESIGN_CALLBACK_SERVICE_TOKEN');
+        v_payload       CLOB;
+        v_response      CLOB;
+        v_status_code   NUMBER;
+        v_limit         PLS_INTEGER := LEAST(GREATEST(NVL(pi_limit, 20), 1), 100);
+        v_lease_minutes NUMBER := 5;
+        v_max_attempts  NUMBER := 5;
+        v_worker_id     VARCHAR2(64) := SUBSTR('NCE-' || TO_CHAR(systimestamp, 'YYYYMMDDHH24MISSFF') || '-' || DBMS_SESSION.UNIQUE_SESSION_ID, 1, 64);
+        TYPE t_ids IS TABLE OF NUMBER;
+        v_ids           t_ids;
+        v_id_note       NUMBER;
+        v_org_id        NUMBER;
+        v_attempts      NUMBER;
+        v_emission_key  VARCHAR2(64);
+        v_cdc           VARCHAR2(44);
+        v_estatus       VARCHAR2(20);
+        v_cod_res       VARCHAR2(10);
+        v_resp_json     json_object_t;
+        v_resp_cdc      VARCHAR2(44);
+        v_resp_estado   VARCHAR2(20);
+        v_resp_cod_res  VARCHAR2(10);
+        v_resp_data     json_object_t;
+        v_terminal_fail BOOLEAN;
+        v_err           VARCHAR2(500);
+    BEGIN
+        IF v_webhook_url IS NULL OR TRIM(v_webhook_url) IS NULL
+           OR v_service_token IS NULL OR TRIM(v_service_token) IS NULL THEN
+            RETURN;
+        END IF;
+
+        SELECT id_credit_note
+          BULK COLLECT INTO v_ids
+          FROM subscription_credit_note
+         WHERE (
+                   status = 'PENDING'
+                OR (status = 'PROCESSING' AND (lease_until IS NULL OR lease_until < systimestamp))
+               )
+           AND (pi_org_id IS NULL OR org_id_organization = pi_org_id)
+           AND ROWNUM <= v_limit
+         FOR UPDATE SKIP LOCKED;
+
+        FOR i IN 1 .. v_ids.COUNT LOOP
+            v_id_note := v_ids(i);
+            v_resp_cdc := NULL;
+            v_resp_estado := NULL;
+            v_resp_cod_res := NULL;
+            BEGIN
+                SELECT org_id_organization, attempts,
+                       NVL(emission_key, 'NCE-' || TO_CHAR(source_invoice_id))
+                  INTO v_org_id, v_attempts, v_emission_key
+                  FROM subscription_credit_note
+                 WHERE id_credit_note = v_id_note;
+
+                UPDATE subscription_credit_note
+                   SET status = 'PROCESSING',
+                       attempts = NVL(attempts, 0) + 1,
+                       lease_owner = v_worker_id,
+                       lease_until = systimestamp + NUMTODSINTERVAL(v_lease_minutes, 'MINUTE'),
+                       processing_started_at = systimestamp,
+                       emission_key = NVL(emission_key, v_emission_key)
+                 WHERE id_credit_note = v_id_note;
+                COMMIT;
+
+                SELECT nce_cdc, status, nce_estado_sifen, nce_cod_res
+                  INTO v_cdc, v_estatus, v_resp_estado, v_cod_res
+                  FROM subscription_credit_note
+                 WHERE id_credit_note = v_id_note;
+
+                IF v_cdc IS NOT NULL
+                   AND v_estatus = 'DONE'
+                   AND UPPER(NVL(v_resp_estado, '')) = 'APROBADO'
+                   AND TRIM(v_cod_res) = '0260' THEN
+                    UPDATE subscription_credit_note
+                       SET status = 'DONE',
+                           processed_at = systimestamp,
+                           lease_owner = NULL,
+                           lease_until = NULL,
+                           last_error = NULL
+                     WHERE id_credit_note = v_id_note;
+                    COMMIT;
+                    CONTINUE;
+                END IF;
+
+                v_payload := fn_build_nce_payload(v_id_note);
+                IF v_payload IS NULL THEN
+                    UPDATE subscription_credit_note
+                       SET status = 'FAILED',
+                           last_error = 'Sin billing profile o datos incompletos',
+                           processed_at = systimestamp,
+                           lease_owner = NULL,
+                           lease_until = NULL,
+                           nce_error = 'Sin billing profile o datos incompletos'
+                     WHERE id_credit_note = v_id_note;
+                    COMMIT;
+                    CONTINUE;
+                END IF;
+
+                apex_web_service.g_request_headers.delete();
+                apex_web_service.g_request_headers(1).name  := 'Content-Type';
+                apex_web_service.g_request_headers(1).value := 'application/json';
+                apex_web_service.g_request_headers(2).name  := 'X-Service-Token';
+                apex_web_service.g_request_headers(2).value := v_service_token;
+                apex_web_service.g_request_headers(3).name  := 'Idempotency-Key';
+                apex_web_service.g_request_headers(3).value := v_emission_key;
+
+                v_response := apex_web_service.make_rest_request(
+                    p_url         => v_webhook_url,
+                    p_http_method => 'POST',
+                    p_body        => v_payload
+                );
+                v_status_code := apex_web_service.g_status_code;
+
+                pkg_aox_util.pr_log_api(
+                    pi_api_name      => 'ESIGN_NCE',
+                    pi_process_name  => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_DISPATCH_NCE_OUTBOX',
+                    pi_http_method   => 'POST',
+                    pi_endpoint      => v_webhook_url,
+                    pi_org_id        => v_org_id,
+                    pi_status        => CASE WHEN v_status_code BETWEEN 200 AND 299 THEN 'SUCCESS' ELSE 'ERROR' END,
+                    pi_status_code   => v_status_code,
+                    pi_request_body  => v_payload,
+                    pi_response_body => v_response
+                );
+
+                BEGIN
+                    v_resp_json := json_object_t.parse(v_response);
+                    IF v_resp_json.has('data') AND NOT v_resp_json.get('data').is_null THEN
+                        v_resp_data := TREAT(v_resp_json.get('data') AS json_object_t);
+                        v_resp_cdc := v_resp_data.get_string('cdc');
+                        IF v_resp_data.has('estado') THEN
+                            v_resp_estado := v_resp_data.get_string('estado');
+                        END IF;
+                        IF v_resp_data.has('codRes') THEN
+                            v_resp_cod_res := v_resp_data.get_string('codRes');
+                        END IF;
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_resp_cdc := NULL;
+                        v_resp_estado := NULL;
+                        v_resp_cod_res := NULL;
+                END;
+
+                IF v_resp_cdc IS NOT NULL
+                   AND UPPER(NVL(v_resp_estado, '')) = 'APROBADO'
+                   AND TRIM(v_resp_cod_res) = '0260' THEN
+                    UPDATE /*+ no_parallel */ subscription_credit_note
+                       SET nce_cdc = NVL(nce_cdc, v_resp_cdc),
+                           nce_estado_sifen = 'APROBADO',
+                           nce_cod_res = '0260',
+                           status = 'DONE',
+                           nce_error = NULL,
+                           processed_at = systimestamp,
+                           last_error = NULL,
+                           lease_owner = NULL,
+                           lease_until = NULL
+                     WHERE id_credit_note = v_id_note
+                       AND (nce_cdc IS NULL OR nce_cdc = v_resp_cdc);
+                ELSIF v_resp_cdc IS NOT NULL
+                      AND UPPER(NVL(v_resp_estado, '')) = 'RECHAZADO' THEN
+                    UPDATE /*+ no_parallel */ subscription_credit_note
+                       SET nce_estado_sifen = v_resp_estado,
+                           nce_cod_res = v_resp_cod_res,
+                           status = 'FAILED',
+                           nce_error = SUBSTR('SIFEN rechazo NCE', 1, 500),
+                           processed_at = systimestamp,
+                           lease_owner = NULL,
+                           lease_until = NULL
+                     WHERE id_credit_note = v_id_note
+                       AND nce_cdc IS NULL;
+                ELSIF v_status_code BETWEEN 200 AND 299 AND v_resp_cdc IS NULL THEN
+                    UPDATE subscription_credit_note
+                       SET status = 'PENDING',
+                           last_error = 'HTTP OK sin CDC; reintento',
+                           lease_owner = NULL,
+                           lease_until = NULL
+                     WHERE id_credit_note = v_id_note;
+                ELSE
+                    v_terminal_fail := v_attempts >= v_max_attempts;
+                    v_err := SUBSTR('HTTP ' || v_status_code || ' emision NCE', 1, 500);
+                    IF v_terminal_fail THEN
+                        UPDATE subscription_credit_note
+                           SET status = 'FAILED',
+                               last_error = v_err,
+                               nce_error = v_err,
+                               processed_at = systimestamp,
+                               lease_owner = NULL,
+                               lease_until = NULL
+                         WHERE id_credit_note = v_id_note;
+                    ELSE
+                        UPDATE subscription_credit_note
+                           SET status = 'PENDING',
+                               last_error = v_err,
+                               lease_owner = NULL,
+                               lease_until = NULL
+                         WHERE id_credit_note = v_id_note;
+                    END IF;
+                END IF;
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_err := SUBSTR(SQLERRM, 1, 500);
+                    BEGIN
+                        SELECT NVL(attempts, 0) INTO v_attempts
+                          FROM subscription_credit_note WHERE id_credit_note = v_id_note;
+                        v_terminal_fail := v_attempts >= v_max_attempts;
+                        IF v_terminal_fail THEN
+                            UPDATE subscription_credit_note
+                               SET status = 'FAILED',
+                                   last_error = v_err,
+                                   nce_error = v_err,
+                                   processed_at = systimestamp,
+                                   lease_owner = NULL,
+                                   lease_until = NULL
+                             WHERE id_credit_note = v_id_note;
+                        ELSE
+                            UPDATE subscription_credit_note
+                               SET status = 'PENDING',
+                                   last_error = v_err,
+                                   lease_owner = NULL,
+                                   lease_until = NULL
+                             WHERE id_credit_note = v_id_note;
+                        END IF;
+                        COMMIT;
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            ROLLBACK;
+                    END;
+            END;
+        END LOOP;
+    END pr_dispatch_nce_outbox;
 
     -- Baja KuDE (PDF) + adjunta XML privado; un solo push_queue.
     -- Claim solo si CDC + XML integro + kude_url. Fallo de email NO marca FE FAILED.
@@ -1873,6 +2284,42 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
         RETURN fn_prorate_amount(pi_full_monthly, v_days, v_per, 0);
     END fn_unused_credit_amount;
+
+    /** Monto no usado de una invoice STORAGE_ADDON (base = amount neto facturado). */
+    FUNCTION fn_unused_amount_for_invoice(pi_invoice_id IN NUMBER) RETURN NUMBER IS
+        v_amount NUMBER;
+        v_start  TIMESTAMP WITH TIME ZONE;
+        v_end    TIMESTAMP WITH TIME ZONE;
+        v_days   NUMBER;
+        v_per    NUMBER;
+        v_unused NUMBER;
+    BEGIN
+        BEGIN
+            SELECT amount, period_start, period_end
+              INTO v_amount, v_start, v_end
+              FROM org_subscription_invoice
+             WHERE id_invoice = pi_invoice_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RETURN 0;
+        END;
+
+        IF NVL(v_amount, 0) <= 0 THEN
+            RETURN 0;
+        END IF;
+        IF v_end IS NULL OR v_end <= systimestamp THEN
+            RETURN 0;
+        END IF;
+
+        v_days := fn_calendar_days_between(systimestamp, v_end);
+        v_per  := fn_calendar_days_between(NVL(v_start, ADD_MONTHS(v_end, -1)), v_end);
+        IF v_per < 1 THEN
+            v_per := 30;
+        END IF;
+
+        v_unused := fn_prorate_amount(v_amount, v_days, v_per, 0);
+        RETURN LEAST(NVL(v_unused, 0), v_amount);
+    END fn_unused_amount_for_invoice;
 
     PROCEDURE pr_grant_credit(
         pi_org_id    IN NUMBER,
@@ -3116,18 +3563,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
-        v_org_id      NUMBER;
-        v_req         json_object_t;
-        v_addon_code  VARCHAR2(30);
-        v_addon_id    NUMBER;
-        v_addon_price NUMBER;
-        v_addon_name  VARCHAR2(150);
-        v_row_id      NUMBER;
-        v_qty         NUMBER;
-        v_credit      NUMBER;
-        v_balance     NUMBER;
-        v_response    json_object_t := json_object_t();
-        v_data        json_object_t := json_object_t();
+        v_org_id            NUMBER;
+        v_req               json_object_t;
+        v_addon_code        VARCHAR2(30);
+        v_addon_id          NUMBER;
+        v_addon_price       NUMBER;
+        v_addon_name        VARCHAR2(150);
+        v_row_id            NUMBER;
+        v_qty               NUMBER;
+        v_credit            NUMBER := 0;
+        v_balance           NUMBER;
+        v_source_invoice_id NUMBER;
+        v_source_cdc        VARCHAR2(44);
+        v_nce_amount        NUMBER := 0;
+        v_credit_note_id    NUMBER;
+        v_nce_queued        NUMBER := 0;
+        v_response          json_object_t := json_object_t();
+        v_data              json_object_t := json_object_t();
     BEGIN
         pr_assert_admin(pi_auth_header, v_org_id);
         v_req        := json_object_t.parse(pi_body);
@@ -3150,13 +3602,73 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                AND sad_id_storage_addon = v_addon_id
                AND status = 'ACTIVE'
              ORDER BY id_org_storage_addon DESC
-             FETCH FIRST 1 ROW ONLY;
+             FETCH FIRST 1 ROW ONLY
+             FOR UPDATE;
         EXCEPTION WHEN NO_DATA_FOUND THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'No tenes ese paquete de almacenamiento activo.');
         END;
 
-        v_credit := fn_unused_credit_amount(v_org_id, v_addon_price);
-        pr_grant_credit(v_org_id, v_credit, 'CANCEL_ADDON', v_addon_code, NULL);
+        -- FE STORAGE_ADDON aprobada sin NCE previa (MVP mid-cycle).
+        BEGIN
+            SELECT i.id_invoice, i.einvoice_cdc
+              INTO v_source_invoice_id, v_source_cdc
+              FROM org_subscription_invoice i
+             WHERE i.org_id_organization = v_org_id
+               AND i.invoice_type = 'STORAGE_ADDON'
+               AND i.sad_id_storage_addon = v_addon_id
+               AND i.status = 'PAID'
+               AND i.einvoice_cdc IS NOT NULL
+               AND i.einvoice_status IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE', 'SENT')
+               AND UPPER(NVL(i.einvoice_estado_sifen, '')) = 'APROBADO'
+               AND TRIM(i.einvoice_cod_res) = '0260'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM subscription_credit_note n
+                    WHERE n.source_invoice_id = i.id_invoice
+                      AND n.status IN ('PENDING', 'PROCESSING', 'DONE')
+               )
+             ORDER BY i.id_invoice DESC
+             FETCH FIRST 1 ROW ONLY;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_source_invoice_id := NULL;
+                v_source_cdc        := NULL;
+        END;
+
+        IF v_source_invoice_id IS NOT NULL THEN
+            v_nce_amount := fn_unused_amount_for_invoice(v_source_invoice_id);
+        END IF;
+
+        -- NCE XOR crédito interno (no doble ajuste fiscal).
+        IF v_source_invoice_id IS NOT NULL AND NVL(v_nce_amount, 0) > 0 THEN
+            INSERT /*+ no_parallel */ INTO subscription_credit_note (
+                source_invoice_id,
+                org_id_organization,
+                cdc_ref,
+                amount,
+                motivo,
+                description,
+                status,
+                emission_key,
+                org_storage_addon_id
+            ) VALUES (
+                v_source_invoice_id,
+                v_org_id,
+                v_source_cdc,
+                v_nce_amount,
+                2,
+                SUBSTR(v_addon_name || ' - devolución (tiempo no usado)', 1, 255),
+                'PENDING',
+                'NCE-' || TO_CHAR(v_source_invoice_id),
+                v_row_id
+            ) RETURNING id_credit_note INTO v_credit_note_id;
+
+            pr_enqueue_nce_dispatch(v_credit_note_id);
+            v_nce_queued := 1;
+        ELSE
+            v_credit := fn_unused_credit_amount(v_org_id, v_addon_price);
+            pr_grant_credit(v_org_id, v_credit, 'CANCEL_ADDON', v_addon_code, NULL);
+        END IF;
 
         IF v_qty > 1 THEN
             UPDATE /*+ no_parallel */ org_storage_addon
@@ -3179,16 +3691,28 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
         COMMIT;
 
+        IF v_nce_queued = 1 THEN
+            pr_dispatch_nce_outbox(5, v_org_id);
+        END IF;
+
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response.put('status', 'success');
         v_response.put('message',
-            CASE WHEN v_credit > 0
-                 THEN 'Almacenamiento cancelado. Se acreditaron ' || TO_CHAR(v_credit) || ' Gs a favor.'
-                 ELSE 'Almacenamiento cancelado.'
+            CASE
+                WHEN v_nce_queued = 1 AND v_nce_amount > 0 THEN
+                    'Almacenamiento cancelado. Se emitirá nota de crédito por '
+                    || TRIM(TO_CHAR(v_nce_amount, 'FM999G999G999', 'NLS_NUMERIC_CHARACTERS='',.'''))
+                    || ' Gs.'
+                WHEN v_credit > 0 THEN
+                    'Almacenamiento cancelado. Se acreditaron ' || TO_CHAR(v_credit) || ' Gs a favor.'
+                ELSE
+                    'Almacenamiento cancelado.'
             END);
         v_data.put('addon_code', v_addon_code);
         v_data.put('addon_name', v_addon_name);
         v_data.put('credit_granted', v_credit);
+        v_data.put('nce_amount', CASE WHEN v_nce_queued = 1 THEN v_nce_amount ELSE 0 END);
+        v_data.put('nce_queued', v_nce_queued);
         v_data.put('account_balance', v_balance);
         v_data.put('storage_limit_bytes', pkg_aox_subscription_api.fn_get_storage_limit_bytes(v_org_id));
         v_response.put('data', v_data);
@@ -4226,6 +4750,114 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     -- Factura electronica SIFEN (firmador esign) - endpoints internos
     -- (X-Service-Token, sin JWT de usuario)
     --------------------------------------------------------------------------
+
+    -- POST /internal/v1/subscription-credit-notes/:id/nce
+    PROCEDURE pr_save_nce_result(
+        pi_service_token  IN  VARCHAR2,
+        pi_credit_note_id IN  NUMBER,
+        pi_body           IN  CLOB,
+        po_status_code    OUT NUMBER,
+        po_response_body  OUT CLOB
+    ) IS
+        v_json       json_object_t;
+        v_response   json_object_t := json_object_t();
+        v_cdc        VARCHAR2(44);
+        v_estado     VARCHAR2(20);
+        v_cod_res    VARCHAR2(10);
+        v_prot_aut   VARCHAR2(30);
+        v_mensaje    VARCHAR2(500);
+        v_new_status VARCHAR2(20);
+        v_cur_cdc    VARCHAR2(44);
+        v_cur_status VARCHAR2(20);
+        v_rows       NUMBER;
+    BEGIN
+        pr_assert_service_token(pi_service_token);
+
+        v_json     := json_object_t.parse(pi_body);
+        v_cdc      := v_json.get_string('cdc');
+        v_estado   := v_json.get_string('estado');
+        v_cod_res  := CASE WHEN v_json.has('codRes') THEN v_json.get_string('codRes') END;
+        v_prot_aut := CASE WHEN v_json.has('protAut') THEN v_json.get_string('protAut') END;
+        v_mensaje  := CASE WHEN v_json.has('mensaje') THEN v_json.get_string('mensaje') END;
+
+        BEGIN
+            SELECT nce_cdc, status
+              INTO v_cur_cdc, v_cur_status
+              FROM subscription_credit_note
+             WHERE id_credit_note = pi_credit_note_id
+             FOR UPDATE;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                po_status_code := 404;
+                v_response.put('status', 'error');
+                v_response.put('message', 'Nota de crédito no encontrada.');
+                po_response_body := v_response.to_clob();
+                RETURN;
+        END;
+
+        IF v_cur_status = 'DONE' AND v_cur_cdc IS NOT NULL THEN
+            IF v_cdc IS NULL OR v_cdc = v_cur_cdc THEN
+                po_status_code := pkg_aox_util.c_success_ok_code;
+                v_response.put('status', 'success');
+                v_response.put('message', 'CDC NCE ya persistido; callback ignorado.');
+                po_response_body := v_response.to_clob();
+                RETURN;
+            END IF;
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'NCE ya tiene CDC terminal distinto; no se sobrescribe.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        IF UPPER(NVL(v_estado, '')) = 'APROBADO'
+           AND TRIM(v_cod_res) = '0260'
+           AND v_cdc IS NOT NULL THEN
+            v_new_status := 'DONE';
+        ELSE
+            v_new_status := 'FAILED';
+        END IF;
+
+        UPDATE /*+ no_parallel */ subscription_credit_note
+           SET nce_cdc          = CASE WHEN v_new_status = 'DONE' THEN v_cdc ELSE nce_cdc END,
+               nce_estado_sifen = v_estado,
+               nce_cod_res      = v_cod_res,
+               nce_prot_aut     = v_prot_aut,
+               status           = v_new_status,
+               nce_error        = CASE WHEN v_new_status = 'FAILED'
+                                         THEN SUBSTR('SIFEN estado=' || v_estado
+                                                      || CASE WHEN v_cod_res IS NOT NULL THEN ' codRes=' || v_cod_res END
+                                                      || CASE WHEN v_mensaje IS NOT NULL THEN ' - ' || v_mensaje END, 1, 500)
+                                         ELSE NULL END,
+               processed_at     = CASE WHEN v_new_status IN ('DONE', 'FAILED') THEN systimestamp ELSE processed_at END,
+               last_error       = CASE WHEN v_new_status = 'FAILED'
+                                         THEN SUBSTR(NVL(v_mensaje, 'SIFEN ' || v_estado), 1, 500)
+                                         ELSE NULL END,
+               lease_owner      = NULL,
+               lease_until      = NULL
+         WHERE id_credit_note = pi_credit_note_id
+           AND status IN ('PENDING', 'PROCESSING', 'FAILED')
+           AND (nce_cdc IS NULL OR nce_cdc = v_cdc);
+
+        v_rows := SQL%ROWCOUNT;
+        IF v_rows = 0 THEN
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'No se actualizó la NCE (estado no reclamable o CDC protegido).');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_save_nce_result;
 
     -- POST /internal/v1/subscription-invoices/:id/einvoice
     PROCEDURE pr_save_einvoice_result(
