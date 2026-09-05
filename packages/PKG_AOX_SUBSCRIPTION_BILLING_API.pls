@@ -1599,7 +1599,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_item.put('ciudad', '1');
         v_item.put('nombre', pi_item_name);
         v_item.put('cantidad', 1);
-        v_item.put('categoria', '1909');
+        -- SaaS / ticket virtual: sin courier Pagopar. Docs: categoria 909 (no producto fisico).
+        v_item.put('categoria', '909');
         v_item.put('public_key', pi_public_key);
         v_item.put('url_imagen', '');
         v_item.put('descripcion', pi_desc);
