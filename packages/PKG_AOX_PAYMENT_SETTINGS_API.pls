@@ -280,11 +280,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
             RETURN;
         END IF;
 
+        -- pr_escalate_refund_enforcement solo se dispara sobre orgs que ya tenian
+        -- deposits_enabled=1 (la disputa nace de un pago SIPAP real), y pr_sync_deposits_flag
+        -- lo pone en 0 al suspender. Sin este restore explicito, la org queda sin senas
+        -- para siempre aunque el nivel de enforcement vuelva a NONE.
         UPDATE org_payment_settings
            SET refund_enforcement_level  = 'NONE',
                refund_enforcement_at     = CURRENT_TIMESTAMP,
                refund_enforcement_reason = SUBSTR(pi_reason, 1, 400),
                refund_enforcement_by     = pi_actor_user_id,
+               deposits_enabled          = 1,
                deposits_suspended        = 0,
                deposits_suspended_at     = NULL,
                deposits_suspended_reason = NULL,
