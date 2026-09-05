@@ -18,6 +18,29 @@ CREATE OR REPLACE PACKAGE pkg_aox_ops_admin_bridge AS
         po_status_code        OUT NUMBER,
         po_response_body      OUT CLOB
     );
+
+    /** Encola inbox in-app para campana ops. po_inserted=1 si inserto; 0 si dedupe u error. */
+    PROCEDURE pr_enqueue_campaign_inbox(
+        pi_org_id          IN  NUMBER,
+        pi_org_member_id   IN  NUMBER,
+        pi_title           IN  VARCHAR2,
+        pi_body            IN  VARCHAR2 DEFAULT NULL,
+        pi_action_url      IN  VARCHAR2 DEFAULT NULL,
+        pi_campaign_id     IN  NUMBER,
+        pi_dedupe_key      IN  VARCHAR2,
+        po_inserted        OUT NUMBER,
+        po_error           OUT VARCHAR2
+    );
+
+    /** Envio FCM puntual; expone resultado de pr_send_push_checked. */
+    PROCEDURE pr_send_campaign_push(
+        pi_token     IN  VARCHAR2,
+        pi_title     IN  VARCHAR2,
+        pi_body      IN  VARCHAR2,
+        pi_url       IN  VARCHAR2 DEFAULT NULL,
+        po_success   OUT NUMBER,
+        po_error     OUT VARCHAR2
+    );
 END pkg_aox_ops_admin_bridge;
 /
 
@@ -211,6 +234,88 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
             ROLLBACK;
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_restore_enforcement;
+
+    PROCEDURE pr_enqueue_campaign_inbox(
+        pi_org_id          IN  NUMBER,
+        pi_org_member_id   IN  NUMBER,
+        pi_title           IN  VARCHAR2,
+        pi_body            IN  VARCHAR2 DEFAULT NULL,
+        pi_action_url      IN  VARCHAR2 DEFAULT NULL,
+        pi_campaign_id     IN  NUMBER,
+        pi_dedupe_key      IN  VARCHAR2,
+        po_inserted        OUT NUMBER,
+        po_error           OUT VARCHAR2
+    ) IS
+        v_title VARCHAR2(500) := SUBSTR(TRIM(pi_title), 1, 500);
+        v_key   VARCHAR2(200) := NULLIF(TRIM(pi_dedupe_key), '');
+    BEGIN
+        po_inserted := 0;
+        po_error    := NULL;
+
+        IF pi_org_id IS NULL OR pi_org_id <= 0
+           OR pi_org_member_id IS NULL OR pi_org_member_id <= 0
+           OR v_title IS NULL
+        THEN
+            po_error := 'Parametros de inbox invalidos.';
+            RETURN;
+        END IF;
+
+        INSERT INTO user_notification (
+            org_id_organization,
+            org_member_id,
+            ntype,
+            title,
+            body,
+            action_type,
+            action_url,
+            campaign_id,
+            dedupe_key
+        ) VALUES (
+            pi_org_id,
+            pi_org_member_id,
+            'SYSTEM',
+            v_title,
+            SUBSTR(pi_body, 1, 4000),
+            'OPEN_URL',
+            SUBSTR(TRIM(pi_action_url), 1, 1000),
+            pi_campaign_id,
+            v_key
+        );
+
+        po_inserted := 1;
+    EXCEPTION
+        WHEN DUP_VAL_ON_INDEX THEN
+            po_inserted := 0;
+        WHEN OTHERS THEN
+            po_inserted := 0;
+            po_error := SUBSTR(SQLERRM, 1, 4000);
+            pkg_aox_util.pr_log_push_fcm(
+                pi_process_name  => 'PKG_AOX_OPS_ADMIN_BRIDGE.PR_ENQUEUE_CAMPAIGN_INBOX',
+                pi_status        => 'ERROR',
+                pi_error_code    => SQLCODE,
+                pi_error_message => SQLERRM,
+                pi_parameters    => 'org_member_id=' || pi_org_member_id
+            );
+    END pr_enqueue_campaign_inbox;
+
+    PROCEDURE pr_send_campaign_push(
+        pi_token     IN  VARCHAR2,
+        pi_title     IN  VARCHAR2,
+        pi_body      IN  VARCHAR2,
+        pi_url       IN  VARCHAR2 DEFAULT NULL,
+        po_success   OUT NUMBER,
+        po_error     OUT VARCHAR2
+    ) IS
+    BEGIN
+        pkg_aox_fcm_api.pr_send_push_checked(
+            pi_token   => pi_token,
+            pi_title   => pi_title,
+            pi_body    => pi_body,
+            pi_url     => pi_url,
+            po_success => po_success,
+            po_error   => po_error
+        );
+    END pr_send_campaign_push;
 
 END pkg_aox_ops_admin_bridge;
 /
