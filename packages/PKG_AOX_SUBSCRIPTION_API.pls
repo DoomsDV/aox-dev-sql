@@ -148,7 +148,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
          where oa.org_id_organization = pi_org_id
            and oa.status = 'ACTIVE'
            and ra.feature_code = v_code
-           and ra.is_active = 1;
+           and ra.is_active = 1
+           and (
+                oa.grant_type = 'PAID'
+                or fn_addons_billing_live = 0
+           );
 
         return case when v_count > 0 then 1 else 0 end;
     exception
@@ -525,6 +529,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
                 on ra.id_addon = oa.rad_id_addon
              where oa.org_id_organization = v_org_id
                and oa.status = 'ACTIVE'
+               and (
+                    oa.grant_type = 'PAID'
+                    or fn_addons_billing_live = 0
+               )
              order by ra.feature_code
         ) loop
             v_addon_features.append(rec.feature_code);

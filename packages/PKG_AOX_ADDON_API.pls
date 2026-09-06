@@ -17,10 +17,11 @@ CREATE OR REPLACE PACKAGE pkg_aox_addon_api IS
     );
 
     PROCEDURE pr_activate_module_addon(
-        pi_auth_header   IN  VARCHAR2,
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_auth_header      IN  VARCHAR2,
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     );
 
     PROCEDURE pr_cancel_module_addon(
@@ -115,6 +116,140 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         RETURN v_code;
     END fn_parse_addon_code;
 
+    PROCEDURE pr_put_module_billing_fields(
+        pi_org_id     IN NUMBER,
+        pi_addon_id   IN NUMBER,
+        pi_price      IN NUMBER,
+        pi_org_status IN VARCHAR2,
+        pi_grant_type IN VARCHAR2,
+        pio_item      IN OUT NOCOPY json_object_t
+    ) IS
+        v_period_start TIMESTAMP WITH TIME ZONE;
+        v_period_end   TIMESTAMP WITH TIME ZONE;
+        v_days         NUMBER := 0;
+        v_per          NUMBER := 30;
+        v_prorate      NUMBER := 0;
+        v_inv_id       NUMBER;
+        v_inv_amount   NUMBER;
+        v_inv_gross    NUMBER;
+        v_inv_start    TIMESTAMP WITH TIME ZONE;
+        v_inv_end      TIMESTAMP WITH TIME ZONE;
+        v_base         NUMBER;
+        v_unused       NUMBER := 0;
+        v_refund_type  VARCHAR2(10) := 'none';
+        v_refund_amt   NUMBER := 0;
+
+        FUNCTION lf_unused(
+            pi_full  IN NUMBER,
+            pi_start IN TIMESTAMP WITH TIME ZONE,
+            pi_end   IN TIMESTAMP WITH TIME ZONE
+        ) RETURN NUMBER IS
+            v_d NUMBER;
+            v_p NUMBER;
+            v_u NUMBER;
+        BEGIN
+            IF NVL(pi_full, 0) <= 0 OR pi_end IS NULL OR pi_end <= systimestamp THEN
+                RETURN 0;
+            END IF;
+            v_d := GREATEST(0, TRUNC(CAST(pi_end AS DATE)) - TRUNC(CAST(systimestamp AS DATE)));
+            v_p := GREATEST(1, TRUNC(CAST(pi_end AS DATE)) - TRUNC(CAST(NVL(pi_start, ADD_MONTHS(pi_end, -1)) AS DATE)));
+            v_u := CEIL(pi_full * v_d / v_p);
+            RETURN LEAST(NVL(v_u, 0), pi_full);
+        END lf_unused;
+    BEGIN
+        BEGIN
+            SELECT current_period_start, current_period_end
+              INTO v_period_start, v_period_end
+              FROM org_subscription
+             WHERE org_id_organization = pi_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_period_end := NULL;
+        END;
+
+        IF v_period_end IS NOT NULL AND v_period_end > systimestamp THEN
+            v_days := GREATEST(0, TRUNC(CAST(v_period_end AS DATE)) - TRUNC(CAST(systimestamp AS DATE)));
+            v_per  := GREATEST(1, TRUNC(CAST(v_period_end AS DATE)) - TRUNC(CAST(NVL(v_period_start, ADD_MONTHS(v_period_end, -1)) AS DATE)));
+            IF v_days > 0 AND NVL(pi_price, 0) > 0 THEN
+                v_prorate := CEIL(pi_price * v_days / v_per);
+                IF v_prorate > 0 AND v_prorate < 1000 THEN
+                    v_prorate := 1000;
+                END IF;
+            END IF;
+        END IF;
+
+        pio_item.put('prorate_amount', v_prorate);
+        pio_item.put('days_remaining', v_days);
+        pio_item.put('period_days', v_per);
+
+        IF pi_org_status = 'ACTIVE' AND pi_grant_type = 'PAID' THEN
+            BEGIN
+                SELECT i.id_invoice,
+                       i.amount,
+                       NVL(i.gross_amount, i.amount),
+                       i.period_start,
+                       i.period_end
+                  INTO v_inv_id, v_inv_amount, v_inv_gross, v_inv_start, v_inv_end
+                  FROM org_subscription_invoice i
+                 WHERE i.org_id_organization = pi_org_id
+                   AND i.invoice_type = 'MODULE_ADDON'
+                   AND i.rad_id_addon = pi_addon_id
+                   AND i.status = 'PAID'
+                   AND i.period_end > systimestamp
+                   AND i.einvoice_cdc IS NOT NULL
+                   AND i.einvoice_status IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE', 'SENT')
+                   AND UPPER(NVL(i.einvoice_estado_sifen, '')) = 'APROBADO'
+                   AND TRIM(i.einvoice_cod_res) = '0260'
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM subscription_credit_note n
+                        WHERE n.source_invoice_id = i.id_invoice
+                          AND n.status IN ('PENDING', 'PROCESSING', 'DONE')
+                   )
+                 ORDER BY i.id_invoice DESC
+                 FETCH FIRST 1 ROW ONLY;
+                v_base := CASE WHEN NVL(v_inv_amount, 0) > 0 THEN v_inv_amount ELSE NVL(v_inv_gross, 0) END;
+                v_unused := lf_unused(v_base, v_inv_start, v_inv_end);
+                IF NVL(v_unused, 0) > 0 THEN
+                    v_refund_type := 'nce';
+                    v_refund_amt  := v_unused;
+                END IF;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    NULL;
+            END;
+
+            IF v_refund_type = 'none' THEN
+                BEGIN
+                    SELECT i.id_invoice,
+                           i.amount,
+                           NVL(i.gross_amount, i.amount),
+                           i.period_start,
+                           i.period_end
+                      INTO v_inv_id, v_inv_amount, v_inv_gross, v_inv_start, v_inv_end
+                      FROM org_subscription_invoice i
+                     WHERE i.org_id_organization = pi_org_id
+                       AND i.invoice_type = 'MODULE_ADDON'
+                       AND i.rad_id_addon = pi_addon_id
+                       AND i.status = 'PAID'
+                       AND i.period_end > systimestamp
+                     ORDER BY i.id_invoice DESC
+                     FETCH FIRST 1 ROW ONLY;
+                    v_base := CASE WHEN NVL(v_inv_amount, 0) > 0 THEN v_inv_amount ELSE NVL(v_inv_gross, 0) END;
+                    v_refund_type := 'credit';
+                    v_refund_amt  := lf_unused(v_base, v_inv_start, v_inv_end);
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        v_refund_type := 'credit';
+                        v_refund_amt  := 0;
+                END;
+            END IF;
+        END IF;
+
+        pio_item.put('cancel_refund_type', v_refund_type);
+        pio_item.put('cancel_credit_amount', v_refund_amt);
+    END pr_put_module_billing_fields;
+
     FUNCTION fn_build_addon_item(
         pi_org_id         IN NUMBER,
         pi_id_addon       IN NUMBER,
@@ -156,6 +291,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         ELSE
             v_item.put('status', pi_org_status);
         END IF;
+        pr_put_module_billing_fields(
+            pi_org_id     => pi_org_id,
+            pi_addon_id   => pi_id_addon,
+            pi_price      => pi_price_amount,
+            pi_org_status => pi_org_status,
+            pi_grant_type => pi_grant_type,
+            pio_item      => v_item
+        );
         RETURN v_item;
     END fn_build_addon_item;
 
@@ -308,10 +451,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
     END pr_list_addons;
 
     PROCEDURE pr_activate_module_addon(
-        pi_auth_header   IN  VARCHAR2,
-        pi_body          IN  CLOB,
-        po_status_code   OUT NUMBER,
-        po_response_body OUT CLOB
+        pi_auth_header      IN  VARCHAR2,
+        pi_body             IN  CLOB,
+        po_status_code      OUT NUMBER,
+        po_response_body    OUT CLOB,
+        pi_idempotency_key  IN  VARCHAR2 DEFAULT NULL
     ) IS
         v_org_id         NUMBER;
         v_code           VARCHAR2(30);
@@ -319,7 +463,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         v_price_amount   ref_addon.price_amount%TYPE;
         v_currency       ref_addon.currency%TYPE;
         v_org_status     org_addon.status%TYPE;
+        v_org_grant      org_addon.grant_type%TYPE;
         v_exists         NUMBER := 0;
+        v_invoice_id     NUMBER;
+        v_hash           VARCHAR2(128);
+        v_response_json  json_object_t := json_object_t();
+        v_data           json_object_t := json_object_t();
     BEGIN
         pr_assert_admin(pi_auth_header);
         v_org_id := fn_require_org_id(pi_auth_header);
@@ -351,8 +500,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         END IF;
 
         BEGIN
-            SELECT status
-              INTO v_org_status
+            SELECT status, grant_type
+              INTO v_org_status, v_org_grant
               FROM org_addon
              WHERE org_id_organization = v_org_id
                AND rad_id_addon = v_id_addon;
@@ -361,19 +510,90 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
             WHEN NO_DATA_FOUND THEN
                 v_exists := 0;
                 v_org_status := NULL;
+                v_org_grant  := NULL;
         END;
 
-        IF v_org_status = 'ACTIVE' THEN
+        IF v_org_status = 'ACTIVE' AND (
+               pkg_aox_subscription_api.fn_addons_billing_live = 0
+            OR v_org_grant = 'PAID'
+        ) THEN
             pr_success_item(v_org_id, v_id_addon, po_status_code, po_response_body);
             RETURN;
         END IF;
 
-        -- Fail closed: cobro Pagopar todavía no está implementado.
         IF pkg_aox_subscription_api.fn_addons_billing_live = 1 THEN
-            RAISE_APPLICATION_ERROR(
-                pkg_aox_util.c_sqlcode_validation,
-                'El cobro de complementos todavía no está habilitado.'
+            MERGE /*+ no_parallel */ INTO org_addon t
+            USING (SELECT v_org_id AS org_id, v_id_addon AS addon_id FROM dual) s
+               ON (t.org_id_organization = s.org_id AND t.rad_id_addon = s.addon_id)
+             WHEN MATCHED THEN
+                UPDATE SET t.price_snapshot_amount = v_price_amount,
+                           t.currency              = v_currency,
+                           t.updated_at            = SYSTIMESTAMP
+                 WHERE t.status IN ('CANCELED', 'EXPIRED')
+             WHEN NOT MATCHED THEN
+                INSERT (
+                    org_id_organization,
+                    rad_id_addon,
+                    status,
+                    grant_type,
+                    price_snapshot_amount,
+                    currency,
+                    started_at,
+                    canceled_at,
+                    billing_started_at
+                ) VALUES (
+                    v_org_id,
+                    v_id_addon,
+                    'CANCELED',
+                    'PREVIEW',
+                    v_price_amount,
+                    v_currency,
+                    SYSTIMESTAMP,
+                    SYSTIMESTAMP,
+                    NULL
+                );
+
+            pkg_aox_subscription_billing_api.pr_charge_target(
+                pi_org_id           => v_org_id,
+                pi_target_type      => 'MODULE_ADDON',
+                pi_plan_code        => NULL,
+                pi_addon_code       => v_code,
+                po_invoice_id       => v_invoice_id,
+                po_hash             => v_hash,
+                pi_idempotency_key  => pi_idempotency_key
             );
+
+            v_data.put('addon', fn_addon_item_by_id(v_org_id, v_id_addon));
+            v_data.put('target_type', 'MODULE_ADDON');
+            IF v_hash IS NULL THEN
+                po_status_code := pkg_aox_util.c_success_ok_code;
+                v_response_json.put('status', 'success');
+                IF v_invoice_id IS NOT NULL THEN
+                    v_response_json.put('message', 'Complemento activado usando tu saldo a favor. No hubo cargo en la tarjeta.');
+                    v_data.put('invoice_id', v_invoice_id);
+                    v_data.put('payment_status', 'PAID');
+                    v_data.put('status', 'PAID');
+                ELSE
+                    v_response_json.put('message', 'Complemento activado. Entra en el cargo de la próxima renovación.');
+                    v_data.put_null('invoice_id');
+                    v_data.put('payment_status', 'PAID');
+                    v_data.put('status', 'PAID');
+                END IF;
+                v_data.put_null('hash');
+                v_data.put('requires_polling', 0);
+            ELSE
+                po_status_code := pkg_aox_util.c_success_create_code;
+                v_response_json.put('status', 'success');
+                v_response_json.put('message', 'Estamos confirmando el cobro del complemento.');
+                v_data.put('invoice_id', v_invoice_id);
+                v_data.put('hash', v_hash);
+                v_data.put('payment_status', 'PENDING');
+                v_data.put('status', 'PENDING');
+                v_data.put('requires_polling', 1);
+            END IF;
+            v_response_json.put('data', v_data);
+            po_response_body := v_response_json.to_clob();
+            RETURN;
         END IF;
 
         IF v_exists = 1 THEN

@@ -9,6 +9,8 @@ DECLARE
     v_org_id   NUMBER;
     v_name     organization.name%TYPE;
 BEGIN
+    EXECUTE IMMEDIATE 'ALTER SESSION DISABLE PARALLEL DML';
+
     BEGIN
         v_org_id := TO_NUMBER(fn_get_parameter('QA_BILLING_E2E_ORG_ID'));
     EXCEPTION
@@ -40,6 +42,9 @@ BEGIN
     -- Outbox FE
     DELETE FROM subscription_einvoice_outbox WHERE org_id_organization = v_org_id;
 
+    DELETE FROM subscription_credit_note WHERE org_id_organization = v_org_id;
+    DELETE FROM org_billing_credit_ledger WHERE org_id_organization = v_org_id;
+
     -- Notificaciones de la campanita de miembros de la fixture
     DELETE FROM user_notification
      WHERE org_id_organization = v_org_id
@@ -51,6 +56,8 @@ BEGIN
     DELETE FROM org_payment_card WHERE org_id_organization = v_org_id;
     DELETE FROM org_billing_profile WHERE org_id_organization = v_org_id;
     DELETE FROM org_storage_addon WHERE org_id_organization = v_org_id;
+    DELETE FROM org_addon WHERE org_id_organization = v_org_id;
+    DELETE FROM organization_specialty WHERE org_id_organization = v_org_id;
     DELETE FROM org_subscription WHERE org_id_organization = v_org_id;
     DELETE FROM org_member WHERE org_id_organization = v_org_id;
     DELETE FROM organization WHERE id_organization = v_org_id;
