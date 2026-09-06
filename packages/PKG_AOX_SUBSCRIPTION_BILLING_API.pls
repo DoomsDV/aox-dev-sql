@@ -313,6 +313,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         p_body       IN CLOB,
         p_signature  IN VARCHAR2
     ) RETURN BOOLEAN;
+    PROCEDURE pr_log_esign_webhook(
+        pi_delivery_id     IN VARCHAR2,
+        pi_invoice_id      IN NUMBER,
+        pi_cdc             IN VARCHAR2,
+        pi_idempotency_key IN VARCHAR2,
+        pi_status          IN VARCHAR2,
+        pi_http_status     IN NUMBER,
+        pi_reason          IN VARCHAR2
+    );
 
     --------------------------------------------------------------------------
     -- Helpers
@@ -6350,7 +6359,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             RETURN;
         END IF;
 
-        IF v_cur_cdc IS NULL OR v_cur_cdc <> TRIM(v_cdc) THEN
+        -- El callback puede llegar antes que el puente que persiste el CDC.
+        -- El id de invoice ya fue autenticado por el servicio interno; en ese
+        -- caso se fija CDC y artefactos en el mismo UPDATE. Nunca se reemplaza
+        -- un CDC existente por otro valor.
+        IF v_cur_cdc IS NOT NULL AND v_cur_cdc <> TRIM(v_cdc) THEN
             po_status_code := 409;
             v_response.put('status', 'error');
             v_response.put('message', 'CDC del body no coincide con la factura.');
@@ -6422,7 +6435,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         UPDATE /*+ no_parallel */ org_subscription_invoice
-           SET einvoice_kude_url = TRIM(v_kude_url),
+           SET einvoice_cdc = NVL(einvoice_cdc, TRIM(v_cdc)),
+               einvoice_kude_url = TRIM(v_kude_url),
                einvoice_xml_firmado = CASE
                    WHEN einvoice_xml_firmado IS NULL THEN v_xml_clob
                    ELSE einvoice_xml_firmado
@@ -6528,6 +6542,56 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         RETURN v_sig = v_expected;
     END fn_verify_esign_webhook_hmac;
 
+    -- Mantiene una única fila por delivery_id para diagnosticar replays sin
+    -- retener el body, el XML, firmas HMAC ni secretos.
+    PROCEDURE pr_log_esign_webhook(
+        pi_delivery_id     IN VARCHAR2,
+        pi_invoice_id      IN NUMBER,
+        pi_cdc             IN VARCHAR2,
+        pi_idempotency_key IN VARCHAR2,
+        pi_status          IN VARCHAR2,
+        pi_http_status     IN NUMBER,
+        pi_reason          IN VARCHAR2
+    ) IS
+        PRAGMA AUTONOMOUS_TRANSACTION;
+    BEGIN
+        MERGE INTO subscription_einvoice_webhook_log t
+        USING (
+            SELECT SUBSTR(TRIM(pi_delivery_id), 1, 64) AS delivery_id,
+                   pi_invoice_id AS invoice_id,
+                   SUBSTR(TRIM(pi_cdc), 1, 44) AS cdc,
+                   SUBSTR(TRIM(pi_idempotency_key), 1, 128) AS idempotency_key,
+                   SUBSTR(UPPER(TRIM(pi_status)), 1, 20) AS status,
+                   pi_http_status AS http_status,
+                   SUBSTR(TRIM(pi_reason), 1, 500) AS reason
+              FROM dual
+        ) s
+           ON (t.delivery_id = s.delivery_id)
+        WHEN MATCHED THEN UPDATE SET
+            t.invoice_id = NVL(s.invoice_id, t.invoice_id),
+            t.cdc = NVL(s.cdc, t.cdc),
+            t.idempotency_key = NVL(s.idempotency_key, t.idempotency_key),
+            t.status = CASE WHEN t.status = 'ACCEPTED' AND s.status = 'ACCEPTED'
+                            THEN 'REPLAYED' ELSE s.status END,
+            t.http_status = s.http_status,
+            t.reason = s.reason,
+            t.updated_at = SYSTIMESTAMP
+        WHEN NOT MATCHED THEN INSERT (
+            delivery_id, invoice_id, cdc, idempotency_key, status,
+            http_status, reason
+        ) VALUES (
+            s.delivery_id, s.invoice_id, s.cdc, s.idempotency_key, s.status,
+            s.http_status, s.reason
+        );
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            -- La observabilidad no debe convertir una entrega fiscal válida
+            -- en un fallo. El artefacto se conserva mediante su transacción.
+            NULL;
+    END pr_log_esign_webhook;
+
     PROCEDURE pr_receive_esign_webhook(
         pi_timestamp     IN  VARCHAR2,
         pi_signature     IN  VARCHAR2,
@@ -6546,9 +6610,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_xml_size       NUMBER;
         v_xml_mime       VARCHAR2(100);
         v_idem           VARCHAR2(128);
+        v_event          VARCHAR2(40);
         v_invoice_id     NUMBER;
         v_cur_cdc        VARCHAR2(44);
         v_cur_status     VARCHAR2(30);
+        v_invoice_status VARCHAR2(20);
+        v_cdc_in_use     NUMBER;
         v_xml_blob       BLOB;
         v_xml_clob       CLOB;
         v_body_json      json_object_t;
@@ -6564,6 +6631,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_secret  := TRIM(fn_get_parameter('ESIGN_WEBHOOK_SECRET'));
         v_api_key := TRIM(fn_get_parameter('ESIGN_API_KEY'));
 
+        IF pi_delivery_id IS NULL OR TRIM(pi_delivery_id) IS NULL THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response.put('status', 'error');
+            v_response.put('message', 'X-Esign-Delivery-Id requerido.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
         IF v_secret IS NULL OR LENGTH(v_secret) = 0 THEN
             po_status_code := 503;
             v_response.put('status', 'error');
@@ -6573,6 +6648,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         IF NOT fn_verify_esign_webhook_hmac(v_secret, pi_timestamp, pi_body, pi_signature) THEN
+            pr_log_esign_webhook(
+                pi_delivery_id, NULL, NULL, NULL, 'REJECTED', 401, 'firma HMAC inválida'
+            );
             po_status_code := 401;
             v_response.put('status', 'error');
             v_response.put('message', 'Firma HMAC invalida.');
@@ -6589,6 +6667,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             v_xml_size  := v_body_json.get_number('xml_size');
             v_xml_mime  := v_body_json.get_string('xml_mime');
             v_idem      := v_body_json.get_string('idempotency_key');
+            v_event     := v_body_json.get_string('event');
         EXCEPTION
             WHEN OTHERS THEN
                 po_status_code := pkg_aox_util.c_bad_request_code;
@@ -6599,6 +6678,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END;
 
         IF v_cdc IS NULL OR v_kude_url IS NULL OR v_xml_url IS NULL OR v_xml_sha IS NULL THEN
+            pr_log_esign_webhook(
+                pi_delivery_id, NULL, v_cdc, v_idem, 'REJECTED',
+                pkg_aox_util.c_bad_request_code, 'faltan campos requeridos'
+            );
             po_status_code := pkg_aox_util.c_bad_request_code;
             v_response.put('status', 'error');
             v_response.put('message', 'Faltan cdc, kude_url, xml_url o xml_sha256.');
@@ -6606,46 +6689,64 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             RETURN;
         END IF;
 
-        BEGIN
-            SELECT id_invoice, einvoice_cdc
-              INTO v_invoice_id, v_cur_cdc
-              FROM org_subscription_invoice
-             WHERE einvoice_cdc = TRIM(v_cdc)
-             FETCH FIRST 1 ROWS ONLY;
-        EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                IF v_idem IS NOT NULL AND REGEXP_LIKE(v_idem, '^INV-[0-9]+$', 'i') THEN
-                    BEGIN
-                        v_invoice_id := TO_NUMBER(REGEXP_SUBSTR(v_idem, '[0-9]+'));
-                        SELECT einvoice_cdc INTO v_cur_cdc
-                          FROM org_subscription_invoice
-                         WHERE id_invoice = v_invoice_id;
-                    EXCEPTION
-                        WHEN NO_DATA_FOUND THEN
-                            po_status_code := 404;
-                            v_response.put('status', 'error');
-                            v_response.put('message', 'Factura no encontrada.');
-                            po_response_body := v_response.to_clob();
-                            RETURN;
-                    END;
-                ELSE
-                    po_status_code := 404;
-                    v_response.put('status', 'error');
-                    v_response.put('message', 'Factura no encontrada para el CDC.');
-                    po_response_body := v_response.to_clob();
-                    RETURN;
-                END IF;
-        END;
-
-        IF v_cur_cdc IS NULL OR TRIM(v_cur_cdc) IS NULL THEN
-            po_status_code := 409;
+        IF NVL(LOWER(TRIM(v_event)), '-') <> 'invoice.ready'
+           OR v_idem IS NULL
+           OR NOT REGEXP_LIKE(v_idem, '^INV-[0-9]+$', 'i') THEN
+            pr_log_esign_webhook(
+                pi_delivery_id, NULL, v_cdc, v_idem, 'REJECTED',
+                pkg_aox_util.c_bad_request_code, 'evento o idempotency_key inválido'
+            );
+            po_status_code := pkg_aox_util.c_bad_request_code;
             v_response.put('status', 'error');
-            v_response.put('message', 'CDC aun no registrado en la factura; reintentar.');
+            v_response.put('message', 'Evento o idempotency_key inválido.');
             po_response_body := v_response.to_clob();
             RETURN;
         END IF;
 
-        IF v_cur_cdc <> TRIM(v_cdc) THEN
+        v_invoice_id := TO_NUMBER(REGEXP_SUBSTR(v_idem, '[0-9]+'));
+        BEGIN
+            SELECT einvoice_cdc, einvoice_status, status
+              INTO v_cur_cdc, v_cur_status, v_invoice_status
+              FROM org_subscription_invoice
+             WHERE id_invoice = v_invoice_id
+             FOR UPDATE;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                pr_log_esign_webhook(
+                    pi_delivery_id, v_invoice_id, v_cdc, v_idem, 'REJECTED', 404,
+                    'factura no encontrada'
+                );
+                po_status_code := 404;
+                v_response.put('status', 'error');
+                v_response.put('message', 'Factura no encontrada.');
+                po_response_body := v_response.to_clob();
+                RETURN;
+        END;
+
+        IF v_invoice_status <> 'PAID'
+           OR v_cur_status NOT IN ('SENT_PENDING_ARTIFACTS', 'SENT_PENDING_KUDE', 'SENT') THEN
+            pr_log_esign_webhook(
+                pi_delivery_id, v_invoice_id, v_cdc, v_idem, 'REJECTED', 409,
+                'factura no elegible para artefactos'
+            );
+            po_status_code := 409;
+            v_response.put('status', 'error');
+            v_response.put('message', 'Factura no está en estado de artefactos.');
+            po_response_body := v_response.to_clob();
+            RETURN;
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_cdc_in_use
+          FROM org_subscription_invoice
+         WHERE einvoice_cdc = TRIM(v_cdc)
+           AND id_invoice <> v_invoice_id;
+
+        IF v_cdc_in_use > 0 OR (v_cur_cdc IS NOT NULL AND v_cur_cdc <> TRIM(v_cdc)) THEN
+            pr_log_esign_webhook(
+                pi_delivery_id, v_invoice_id, v_cdc, v_idem, 'REJECTED', 409,
+                'CDC no coincide con la factura'
+            );
             po_status_code := 409;
             v_response.put('status', 'error');
             v_response.put('message', 'CDC no coincide con la factura.');
@@ -6654,6 +6755,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         IF v_api_key IS NULL OR LENGTH(v_api_key) = 0 THEN
+            pr_log_esign_webhook(
+                pi_delivery_id, v_invoice_id, v_cdc, v_idem, 'REJECTED', 503,
+                'API de ESIGN no configurada para descargar XML'
+            );
             po_status_code := 503;
             v_response.put('status', 'error');
             v_response.put('message', 'ESIGN_API_KEY no configurada para descargar XML.');
@@ -6674,6 +6779,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
         IF apex_web_service.g_status_code NOT BETWEEN 200 AND 299
            OR v_xml_blob IS NULL OR DBMS_LOB.GETLENGTH(v_xml_blob) = 0 THEN
+            pr_log_esign_webhook(
+                pi_delivery_id, v_invoice_id, v_cdc, v_idem, 'REJECTED', 502,
+                'no se pudo descargar XML del firmador'
+            );
             po_status_code := 502;
             v_response.put('status', 'error');
             v_response.put('message', 'No se pudo descargar XML del firmador (' || apex_web_service.g_status_code || ').');
@@ -6683,6 +6792,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
         v_hash_hex := LOWER(RAWTOHEX(DBMS_CRYPTO.HASH(v_xml_blob, DBMS_CRYPTO.HASH_SH256)));
         IF v_hash_hex <> v_xml_sha THEN
+            pr_log_esign_webhook(
+                pi_delivery_id, v_invoice_id, v_cdc, v_idem, 'REJECTED',
+                pkg_aox_util.c_bad_request_code, 'hash de XML no coincide'
+            );
             po_status_code := pkg_aox_util.c_bad_request_code;
             v_response.put('status', 'error');
             v_response.put('message', 'xml_sha256 no coincide con el XML descargado.');
@@ -6726,6 +6839,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             pi_body          => v_internal_body,
             po_status_code   => po_status_code,
             po_response_body => po_response_body
+        );
+
+        pr_log_esign_webhook(
+            pi_delivery_id,
+            v_invoice_id,
+            v_cdc,
+            v_idem,
+            CASE WHEN po_status_code BETWEEN 200 AND 299 THEN 'ACCEPTED' ELSE 'REJECTED' END,
+            po_status_code,
+            CASE WHEN po_status_code BETWEEN 200 AND 299
+                 THEN 'artefactos persistidos'
+                 ELSE 'persistencia de artefactos rechazada'
+            END
         );
 
         IF DBMS_LOB.ISTEMPORARY(v_xml_clob) = 1 THEN

@@ -190,6 +190,9 @@ PROMPT [41c/43] org_billing_profile (datos fiscales suscripcion Hasel)
 PROMPT [41c2] subscription_einvoice_outbox (despacho FE post-PAID)
 @@tables\SUBSCRIPTION_EINVOICE_OUTBOX.sql
 
+PROMPT [41c2c] subscription_einvoice_webhook_log (trazabilidad invoice.ready)
+@@tables\SUBSCRIPTION_EINVOICE_WEBHOOK_LOG.sql
+
 PROMPT [41c2b] subscription_credit_note (NCE cancelación addon con FE)
 @@tables\SUBSCRIPTION_CREDIT_NOTE.sql
 
@@ -448,6 +451,9 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 @@packages\PKG_AOX_PROFESSIONAL_API.pls
 @@packages\PKG_AOX_APPOINTMENT_API.pls
 @@packages\PKG_AOX_PUBLIC_BOOKING_API.pls
+
+PROMPT --- Migraciones incrementales ---
+@@migrations\20260906_einvoice_webhook_durable.sql
 
 --------------------------------------------------------------------------------
 -- FASE 5: PAQUETES (IA)
