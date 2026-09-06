@@ -2212,6 +2212,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         v_arr := v_resp.get_array('resultado');
+
+        -- Salvaguarda: "respuesta=true" con "resultado=[]" puede ser legitimo (la org
+        -- nunca catastro ninguna tarjeta) o un hueco transitorio de Pagopar justo despues
+        -- del retorno del iframe (ver incidente 2026-09-06). No usamos una lista vacia para
+        -- decidir un borrado masivo: si el usuario elimina una tarjeta puntual, eso ya se
+        -- resuelve con pr_delete_card (local + Pagopar). Cortamos aca sin tocar filas ACTIVE.
+        IF v_arr.get_size = 0 THEN
+            RETURN;
+        END IF;
+
         FOR i IN 0 .. v_arr.get_size - 1 LOOP
             -- Extraer a variables PL/SQL: no usar json_object_t.* dentro de MERGE (ORA-40573).
             v_obj       := json_object_t(v_arr.get(i));
@@ -5342,10 +5352,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         pr_get_platform_keys(v_public_key, v_private_key);
 
         -- confirmar-tarjeta es obligatorio tras el retorno del iframe (exito o fallo).
+        -- Si falla, no abortamos (igual intentamos listar), pero lo dejamos logueado:
+        -- antes quedaba en silencio total y era indistinguible de "Pagopar no tiene
+        -- tarjeta" (incidente 2026-09-06).
         BEGIN
             v_list_raw := pkg_aox_pagopar_api.fn_confirm_card(v_public_key, v_private_key, TO_CHAR(v_org_id), v_return_url);
         EXCEPTION WHEN OTHERS THEN
-            NULL; -- si confirmar falla, seguimos e intentamos listar igual
+            pkg_aox_util.pr_log_api(
+                pi_api_name      => 'SUBSCRIPTION_CARD_CONFIRM',
+                pi_process_name  => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_CONFIRM_CARD.FN_CONFIRM_CARD',
+                pi_http_method   => 'POST', pi_endpoint => 'confirmar-tarjeta', pi_org_id => v_org_id, pi_status => 'WARN',
+                pi_error_code    => SQLCODE, pi_error_message => SQLERRM,
+                pi_error_stack   => DBMS_UTILITY.FORMAT_ERROR_STACK, pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_request_body  => pi_body
+            );
         END;
 
         -- listar-tarjeta -> persistir tarjetas ACTIVE.
