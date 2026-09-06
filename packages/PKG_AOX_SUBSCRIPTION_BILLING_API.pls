@@ -760,6 +760,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_payload         json_object_t := json_object_t();
         v_receptor        json_object_t := json_object_t();
         v_datos_op        json_object_t := json_object_t();
+        v_receptor_clob   CLOB;
     BEGIN
         -- Monto facturado = neto percibido; si amount=0 por crédito, emitir por gross (compensación).
         SELECT org_id_organization, description, amount, gross_amount, currency, payment_provider,
@@ -876,8 +877,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_payload.put('desMedioPago', v_des_medio);
 
         -- Snapshot receptor para NCE futura (no sobrescribir si ya existe).
+        -- Serializar en PL/SQL: json_object_t.to_clob() dentro de UPDATE/MERGE
+        -- dispara ORA-40573 (incidente QA A4 2026-09-06, invoices 121/122).
+        v_receptor_clob := v_receptor.to_clob();
         UPDATE /*+ no_parallel */ org_subscription_invoice
-           SET einvoice_receptor_snapshot = v_receptor.to_clob()
+           SET einvoice_receptor_snapshot = v_receptor_clob
          WHERE id_invoice = pi_invoice_id
            AND einvoice_receptor_snapshot IS NULL;
 
