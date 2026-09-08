@@ -506,6 +506,8 @@ CREATE OR REPLACE package body pkg_aox_util as
                 'login',
                 'register',
                 'hasel',
+                'explorar',
+                'explore',
                 'bookmate',
                 'www',
                 'app',
@@ -1652,41 +1654,44 @@ CREATE OR REPLACE package body pkg_aox_util as
     ) IS
         PRAGMA AUTONOMOUS_TRANSACTION;
     BEGIN
-        INSERT INTO aox_ai_log (
-            process_name,
-            session_id,
-            org_id,
-            user_id,
-            role_id,
-            pro_id,
-            status,
-            status_code,
-            error_code,
-            error_message,
-            error_stack,
-            error_backtrace,
-            prompt,
-            request_payload,
-            response_body,
-            parameters
-        ) VALUES (
-            SUBSTR(pi_process_name, 1, 200),
-            pi_session_id,
-            pi_org_id,
-            pi_user_id,
-            pi_role_id,
-            pi_pro_id,
-            SUBSTR(pi_status, 1, 30),
-            pi_status_code,
-            pi_error_code,
-            SUBSTR(pi_error_message, 1, 4000),
-            pi_error_stack,
-            pi_error_backtrace,
-            pi_prompt,
-            pi_request_payload,
-            pi_response_body,
-            pi_parameters
-        );
+        EXECUTE IMMEDIATE q'[
+            INSERT INTO aox_ai_log (
+                process_name,
+                session_id,
+                org_id,
+                user_id,
+                role_id,
+                pro_id,
+                status,
+                status_code,
+                error_code,
+                error_message,
+                error_stack,
+                error_backtrace,
+                prompt,
+                request_payload,
+                response_body,
+                parameters
+            ) VALUES (
+                :1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14, :15, :16
+            )]'
+            USING
+                SUBSTR(pi_process_name, 1, 200),
+                pi_session_id,
+                pi_org_id,
+                pi_user_id,
+                pi_role_id,
+                pi_pro_id,
+                SUBSTR(pi_status, 1, 30),
+                pi_status_code,
+                pi_error_code,
+                SUBSTR(pi_error_message, 1, 4000),
+                pi_error_stack,
+                pi_error_backtrace,
+                pi_prompt,
+                pi_request_payload,
+                pi_response_body,
+                pi_parameters;
         COMMIT;
     EXCEPTION
         WHEN OTHERS THEN
