@@ -1,0 +1,97 @@
+{
+  "version": "7.3",
+  "routing_model": {
+    "SURVEY": []
+  },
+  "screens": [
+    {
+      "id": "SURVEY",
+      "title": "Tu opinión",
+      "terminal": true,
+      "success": true,
+      "data": {
+        "heading": {
+          "type": "string",
+          "__example__": "¿Cómo te fue con Laura?"
+        },
+        "professional_name": {
+          "type": "string",
+          "__example__": "Laura"
+        },
+        "flow_token": {
+          "type": "string",
+          "__example__": "ENCUESTA_12345"
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "TextHeading",
+            "text": "${data.heading}"
+          },
+          {
+            "type": "TextBody",
+            "text": "Calificá tu visita. Tarda menos de 20 segundos."
+          },
+          {
+            "type": "Form",
+            "name": "survey_form",
+            "children": [
+              {
+                "type": "RadioButtonsGroup",
+                "name": "rating",
+                "label": "Calificación",
+                "required": true,
+                "data-source": [
+                  {
+                    "id": "5",
+                    "title": "★★★★★ Excelente"
+                  },
+                  {
+                    "id": "4",
+                    "title": "★★★★☆ Muy buena"
+                  },
+                  {
+                    "id": "3",
+                    "title": "★★★☆☆ Regular"
+                  },
+                  {
+                    "id": "2",
+                    "title": "★★☆☆☆ Mala"
+                  },
+                  {
+                    "id": "1",
+                    "title": "★☆☆☆☆ Muy mala"
+                  }
+                ]
+              },
+              {
+                "type": "TextArea",
+                "name": "comment",
+                "label": "Comentario",
+                "label-variant": "large",
+                "required": false,
+                "max-length": 400,
+                "helper-text": "Opcional. Si algo no estuvo bien, contanos para mejorar."
+              },
+              {
+                "type": "Footer",
+                "label": "Enviar opinión",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "rating": "${form.rating}",
+                    "comment": "${form.comment}",
+                    "professional_name": "${data.professional_name}",
+                    "flow_token": "${data.flow_token}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

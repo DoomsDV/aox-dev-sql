@@ -96,6 +96,29 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
         pi_payload IN VARCHAR2
     );
 
+    -- Programa encuesta CSAT al completar cita (si org tiene auto ON).
+    PROCEDURE pr_schedule_survey_on_complete (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    );
+
+    -- Envía WhatsApp Flow de encuesta (AUTOMATIC|MANUAL).
+    PROCEDURE pr_send_survey_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE,
+        pi_source         IN VARCHAR2,
+        pi_sent_by        IN NUMBER DEFAULT NULL
+    );
+
+    -- Job: envía encuestas CSAT pendientes (fin+2h, quiet hours, fatiga).
+    PROCEDURE pr_process_survey_requests (
+        pi_batch_size IN NUMBER DEFAULT 100
+    );
+
+    -- Webhook: respuesta nfm_reply del Flow de encuesta.
+    PROCEDURE pr_apply_survey_nfm_reply (
+        pi_response_json IN VARCHAR2,
+        pi_phone_from    IN VARCHAR2
+    );
+
     -- Registra el JSON crudo de cada POST del webhook WABA de Meta.
     PROCEDURE pr_log_webhook_meta (
         pi_payload IN CLOB
@@ -1560,6 +1583,503 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             pi_action         => v_action
         );
     END pr_apply_attendance_payload;
+
+    FUNCTION fn_survey_start_hour RETURN NUMBER IS
+    BEGIN
+        RETURN pkg_aox_util.fn_param_number('META_SURVEY_START_HOUR', 9);
+    END fn_survey_start_hour;
+
+    FUNCTION fn_survey_end_hour RETURN NUMBER IS
+    BEGIN
+        RETURN pkg_aox_util.fn_param_number('META_SURVEY_END_HOUR', 21);
+    END fn_survey_end_hour;
+
+    FUNCTION fn_survey_flow_token (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    ) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN 'ENCUESTA_' || pi_appointment_id;
+    END fn_survey_flow_token;
+
+    FUNCTION fn_compute_survey_due_at (
+        pi_end_time IN appointment.end_time%TYPE
+    ) RETURN TIMESTAMP IS
+        v_due   TIMESTAMP;
+        v_hour  NUMBER;
+        v_start NUMBER;
+        v_end   NUMBER;
+    BEGIN
+        IF pi_end_time IS NULL THEN
+            RETURN NULL;
+        END IF;
+
+        v_due   := pi_end_time + NUMTODSINTERVAL(2, 'HOUR');
+        v_hour  := TO_NUMBER(TO_CHAR(v_due, 'HH24'));
+        v_start := fn_survey_start_hour;
+        v_end   := fn_survey_end_hour;
+
+        IF v_hour < v_start THEN
+            v_due := TRUNC(v_due) + NUMTODSINTERVAL(v_start, 'HOUR');
+        ELSIF v_hour >= v_end THEN
+            v_due := TRUNC(v_due) + 1 + NUMTODSINTERVAL(v_start, 'HOUR');
+        END IF;
+
+        RETURN v_due;
+    END fn_compute_survey_due_at;
+
+    FUNCTION fn_is_survey_send_window_open (
+        pi_current_time IN TIMESTAMP DEFAULT NULL
+    ) RETURN BOOLEAN IS
+        v_now  TIMESTAMP;
+        v_hour NUMBER;
+    BEGIN
+        v_now := NVL(
+            pi_current_time,
+            CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP)
+        );
+        v_hour := TO_NUMBER(TO_CHAR(v_now, 'HH24'));
+        RETURN v_hour >= fn_survey_start_hour AND v_hour < fn_survey_end_hour;
+    END fn_is_survey_send_window_open;
+
+    FUNCTION fn_next_survey_window_start (
+        pi_current_time IN TIMESTAMP DEFAULT NULL
+    ) RETURN TIMESTAMP IS
+        v_now   TIMESTAMP;
+        v_hour  NUMBER;
+        v_start NUMBER;
+    BEGIN
+        v_now := NVL(
+            pi_current_time,
+            CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP)
+        );
+        v_hour  := TO_NUMBER(TO_CHAR(v_now, 'HH24'));
+        v_start := fn_survey_start_hour;
+
+        IF v_hour < v_start THEN
+            RETURN TRUNC(v_now) + NUMTODSINTERVAL(v_start, 'HOUR');
+        END IF;
+
+        RETURN TRUNC(v_now) + 1 + NUMTODSINTERVAL(v_start, 'HOUR');
+    END fn_next_survey_window_start;
+
+    PROCEDURE pr_schedule_survey_on_complete (
+        pi_appointment_id IN appointment.id_appointment%TYPE
+    ) IS
+        v_auto_enabled  NUMBER;
+        v_survey_status appointment.survey_status%TYPE;
+        v_end_time      appointment.end_time%TYPE;
+        v_due_at        TIMESTAMP;
+        v_flow_token    VARCHAR2(80);
+    BEGIN
+        SELECT NVL(ws.survey_auto_enabled, 0),
+               NVL(a.survey_status, 'NONE'),
+               a.end_time
+          INTO v_auto_enabled,
+               v_survey_status,
+               v_end_time
+          FROM appointment a
+          LEFT JOIN workspace_setting ws
+            ON ws.org_id_organization = a.org_id_organization
+         WHERE a.id_appointment = pi_appointment_id
+           AND a.status = 'COMPLETADO';
+
+        IF v_auto_enabled <> 1 OR v_survey_status <> 'NONE' THEN
+            RETURN;
+        END IF;
+
+        v_due_at := fn_compute_survey_due_at(v_end_time);
+        IF v_due_at IS NULL THEN
+            RETURN;
+        END IF;
+
+        v_flow_token := fn_survey_flow_token(pi_appointment_id);
+
+        UPDATE appointment
+           SET survey_status     = 'NOT_SENT',
+               survey_due_at     = v_due_at,
+               survey_flow_token = v_flow_token,
+               updated_at        = CURRENT_TIMESTAMP
+         WHERE id_appointment = pi_appointment_id
+           AND NVL(survey_status, 'NONE') = 'NONE';
+    END pr_schedule_survey_on_complete;
+
+    PROCEDURE pr_send_survey_wa (
+        pi_appointment_id IN appointment.id_appointment%TYPE,
+        pi_source         IN VARCHAR2,
+        pi_sent_by        IN NUMBER DEFAULT NULL
+    ) IS
+        v_source            VARCHAR2(20) := UPPER(TRIM(pi_source));
+        v_customer_name     customer.full_name%TYPE;
+        v_phone_number      customer.phone_number%TYPE;
+        v_professional_name professional.display_name%TYPE;
+        v_service_name      service.name%TYPE;
+        v_org_name          organization.name%TYPE;
+        v_profile_image     professional.profile_image_url%TYPE;
+        v_logo_url          workspace_setting.logo_url%TYPE;
+        v_status            appointment.status%TYPE;
+        v_survey_status     appointment.survey_status%TYPE;
+        v_cus_id            appointment.cus_id_customer%TYPE;
+        v_org_id            appointment.org_id_organization%TYPE;
+        v_clean_phone       VARCHAR2(30);
+        v_flow_token        VARCHAR2(80);
+        v_heading           VARCHAR2(200);
+        v_template_name     VARCHAR2(120);
+        v_image_url         VARCHAR2(500);
+        v_payload           CLOB;
+        v_flow_data_json    VARCHAR2(1000);
+        v_json_initialized  BOOLEAN := FALSE;
+        v_now_local         TIMESTAMP;
+        v_manual_today      NUMBER := 0;
+    BEGIN
+        IF v_source NOT IN ('AUTOMATIC', 'MANUAL') THEN
+            RAISE_APPLICATION_ERROR(-20070, 'Fuente de encuesta no válida.');
+        END IF;
+
+        v_now_local := CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP);
+
+        IF NOT fn_is_survey_send_window_open(v_now_local) THEN
+            RAISE_APPLICATION_ERROR(-20071, 'Las encuestas solo se envían entre las 9:00 y las 21:00.');
+        END IF;
+
+        SELECT a.status,
+               NVL(a.survey_status, 'NONE'),
+               a.cus_id_customer,
+               a.org_id_organization,
+               c.full_name,
+               c.phone_number,
+               NVL(p.display_name, 'tu profesional'),
+               s.name,
+               o.name,
+               p.profile_image_url,
+               ws.logo_url
+          INTO v_status,
+               v_survey_status,
+               v_cus_id,
+               v_org_id,
+               v_customer_name,
+               v_phone_number,
+               v_professional_name,
+               v_service_name,
+               v_org_name,
+               v_profile_image,
+               v_logo_url
+          FROM appointment a
+          JOIN customer c ON c.id_customer = a.cus_id_customer
+          JOIN professional p ON p.id_professional = a.pro_id_professional
+          JOIN service s ON s.id_service = a.ser_id_service
+          JOIN organization o ON o.id_organization = a.org_id_organization
+          LEFT JOIN workspace_setting ws ON ws.org_id_organization = a.org_id_organization
+         WHERE a.id_appointment = pi_appointment_id
+         FOR UPDATE OF a.survey_status;
+
+        IF v_status <> 'COMPLETADO' THEN
+            RAISE_APPLICATION_ERROR(-20072, 'Solo se puede enviar encuesta para citas completadas.');
+        END IF;
+
+        IF v_survey_status IN ('SENT', 'COMPLETED') THEN
+            RAISE_APPLICATION_ERROR(-20073, 'Esta cita ya tiene encuesta enviada o respondida.');
+        END IF;
+
+        IF v_source = 'MANUAL' THEN
+            SELECT COUNT(*)
+              INTO v_manual_today
+              FROM appointment a2
+             WHERE a2.org_id_organization = v_org_id
+               AND a2.cus_id_customer = v_cus_id
+               AND a2.survey_source = 'MANUAL'
+               AND a2.survey_sent_at >= TRUNC(v_now_local)
+               AND a2.survey_sent_at < TRUNC(v_now_local) + 1;
+
+            IF v_manual_today > 0 THEN
+                RAISE_APPLICATION_ERROR(-20074, 'Ya enviaste una encuesta manual a este cliente hoy.');
+            END IF;
+        END IF;
+
+        v_clean_phone := fn_clean_whatsapp_phone(v_phone_number);
+        IF v_clean_phone IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20075, 'El cliente no tiene un número de WhatsApp válido.');
+        END IF;
+
+        v_flow_token := fn_survey_flow_token(pi_appointment_id);
+        v_heading := '¿Cómo te fue con ' || v_professional_name || '?';
+        v_image_url := NVL(NULLIF(TRIM(v_profile_image), ''), NULLIF(TRIM(v_logo_url), ''));
+        v_template_name := TRIM(fn_get_parameter('META_WA_TEMPLATE_SURVEY'));
+
+        v_flow_data_json := '{"heading":"' ||
+            REPLACE(REPLACE(v_heading, '\', '\\'), '"', '\"') ||
+            '","professional_name":"' ||
+            REPLACE(REPLACE(v_professional_name, '\', '\\'), '"', '\"') ||
+            '","flow_token":"' || v_flow_token || '"}';
+
+        APEX_JSON.initialize_clob_output;
+        v_json_initialized := TRUE;
+        APEX_JSON.open_object;
+            APEX_JSON.write('messaging_product', 'whatsapp');
+            APEX_JSON.write('recipient_type', 'individual');
+            APEX_JSON.write('to', v_clean_phone);
+
+            IF v_template_name IS NOT NULL THEN
+                APEX_JSON.write('type', 'template');
+                APEX_JSON.open_object('template');
+                    APEX_JSON.write('name', v_template_name);
+                    APEX_JSON.open_object('language');
+                        APEX_JSON.write('code', NVL(fn_get_parameter('META_WA_TEMPLATE_LANG'), 'es'));
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_array('components');
+                        IF v_image_url IS NOT NULL THEN
+                            APEX_JSON.open_object;
+                                APEX_JSON.write('type', 'header');
+                                APEX_JSON.open_array('parameters');
+                                    APEX_JSON.open_object;
+                                        APEX_JSON.write('type', 'image');
+                                        APEX_JSON.open_object('image');
+                                            APEX_JSON.write('link', v_image_url);
+                                        APEX_JSON.close_object;
+                                    APEX_JSON.close_object;
+                                APEX_JSON.close_array;
+                            APEX_JSON.close_object;
+                        END IF;
+                        APEX_JSON.open_object;
+                            APEX_JSON.write('type', 'body');
+                            APEX_JSON.open_array('parameters');
+                                APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_customer_name); APEX_JSON.close_object;
+                                APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_professional_name); APEX_JSON.close_object;
+                                APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_service_name); APEX_JSON.close_object;
+                            APEX_JSON.close_array;
+                        APEX_JSON.close_object;
+                        APEX_JSON.open_object;
+                            APEX_JSON.write('type', 'button');
+                            APEX_JSON.write('sub_type', 'flow');
+                            APEX_JSON.write('index', '0');
+                            APEX_JSON.open_array('parameters');
+                                APEX_JSON.open_object;
+                                    APEX_JSON.write('type', 'action');
+                                    APEX_JSON.open_object('action');
+                                        APEX_JSON.write('flow_token', v_flow_token);
+                                        APEX_JSON.open_object('flow_action_data');
+                                            APEX_JSON.write('heading', v_heading);
+                                            APEX_JSON.write('professional_name', v_professional_name);
+                                            APEX_JSON.write('flow_token', v_flow_token);
+                                        APEX_JSON.close_object;
+                                    APEX_JSON.close_object;
+                                APEX_JSON.close_object;
+                            APEX_JSON.close_array;
+                        APEX_JSON.close_object;
+                    APEX_JSON.close_array;
+                APEX_JSON.close_object;
+            ELSE
+                APEX_JSON.write('type', 'interactive');
+                APEX_JSON.open_object('interactive');
+                    APEX_JSON.write('type', 'flow');
+                    APEX_JSON.open_object('header');
+                        APEX_JSON.write('type', 'text');
+                        APEX_JSON.write('text', 'Tu opinión');
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_object('body');
+                        APEX_JSON.write(
+                            'text',
+                            'Hola ' || v_customer_name || ', ¿cómo te fue con ' || v_professional_name ||
+                            '? Tocá Calificar.'
+                        );
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_object('footer');
+                        APEX_JSON.write('text', 'Hasel');
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_object('action');
+                        APEX_JSON.write('name', 'flow');
+                        APEX_JSON.open_object('parameters');
+                            APEX_JSON.write('flow_message_version', '3');
+                            APEX_JSON.write('flow_token', v_flow_token);
+                            APEX_JSON.write(
+                                'flow_id',
+                                NVL(fn_get_parameter('META_WA_FLOW_SURVEY'), '1047139264900441')
+                            );
+                            APEX_JSON.write('flow_cta', 'Calificar');
+                            APEX_JSON.write('flow_action', 'navigate');
+                            APEX_JSON.open_object('flow_action_payload');
+                                APEX_JSON.write('screen', 'SURVEY');
+                                APEX_JSON.write('data', v_flow_data_json);
+                            APEX_JSON.close_object;
+                        APEX_JSON.close_object;
+                    APEX_JSON.close_object;
+                APEX_JSON.close_object;
+            END IF;
+        APEX_JSON.close_object;
+
+        v_payload := APEX_JSON.get_clob_output;
+        APEX_JSON.free_output;
+        v_json_initialized := FALSE;
+
+        pr_post_whatsapp_message(pi_payload => v_payload);
+
+        UPDATE appointment
+           SET survey_status     = 'SENT',
+               survey_sent_at    = CURRENT_TIMESTAMP,
+               survey_source     = v_source,
+               survey_sent_by    = CASE WHEN v_source = 'MANUAL' THEN pi_sent_by ELSE NULL END,
+               survey_flow_token = v_flow_token,
+               survey_due_at     = NULL,
+               updated_at        = CURRENT_TIMESTAMP
+         WHERE id_appointment = pi_appointment_id;
+
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF v_json_initialized THEN
+                APEX_JSON.free_output;
+            END IF;
+            RAISE;
+    END pr_send_survey_wa;
+
+    PROCEDURE pr_process_survey_requests (
+        pi_batch_size IN NUMBER DEFAULT 100
+    ) IS
+        v_current_time    TIMESTAMP;
+        v_recent_same_pro NUMBER;
+        v_sent_today      NUMBER;
+        v_next_due        TIMESTAMP;
+    BEGIN
+        v_current_time := CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP);
+
+        IF NOT fn_is_survey_send_window_open(v_current_time) THEN
+            RETURN;
+        END IF;
+
+        FOR rec IN (
+            SELECT a.id_appointment,
+                   a.cus_id_customer,
+                   a.pro_id_professional
+              FROM appointment a
+              JOIN workspace_setting ws
+                ON ws.org_id_organization = a.org_id_organization
+             WHERE a.status = 'COMPLETADO'
+               AND a.survey_status = 'NOT_SENT'
+               AND a.survey_due_at IS NOT NULL
+               AND a.survey_due_at <= v_current_time
+               AND NVL(ws.survey_auto_enabled, 0) = 1
+             ORDER BY a.survey_due_at
+             FETCH FIRST NVL(pi_batch_size, 100) ROWS ONLY
+        ) LOOP
+            BEGIN
+                SELECT COUNT(*)
+                  INTO v_recent_same_pro
+                  FROM appointment a2
+                 WHERE a2.cus_id_customer = rec.cus_id_customer
+                   AND a2.pro_id_professional = rec.pro_id_professional
+                   AND a2.survey_status IN ('SENT', 'COMPLETED')
+                   AND a2.survey_sent_at >= v_current_time - 14;
+
+                IF v_recent_same_pro > 0 THEN
+                    UPDATE appointment
+                       SET survey_status = 'SKIPPED',
+                           survey_due_at = NULL,
+                           updated_at    = CURRENT_TIMESTAMP
+                     WHERE id_appointment = rec.id_appointment
+                       AND survey_status = 'NOT_SENT';
+                    COMMIT;
+                ELSE
+                    SELECT COUNT(*)
+                      INTO v_sent_today
+                      FROM appointment a3
+                     WHERE a3.cus_id_customer = rec.cus_id_customer
+                       AND a3.survey_status = 'SENT'
+                       AND a3.survey_sent_at >= TRUNC(v_current_time)
+                       AND a3.survey_sent_at < TRUNC(v_current_time) + 1;
+
+                    IF v_sent_today > 0 THEN
+                        v_next_due := fn_next_survey_window_start(v_current_time);
+                        UPDATE appointment
+                           SET survey_due_at = v_next_due,
+                               updated_at    = CURRENT_TIMESTAMP
+                         WHERE id_appointment = rec.id_appointment
+                           AND survey_status = 'NOT_SENT';
+                        COMMIT;
+                    ELSE
+                        pr_send_survey_wa(
+                            pi_appointment_id => rec.id_appointment,
+                            pi_source         => 'AUTOMATIC'
+                        );
+                    END IF;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+        END LOOP;
+    END pr_process_survey_requests;
+
+    PROCEDURE pr_apply_survey_nfm_reply (
+        pi_response_json IN VARCHAR2,
+        pi_phone_from    IN VARCHAR2
+    ) IS
+        v_json           json_object_t;
+        v_flow_token     VARCHAR2(80);
+        v_rating         NUMBER;
+        v_comment        VARCHAR2(400);
+        v_appointment_id appointment.id_appointment%TYPE;
+        v_clean_from     VARCHAR2(30);
+        v_customer_phone customer.phone_number%TYPE;
+        v_rows           NUMBER := 0;
+    BEGIN
+        IF pi_response_json IS NULL OR TRIM(pi_response_json) IS NULL THEN
+            RETURN;
+        END IF;
+
+        v_json := json_object_t.parse(pi_response_json);
+
+        IF v_json.has('flow_token') THEN
+            v_flow_token := TRIM(v_json.get_string('flow_token'));
+        END IF;
+
+        IF v_flow_token IS NULL OR UPPER(v_flow_token) NOT LIKE 'ENCUESTA_%' THEN
+            RETURN;
+        END IF;
+
+        v_appointment_id := TO_NUMBER(REGEXP_SUBSTR(v_flow_token, '[0-9]+$'));
+        v_rating := TO_NUMBER(v_json.get_string('rating'));
+
+        IF v_json.has('comment') THEN
+            v_comment := SUBSTR(TRIM(v_json.get_string('comment')), 1, 400);
+        END IF;
+
+        IF v_rating < 1 OR v_rating > 5 THEN
+            RAISE_APPLICATION_ERROR(-20076, 'Calificación de encuesta no válida.');
+        END IF;
+
+        v_clean_from := fn_clean_whatsapp_phone(pi_phone_from);
+
+        BEGIN
+            SELECT c.phone_number
+              INTO v_customer_phone
+              FROM appointment a
+              JOIN customer c ON c.id_customer = a.cus_id_customer
+             WHERE a.id_appointment = v_appointment_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(-20077, 'Encuesta no encontrada o teléfono no coincide.');
+        END;
+
+        IF fn_clean_whatsapp_phone(v_customer_phone) <> v_clean_from THEN
+            RAISE_APPLICATION_ERROR(-20077, 'Encuesta no encontrada o teléfono no coincide.');
+        END IF;
+
+        UPDATE appointment a
+           SET a.survey_status     = 'COMPLETED',
+               a.survey_score      = v_rating,
+               a.survey_comment    = v_comment,
+               a.survey_replied_at = CURRENT_TIMESTAMP,
+               a.updated_at        = CURRENT_TIMESTAMP
+         WHERE a.id_appointment = v_appointment_id
+           AND a.survey_status IN ('SENT', 'NOT_SENT');
+
+        v_rows := SQL%ROWCOUNT;
+
+        IF v_rows = 0 THEN
+            RAISE_APPLICATION_ERROR(-20077, 'Encuesta no encontrada o teléfono no coincide.');
+        END IF;
+
+        COMMIT;
+    END pr_apply_survey_nfm_reply;
 
     PROCEDURE pr_process_attendance_reminders (
         pi_batch_size IN NUMBER DEFAULT 100

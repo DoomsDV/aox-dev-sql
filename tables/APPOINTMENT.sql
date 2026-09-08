@@ -33,7 +33,16 @@ CREATE TABLE appointment (
   schedule_exception_start TIMESTAMP(6)           NULL,
   schedule_exception_end   TIMESTAMP(6)           NULL,
   schedule_exception_loc   NUMBER                 NULL,
-  schedule_exception_pro   NUMBER                 NULL
+  schedule_exception_pro   NUMBER                 NULL,
+  survey_status            VARCHAR2(20)           DEFAULT 'NONE' NOT NULL,
+  survey_due_at            TIMESTAMP(6) WITH TIME ZONE NULL,
+  survey_sent_at           TIMESTAMP(6) WITH TIME ZONE NULL,
+  survey_replied_at        TIMESTAMP(6) WITH TIME ZONE NULL,
+  survey_source            VARCHAR2(20)           NULL,
+  survey_sent_by           NUMBER                 NULL,
+  survey_score             NUMBER(1)              NULL,
+  survey_comment           VARCHAR2(400)          NULL,
+  survey_flow_token        VARCHAR2(80)           NULL
 )
   INITRANS  10
   STORAGE (

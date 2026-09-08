@@ -92,6 +92,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_recommendations CLOB;
         v_attach_arr   json_array_t := json_array_t();
         v_attach_obj   json_object_t;
+        v_survey_status appointment.survey_status%TYPE;
+        v_survey_score  appointment.survey_score%TYPE;
     BEGIN
         v_obj.put('start_time', TO_CHAR(pi_start_time, 'YYYY-MM-DD"T"HH24:MI:SS'));
         IF pi_end_time IS NOT NULL THEN
@@ -107,6 +109,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         -- Flags de historial (Fase 4): solo si el plan incluye APPOINTMENT_HISTORY.
         IF pi_app_id IS NOT NULL THEN
             v_obj.put('id_appointment', pi_app_id);
+            BEGIN
+                SELECT NVL(a.survey_status, 'NONE'), a.survey_score
+                  INTO v_survey_status, v_survey_score
+                  FROM appointment a
+                 WHERE a.id_appointment = pi_app_id;
+
+                v_obj.put('survey_status', v_survey_status);
+                IF v_survey_score IS NOT NULL THEN
+                    v_obj.put('survey_score', v_survey_score);
+                END IF;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    NULL;
+            END;
             IF NVL(pi_history_enabled, 0) = 1 THEN
                 SELECT COUNT(*)
                   INTO v_has_notes

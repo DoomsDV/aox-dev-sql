@@ -412,6 +412,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_rsi_id_slot_interval    workspace_setting.rsi_id_slot_interval%type;
         v_rh_id_reminder_hours    workspace_setting.rh_id_reminder_hours%type;
         v_cwh_id_cancel_wait      workspace_setting.cwh_id_cancel_wait_hours%type;
+        v_survey_auto_enabled     workspace_setting.survey_auto_enabled%type;
         v_slot_minutes            ref_booking_slot_interval.minutes_value%type;
         v_reminder_hours          ref_reminder_hours.hours_value%type;
         v_cancel_wait_hours       ref_cancel_wait_hours.hours_value%type;
@@ -447,6 +448,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             ws.rsi_id_slot_interval,
             ws.rh_id_reminder_hours,
             ws.cwh_id_cancel_wait_hours,
+            NVL(ws.survey_auto_enabled, 0),
             rsi.minutes_value,
             rh.hours_value,
             cwh.hours_value
@@ -469,6 +471,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             v_rsi_id_slot_interval,
             v_rh_id_reminder_hours,
             v_cwh_id_cancel_wait,
+            v_survey_auto_enabled,
             v_slot_minutes,
             v_reminder_hours,
             v_cancel_wait_hours
@@ -527,6 +530,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_org_obj.put('rsi_id_slot_interval'    , v_rsi_id_slot_interval);
         v_org_obj.put('rh_id_reminder_hours'    , v_rh_id_reminder_hours);
         v_org_obj.put('cwh_id_cancel_wait_hours', v_cwh_id_cancel_wait);
+        v_org_obj.put('survey_auto_enabled', v_survey_auto_enabled);
         v_org_obj.put('booking_slot_interval_minutes', nvl(v_slot_minutes, 30));
         v_org_obj.put('reminder_hours_before'   , nvl(v_reminder_hours, 24));
         v_org_obj.put('cancel_wait_hours'       , v_cancel_wait_hours);
@@ -578,6 +582,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_rsi_id_slot_interval          workspace_setting.rsi_id_slot_interval%type;
         v_rh_id_reminder_hours          workspace_setting.rh_id_reminder_hours%type;
         v_cwh_id_cancel_wait_hours      workspace_setting.cwh_id_cancel_wait_hours%type;
+        v_survey_auto_enabled           workspace_setting.survey_auto_enabled%type;
         v_notify_all_professionals      org_member.notify_all_professionals%type;
         v_current_rsi_id                workspace_setting.rsi_id_slot_interval%type;
         v_current_rh_id                 workspace_setting.rh_id_reminder_hours%type;
@@ -606,6 +611,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_has_rsi_id_slot_interval      pls_integer := 0;
         v_has_rh_id_reminder_hours      pls_integer := 0;
         v_has_cwh_id_cancel_wait        pls_integer := 0;
+        v_has_survey_auto_enabled       pls_integer := 0;
         v_has_notify_all_professionals  pls_integer := 0;
 
         v_facebook_url                  workspace_setting.facebook_url%type;
@@ -700,6 +706,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         if v_json_req.has('cwh_id_cancel_wait_hours') then
             v_has_cwh_id_cancel_wait := 1;
         end if;
+        if v_json_req.has('survey_auto_enabled') then
+            v_has_survey_auto_enabled := 1;
+        end if;
         if v_json_req.has('notify_all_professionals') then
             v_has_notify_all_professionals := 1;
         end if;
@@ -717,6 +726,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_rsi_id_slot_interval    := fn_get_optional_number(v_json_req      , 'rsi_id_slot_interval');
         v_rh_id_reminder_hours    := fn_get_optional_number(v_json_req      , 'rh_id_reminder_hours');
         v_cwh_id_cancel_wait_hours := fn_get_optional_number(v_json_req     , 'cwh_id_cancel_wait_hours');
+        if v_json_req.has('survey_auto_enabled') then
+            begin
+                if nvl(v_json_req.get_number('survey_auto_enabled'), 0) = 1 then
+                    v_survey_auto_enabled := 1;
+                else
+                    v_survey_auto_enabled := 0;
+                end if;
+            exception
+                when others then
+                    if lower(trim(nvl(v_json_req.get_string('survey_auto_enabled'), ''))) in ('true', '1', 'y', 'yes') then
+                        v_survey_auto_enabled := 1;
+                    else
+                        v_survey_auto_enabled := 0;
+                    end if;
+            end;
+        end if;
         v_notify_all_professionals := upper(fn_get_optional_string(v_json_req, 'notify_all_professionals'));
 
         v_logo_base64             := fn_get_optional_clob(v_json_req        , 'logo_base64');
@@ -917,6 +942,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
            v_has_time_format + v_has_theme_pref + v_has_hidden_public_price_label +
            v_has_unanswered_alert_action +
            v_has_rsi_id_slot_interval + v_has_rh_id_reminder_hours + v_has_cwh_id_cancel_wait +
+           v_has_survey_auto_enabled +
            v_has_notify_all_professionals) = 0
            and v_logo_base64 is null
            and v_banner_base64 is null
@@ -1058,6 +1084,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 rsi_id_slot_interval = case when v_has_rsi_id_slot_interval = 1 then v_rsi_id_slot_interval else ws.rsi_id_slot_interval end,
                 rh_id_reminder_hours = case when v_has_rh_id_reminder_hours = 1 then v_rh_id_reminder_hours else ws.rh_id_reminder_hours end,
                 cwh_id_cancel_wait_hours = case when v_has_cwh_id_cancel_wait = 1 then v_cwh_id_cancel_wait_hours else ws.cwh_id_cancel_wait_hours end,
+                survey_auto_enabled = case when v_has_survey_auto_enabled = 1 then v_survey_auto_enabled else ws.survey_auto_enabled end,
                 updated_at      = current_timestamp
         when not matched then
             insert (
@@ -1074,7 +1101,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 unanswered_alert_action,
                 rsi_id_slot_interval,
                 rh_id_reminder_hours,
-                cwh_id_cancel_wait_hours
+                cwh_id_cancel_wait_hours,
+                survey_auto_enabled
             )
             values (
                 src.id_org,
@@ -1097,7 +1125,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
                 CASE
                     WHEN NVL(v_unanswered_alert_action, 'KEEP') = 'CANCEL' THEN v_cwh_id_cancel_wait_hours
                     ELSE NULL
-                END
+                END,
+                NVL(v_survey_auto_enabled, 0)
             );
 
         -- Preferencia personal del admin: fan-out de pushes de otros profesionales

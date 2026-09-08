@@ -23,7 +23,8 @@ CREATE TABLE workspace_setting (
   unanswered_alert_action VARCHAR2(20)   DEFAULT 'KEEP' NULL,
   rsi_id_slot_interval    NUMBER         NULL,
   rh_id_reminder_hours    NUMBER         NULL,
-  cwh_id_cancel_wait_hours NUMBER        NULL
+  cwh_id_cancel_wait_hours NUMBER        NULL,
+  survey_auto_enabled      NUMBER(1)     DEFAULT 0 NOT NULL
 )
   INITRANS  10
   STORAGE (

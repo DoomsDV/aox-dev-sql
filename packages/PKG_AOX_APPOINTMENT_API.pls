@@ -65,6 +65,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_appointment_api IS
         po_response_body OUT CLOB
     );
 
+    -- Envío manual de encuesta CSAT por WhatsApp Flow.
+    PROCEDURE pr_send_appointment_survey(
+        pi_auth_header   IN  VARCHAR2,
+        pi_app_id        IN  NUMBER,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- Fase 4: subir un adjunto al historial de una cita (Premium: APPOINTMENT_HISTORY).
     -- El body es JSON: { "file_base64": "...", "filename": "...", "mime_type": "..." }
     PROCEDURE pr_upload_attachment(
@@ -1719,6 +1727,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 );
         END IF;
 
+        IF v_status = 'COMPLETADO' AND NVL(v_old_status, '-') <> 'COMPLETADO' THEN
+            pkg_aox_meta_api.pr_schedule_survey_on_complete(pi_appointment_id => pi_app_id);
+        END IF;
+
         COMMIT;
 
         BEGIN
@@ -2122,6 +2134,102 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 po_response_body => po_response_body
             );
     END pr_approve_schedule_exception;
+
+    PROCEDURE pr_send_appointment_survey(
+        pi_auth_header   IN  VARCHAR2,
+        pi_app_id        IN  NUMBER,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_user_id       NUMBER;
+        v_actual_pro_id NUMBER;
+        v_app_org_id    NUMBER;
+        v_app_pro_id    NUMBER;
+        v_response_json json_object_t := json_object_t();
+    BEGIN
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+
+        IF NVL(v_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+        END IF;
+
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+
+        BEGIN
+            SELECT org_id_organization, pro_id_professional
+              INTO v_app_org_id, v_app_pro_id
+              FROM appointment
+             WHERE id_appointment = pi_app_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(-20004, 'Cita no encontrada.');
+        END;
+
+        IF v_app_org_id <> v_org_id THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+        END IF;
+
+        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            BEGIN
+                SELECT id_professional
+                  INTO v_actual_pro_id
+                  FROM professional
+                 WHERE usr_id_user = v_user_id
+                   AND org_id_organization = v_org_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20001, 'Perfil no asignado.');
+            END;
+
+            IF v_app_pro_id <> v_actual_pro_id THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+            END IF;
+        END IF;
+
+        pkg_aox_meta_api.pr_send_survey_wa(
+            pi_appointment_id => pi_app_id,
+            pi_source         => 'MANUAL',
+            pi_sent_by        => v_user_id
+        );
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('message', 'Encuesta enviada por WhatsApp.');
+        po_response_body := v_response_json.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            po_status_code := CASE
+                WHEN SQLCODE = pkg_aox_util.c_sqlcode_forbidden THEN pkg_aox_util.c_forbidden_code
+                WHEN SQLCODE IN (-20004, -20009) THEN pkg_aox_util.c_not_found_code
+                WHEN SQLCODE BETWEEN -20070 AND -20077 THEN pkg_aox_util.c_bad_request_code
+                ELSE pkg_aox_util.c_internal_error_code
+            END;
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'APPOINTMENTS_SURVEY',
+                pi_process_name    => 'PKG_AOX_APPOINTMENT_API.PR_SEND_APPOINTMENT_SURVEY',
+                pi_http_method     => 'POST',
+                pi_endpoint        => '/appointments/:id/survey',
+                pi_org_id          => v_org_id,
+                pi_user_id         => v_user_id,
+                pi_status          => 'ERROR',
+                pi_status_code     => po_status_code,
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_request_params  => 'appointment_id=' || pi_app_id
+            );
+            pkg_aox_util.pr_build_api_error_response(
+                pi_status_code   => po_status_code,
+                pi_api_code      => pkg_aox_util.fn_resolve_api_code(po_status_code, SQLCODE, SQLERRM),
+                pi_message       => pkg_aox_util.fn_clean_sqlerrm(SQLERRM),
+                po_response_body => po_response_body
+            );
+    END pr_send_appointment_survey;
 
     -- Función de Soporte: Parseo ISO a TIMESTAMP WITH TIME ZONE
     FUNCTION fn_parse_iso_date(pi_iso_str IN VARCHAR2) RETURN TIMESTAMP WITH TIME ZONE IS
