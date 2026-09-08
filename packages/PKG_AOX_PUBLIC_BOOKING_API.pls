@@ -23,6 +23,17 @@ CREATE OR REPLACE PACKAGE pkg_aox_public_booking_api IS
         po_response_body OUT CLOB
     );
 
+    -- Directorio publico /explorar: busqueda de negocios elegibles (tope 12, sin paginacion)
+    PROCEDURE pr_search_org_directory(
+        pi_query         IN  VARCHAR2 DEFAULT NULL,
+        pi_specialty     IN  VARCHAR2 DEFAULT NULL,
+        pi_city_id       IN  NUMBER   DEFAULT NULL,
+        pi_department_id IN  NUMBER   DEFAULT NULL,
+        pi_offset        IN  NUMBER   DEFAULT 0,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- Perfil público global por platform_user.public_slug (/u/:slug)
     PROCEDURE pr_get_user_public_profile(
         pi_public_slug   IN  VARCHAR2,
@@ -1212,6 +1223,288 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 pi_request_params  => 'org_slug=' || pi_org_slug
             );
     END pr_get_org_hub;
+
+    PROCEDURE pr_search_org_directory(
+        pi_query         IN  VARCHAR2 DEFAULT NULL,
+        pi_specialty     IN  VARCHAR2 DEFAULT NULL,
+        pi_city_id       IN  NUMBER   DEFAULT NULL,
+        pi_department_id IN  NUMBER   DEFAULT NULL,
+        pi_offset        IN  NUMBER   DEFAULT 0,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        c_limit CONSTANT PLS_INTEGER := 12;
+
+        v_response_json json_object_t := json_object_t();
+        v_data_obj      json_object_t := json_object_t();
+        v_items_arr     json_array_t  := json_array_t();
+        v_facets_obj    json_object_t := json_object_t();
+        v_spec_arr      json_array_t  := json_array_t();
+        v_cities_arr    json_array_t  := json_array_t();
+        v_item_obj      json_object_t;
+        v_spec_obj      json_object_t;
+        v_city_obj      json_object_t;
+
+        v_query         VARCHAR2(500);
+        v_specialty     VARCHAR2(30);
+        v_row_count     PLS_INTEGER := 0;
+        v_has_more      BOOLEAN := FALSE;
+        v_offset        PLS_INTEGER;
+    BEGIN
+        BEGIN
+            pkg_aox_util.pr_assert_rate_limit(
+                pi_scope        => 'PUBLIC_ORG_DIRECTORY',
+                pi_key          => pkg_aox_util.fn_client_ip,
+                pi_max_attempts => pkg_aox_util.fn_param_number('RATE_LIMIT_PUBLIC_DIRECTORY_MAX', 60),
+                pi_window_sec   => pkg_aox_util.fn_param_number('RATE_LIMIT_PUBLIC_DIRECTORY_WINDOW_SEC', 900)
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF SQLCODE = pkg_aox_util.c_sqlcode_rate_limit THEN
+                    po_status_code := pkg_aox_util.c_too_many_requests_code;
+                    pkg_aox_util.pr_build_api_error_response(
+                        pi_status_code   => po_status_code,
+                        pi_api_code      => pkg_aox_util.c_api_code_rate_limited,
+                        pi_message       => REGEXP_REPLACE(SQLERRM, '^ORA-[0-9]+: ', ''),
+                        po_response_body => po_response_body
+                    );
+                    RETURN;
+                END IF;
+                RAISE;
+        END;
+
+        v_offset := NVL(pi_offset, 0);
+        IF v_offset > 0 THEN
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'La paginación no está disponible en este endpoint.');
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        v_query := LOWER(TRIM(pi_query));
+        IF v_query = '' THEN
+            v_query := NULL;
+        END IF;
+
+        v_specialty := UPPER(TRIM(pi_specialty));
+        IF v_specialty = '' THEN
+            v_specialty := NULL;
+        END IF;
+
+        FOR rec IN (
+            WITH primary_loc AS (
+                SELECT
+                    l.org_id_organization,
+                    l.cit_id_city,
+                    l.dep_id_department,
+                    l.latitude,
+                    l.longitude,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY l.org_id_organization
+                        ORDER BY l.id_location
+                    ) AS rn
+                FROM location l
+                WHERE l.is_active = 1
+            ),
+            eligible AS (
+                SELECT
+                    o.id_organization,
+                    ws.profile_slug AS org_slug,
+                    o.name AS org_name,
+                    ws.logo_url,
+                    ws.banner_url,
+                    os.code AS specialty_code,
+                    os.name AS specialty_label,
+                    pl.cit_id_city AS city_id,
+                    c.description AS city_name,
+                    pl.dep_id_department AS department_id,
+                    pl.latitude,
+                    pl.longitude
+                FROM workspace_setting ws
+                JOIN organization o
+                  ON o.id_organization = ws.org_id_organization
+                JOIN primary_loc pl
+                  ON pl.org_id_organization = o.id_organization
+                 AND pl.rn = 1
+                JOIN cities c
+                  ON c.id_city = pl.cit_id_city
+                LEFT JOIN org_specialty os
+                  ON os.id_org_specialty = o.org_spe_id_specialty
+                 AND os.is_active = 1
+                WHERE ws.profile_slug IS NOT NULL
+                  AND TRIM(ws.profile_slug) IS NOT NULL
+                  AND pkg_aox_util.fn_is_reserved_org_slug(ws.profile_slug) = 0
+                  AND pkg_aox_payment_settings_api.fn_org_is_unpublished(o.id_organization) = 0
+                  AND pkg_aox_subscription_api.fn_get_subscription_state(o.id_organization)
+                      NOT IN ('READ_ONLY', 'CANCELED', 'TRIAL_EXPIRED')
+            )
+            SELECT *
+              FROM eligible e
+             WHERE (v_query IS NULL OR (
+                    LOWER(e.org_name) LIKE '%' || v_query || '%'
+                    OR LOWER(e.org_slug) LIKE '%' || v_query || '%'
+               ))
+               AND (v_specialty IS NULL OR e.specialty_code = v_specialty)
+               AND (pi_city_id IS NULL OR e.city_id = pi_city_id)
+               AND (pi_department_id IS NULL OR e.department_id = pi_department_id)
+             ORDER BY LOWER(e.org_name), LOWER(e.org_slug)
+             FETCH FIRST c_limit + 1 ROWS ONLY
+        ) LOOP
+            v_row_count := v_row_count + 1;
+            IF v_row_count > c_limit THEN
+                v_has_more := TRUE;
+                EXIT;
+            END IF;
+
+            v_item_obj := json_object_t();
+            v_item_obj.put('slug', rec.org_slug);
+            v_item_obj.put('name', rec.org_name);
+            v_item_obj.put('logo_url', NVL(rec.logo_url, ''));
+            v_item_obj.put('banner_url', NVL(rec.banner_url, ''));
+
+            v_spec_obj := json_object_t();
+            v_spec_obj.put('code', NVL(rec.specialty_code, ''));
+            v_spec_obj.put('label', NVL(rec.specialty_label, ''));
+            v_item_obj.put('specialty', v_spec_obj);
+
+            v_item_obj.put('city_name', NVL(rec.city_name, ''));
+            IF rec.latitude IS NOT NULL THEN
+                v_item_obj.put('latitude', rec.latitude);
+            END IF;
+            IF rec.longitude IS NOT NULL THEN
+                v_item_obj.put('longitude', rec.longitude);
+            END IF;
+
+            v_items_arr.append(v_item_obj);
+        END LOOP;
+
+        FOR spec_rec IN (
+            WITH primary_loc AS (
+                SELECT
+                    l.org_id_organization,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY l.org_id_organization
+                        ORDER BY l.id_location
+                    ) AS rn
+                FROM location l
+                WHERE l.is_active = 1
+            ),
+            eligible AS (
+                SELECT
+                    o.id_organization,
+                    os.code AS specialty_code,
+                    os.name AS specialty_label
+                FROM workspace_setting ws
+                JOIN organization o
+                  ON o.id_organization = ws.org_id_organization
+                JOIN primary_loc pl
+                  ON pl.org_id_organization = o.id_organization
+                 AND pl.rn = 1
+                LEFT JOIN org_specialty os
+                  ON os.id_org_specialty = o.org_spe_id_specialty
+                 AND os.is_active = 1
+                WHERE ws.profile_slug IS NOT NULL
+                  AND TRIM(ws.profile_slug) IS NOT NULL
+                  AND pkg_aox_util.fn_is_reserved_org_slug(ws.profile_slug) = 0
+                  AND os.code IS NOT NULL
+                  AND pkg_aox_payment_settings_api.fn_org_is_unpublished(o.id_organization) = 0
+                  AND pkg_aox_subscription_api.fn_get_subscription_state(o.id_organization)
+                      NOT IN ('READ_ONLY', 'CANCELED', 'TRIAL_EXPIRED')
+            )
+            SELECT DISTINCT
+                e.specialty_code,
+                e.specialty_label
+              FROM eligible e
+             ORDER BY LOWER(e.specialty_label)
+        ) LOOP
+            v_spec_obj := json_object_t();
+            v_spec_obj.put('code', spec_rec.specialty_code);
+            v_spec_obj.put('label', spec_rec.specialty_label);
+            v_spec_arr.append(v_spec_obj);
+        END LOOP;
+
+        FOR city_rec IN (
+            WITH primary_loc AS (
+                SELECT
+                    l.org_id_organization,
+                    l.cit_id_city,
+                    l.dep_id_department,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY l.org_id_organization
+                        ORDER BY l.id_location
+                    ) AS rn
+                FROM location l
+                WHERE l.is_active = 1
+            ),
+            eligible AS (
+                SELECT
+                    o.id_organization,
+                    pl.cit_id_city AS city_id,
+                    c.description AS city_name,
+                    pl.dep_id_department AS department_id
+                FROM workspace_setting ws
+                JOIN organization o
+                  ON o.id_organization = ws.org_id_organization
+                JOIN primary_loc pl
+                  ON pl.org_id_organization = o.id_organization
+                 AND pl.rn = 1
+                JOIN cities c
+                  ON c.id_city = pl.cit_id_city
+                WHERE ws.profile_slug IS NOT NULL
+                  AND TRIM(ws.profile_slug) IS NOT NULL
+                  AND pkg_aox_util.fn_is_reserved_org_slug(ws.profile_slug) = 0
+                  AND pkg_aox_payment_settings_api.fn_org_is_unpublished(o.id_organization) = 0
+                  AND pkg_aox_subscription_api.fn_get_subscription_state(o.id_organization)
+                      NOT IN ('READ_ONLY', 'CANCELED', 'TRIAL_EXPIRED')
+            )
+            SELECT DISTINCT
+                e.city_id,
+                e.city_name,
+                e.department_id
+              FROM eligible e
+             ORDER BY LOWER(e.city_name)
+        ) LOOP
+            v_city_obj := json_object_t();
+            v_city_obj.put('id', city_rec.city_id);
+            v_city_obj.put('name', city_rec.city_name);
+            v_city_obj.put('department_id', city_rec.department_id);
+            v_cities_arr.append(v_city_obj);
+        END LOOP;
+
+        v_facets_obj.put('specialties', v_spec_arr);
+        v_facets_obj.put('cities', v_cities_arr);
+
+        v_data_obj.put('items', v_items_arr);
+        v_data_obj.put('has_more', CASE WHEN v_has_more THEN TRUE ELSE FALSE END);
+        v_data_obj.put('facets', v_facets_obj);
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data', v_data_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'PUBLIC_ORG_DIRECTORY',
+                pi_process_name    => 'PKG_AOX_PUBLIC_BOOKING_API.PR_SEARCH_ORG_DIRECTORY',
+                pi_http_method     => 'GET',
+                pi_endpoint        => '/public/directory',
+                pi_status          => 'ERROR',
+                pi_status_code     => po_status_code,
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_request_params  =>
+                    'query=' || NVL(pi_query, '') ||
+                    ',specialty=' || NVL(pi_specialty, '') ||
+                    ',city_id=' || NVL(TO_CHAR(pi_city_id), '') ||
+                    ',department_id=' || NVL(TO_CHAR(pi_department_id), '')
+            );
+    END pr_search_org_directory;
 
     PROCEDURE pr_get_user_public_profile(
         pi_public_slug   IN  VARCHAR2,
