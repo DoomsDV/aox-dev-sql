@@ -529,6 +529,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
                 on ra.id_addon = oa.rad_id_addon
              where oa.org_id_organization = v_org_id
                and oa.status = 'ACTIVE'
+               and ra.is_active = 1
                and (
                     oa.grant_type = 'PAID'
                     or fn_addons_billing_live = 0

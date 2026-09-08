@@ -156,7 +156,7 @@ USING (
          59000 AS price_amount,
          'PYG' AS currency,
          'MONTHLY' AS billing_period,
-         1 AS is_active,
+         0 AS is_active, -- stand-by; ver 20260907_body_map_addon_standby.sql
          2 AS sort_order,
          1 AS requires_specialty_bridge
     FROM dual
