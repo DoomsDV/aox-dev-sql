@@ -2,12 +2,13 @@ PROMPT CREATE OR REPLACE PACKAGE pkg_aox_jwt
 CREATE OR REPLACE package pkg_aox_jwt as
 
     procedure pr_generate_auth_tokens(
-        pi_user_id       in  number,
-        pi_org_id        in  number,
-        pi_username      in  varchar2,
-        pi_role_id       in  number,       -- ¡Cambiado a NUMBER!
-        po_access_token  out clob,
-        po_refresh_token out varchar2
+        pi_user_id         in  number,
+        pi_org_id          in  number,
+        pi_username        in  varchar2,
+        pi_role_id         in  number,       -- ¡Cambiado a NUMBER!
+        po_access_token    out clob,
+        po_refresh_token   out varchar2,
+        pi_session_family  in  varchar2 default null
     );
 
     procedure pr_refresh_token(
@@ -32,16 +33,20 @@ PROMPT CREATE OR REPLACE PACKAGE BODY pkg_aox_jwt
 CREATE OR REPLACE package body pkg_aox_jwt as
 
     procedure pr_generate_auth_tokens(
-        pi_user_id       in  number,
-        pi_org_id        in  number,
-        pi_username      in  varchar2,
-        pi_role_id       in  number,       -- ¡Cambiado a NUMBER!
-        po_access_token  out clob,
-        po_refresh_token out varchar2
+        pi_user_id         in  number,
+        pi_org_id          in  number,
+        pi_username        in  varchar2,
+        pi_role_id         in  number,       -- ¡Cambiado a NUMBER!
+        po_access_token    out clob,
+        po_refresh_token   out varchar2,
+        pi_session_family  in  varchar2 default null
     ) is
         v_jwt_secret       raw(256);
         v_refresh_token    varchar2(255);
         v_max_sessions     number;
+        v_session_family   varchar2(64);
+        v_user_agent       varchar2(400);
+        v_ip_address       varchar2(45);
     begin
         -- 1. Generar el Access Token (JWT) - Expira en 1 hora
         v_jwt_secret := utl_raw.cast_to_raw(fn_get_parameter('JWT_TOKEN'));
@@ -60,16 +65,37 @@ CREATE OR REPLACE package body pkg_aox_jwt as
         v_refresh_token := lower(rawtohex(sys_guid()) || rawtohex(sys_guid()));
         po_refresh_token := v_refresh_token;
 
+        v_session_family := nullif(trim(pi_session_family), '');
+        if v_session_family is null then
+            v_session_family := lower(rawtohex(sys_guid()));
+        end if;
+
+        begin
+            v_user_agent := substr(owa_util.get_cgi_env('HTTP_USER_AGENT'), 1, 400);
+        exception
+            when others then
+                v_user_agent := null;
+        end;
+        v_ip_address := substr(pkg_aox_util.fn_client_ip, 1, 45);
+
         -- 3. Guardar el Refresh Token en la base de datos
         insert into app_user_session (
           use_id_user,
           refresh_token,
-          expires_at
+          expires_at,
+          session_family,
+          user_agent,
+          ip_address,
+          last_seen_at
         )
         values (
             pi_user_id,
             v_refresh_token,
-            current_timestamp + NUMTODSINTERVAL(pkg_aox_util.fn_param_number('JWT_REFRESH_EXP_DAYS', 30), 'DAY')
+            current_timestamp + NUMTODSINTERVAL(pkg_aox_util.fn_param_number('JWT_REFRESH_EXP_DAYS', 30), 'DAY'),
+            v_session_family,
+            v_user_agent,
+            v_ip_address,
+            current_timestamp
         );
 
         -- Higiene de sesiones: se permite multi-dispositivo, pero se tope la cantidad de
@@ -109,6 +135,7 @@ CREATE OR REPLACE package body pkg_aox_jwt as
         v_is_active      org_member.is_active%TYPE;
         v_pu_active      platform_user.is_active%TYPE;
         v_id_rol         ROLE.id_role%type;
+        v_session_family app_user_session.session_family%TYPE;
 
         -- Nuevos tokens
         v_new_access     clob;
@@ -146,14 +173,16 @@ CREATE OR REPLACE package body pkg_aox_jwt as
                 pu.apex_user_name,
                 m.is_active,
                 m.rol_id_role,
-                pu.is_active
+                pu.is_active,
+                s.session_family
             into
                 v_user_id,
                 v_org_id,
                 v_identifier,
                 v_is_active,
                 v_id_rol,
-                v_pu_active
+                v_pu_active,
+                v_session_family
             from app_user_session s
             join org_member m on m.id_org_member = s.use_id_user
             join platform_user pu on pu.id_platform_user = m.platform_user_id
@@ -193,12 +222,13 @@ CREATE OR REPLACE package body pkg_aox_jwt as
 
         -- 5. Generar un nuevo par de tokens usando el proceso que ya creamos
         pkg_aox_jwt.pr_generate_auth_tokens(
-            pi_user_id       => v_user_id,
-            pi_org_id        => v_org_id,
-            pi_username      => v_identifier,
-            pi_role_id       => v_id_rol,
-            po_access_token  => v_new_access,
-            po_refresh_token => v_new_refresh
+            pi_user_id         => v_user_id,
+            pi_org_id          => v_org_id,
+            pi_username        => v_identifier,
+            pi_role_id         => v_id_rol,
+            po_access_token    => v_new_access,
+            po_refresh_token   => v_new_refresh,
+            pi_session_family  => v_session_family
         );
 
         -- 6. Devolver el éxito

@@ -78,6 +78,20 @@ CREATE OR REPLACE package pkg_aox_auth_api as
         po_response_body out clob
     );
 
+    procedure pr_list_sessions(
+        pi_auth_header   in  varchar2,
+        pi_body          in  clob,
+        po_status_code   out number,
+        po_response_body out clob
+    );
+
+    procedure pr_revoke_session(
+        pi_auth_header   in  varchar2,
+        pi_body          in  clob,
+        po_status_code   out number,
+        po_response_body out clob
+    );
+
     procedure pr_verify_email(
         pi_body          in  clob,
         po_status_code   out number,
@@ -1517,6 +1531,205 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
             v_response_json.put('message', 'Error interno al cerrar sesión.');
             po_response_body := v_response_json.to_clob();
     end pr_logout;
+
+    procedure pr_list_sessions(
+        pi_auth_header   in  varchar2,
+        pi_body          in  clob,
+        po_status_code   out number,
+        po_response_body out clob
+    ) is
+        v_caller_member_id   org_member.id_org_member%type;
+        v_platform_user_id   platform_user.id_platform_user%type;
+        v_refresh_token      varchar2(255);
+        v_json_req           json_object_t;
+        v_sessions           json_array_t := json_array_t();
+        v_item               json_object_t;
+        v_response_json      json_object_t := json_object_t();
+    begin
+        if pi_auth_header is null or trim(pi_auth_header) = '' then
+            po_status_code := pkg_aox_util.c_unauthorized_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'Debés iniciar sesión.');
+            po_response_body := v_response_json.to_clob();
+            return;
+        end if;
+
+        begin
+            v_caller_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+            select m.platform_user_id
+              into v_platform_user_id
+              from org_member m
+             where m.id_org_member = v_caller_member_id
+               and m.is_active = 1;
+        exception
+            when others then
+                po_status_code := pkg_aox_util.c_unauthorized_code;
+                v_response_json.put('status', 'error');
+                v_response_json.put('message', 'Sesión inválida o expirada.');
+                po_response_body := v_response_json.to_clob();
+                return;
+        end;
+
+        begin
+            if pi_body is not null and dbms_lob.getlength(pi_body) > 0 then
+                v_json_req := json_object_t.parse(pi_body);
+                v_refresh_token := v_json_req.get_string('refresh_token');
+            end if;
+        exception
+            when others then
+                v_refresh_token := null;
+        end;
+
+        for rec in (
+            select
+                s.session_family,
+                max(s.user_agent) keep (
+                    dense_rank last
+                    order by nvl(s.last_seen_at, s.created_at), s.id_session
+                ) as user_agent,
+                max(nvl(s.last_seen_at, s.created_at)) as last_seen_at,
+                min(s.created_at) as created_at,
+                max(case when s.refresh_token = v_refresh_token then 1 else 0 end) as is_current
+            from app_user_session s
+            join org_member m on m.id_org_member = s.use_id_user
+            where m.platform_user_id = v_platform_user_id
+              and s.is_revoked = 0
+              and s.expires_at > current_timestamp
+              and s.session_family is not null
+            group by s.session_family
+            order by last_seen_at desc
+        ) loop
+            v_item := json_object_t();
+            v_item.put('session_family', rec.session_family);
+            v_item.put('user_agent', rec.user_agent);
+            v_item.put('last_seen_at', to_char(rec.last_seen_at, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZH:TZM'));
+            v_item.put('created_at', to_char(rec.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZH:TZM'));
+            v_item.put('is_current', rec.is_current);
+            v_sessions.append(v_item);
+        end loop;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data', v_sessions);
+        po_response_body := v_response_json.to_clob();
+    exception
+        when others then
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    end pr_list_sessions;
+
+    procedure pr_revoke_session(
+        pi_auth_header   in  varchar2,
+        pi_body          in  clob,
+        po_status_code   out number,
+        po_response_body out clob
+    ) is
+        v_caller_member_id   org_member.id_org_member%type;
+        v_platform_user_id   platform_user.id_platform_user%type;
+        v_json_req           json_object_t;
+        v_family             varchar2(64);
+        v_refresh_token      varchar2(255);
+        v_current_family     varchar2(64);
+        v_updated            number;
+        v_response_json      json_object_t := json_object_t();
+    begin
+        if pi_auth_header is null or trim(pi_auth_header) = '' then
+            po_status_code := pkg_aox_util.c_unauthorized_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'Debés iniciar sesión.');
+            po_response_body := v_response_json.to_clob();
+            return;
+        end if;
+
+        begin
+            v_caller_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+            select m.platform_user_id
+              into v_platform_user_id
+              from org_member m
+             where m.id_org_member = v_caller_member_id
+               and m.is_active = 1;
+        exception
+            when others then
+                po_status_code := pkg_aox_util.c_unauthorized_code;
+                v_response_json.put('status', 'error');
+                v_response_json.put('message', 'Sesión inválida o expirada.');
+                po_response_body := v_response_json.to_clob();
+                return;
+        end;
+
+        begin
+            v_json_req := json_object_t.parse(pi_body);
+            v_family := trim(v_json_req.get_string('session_family'));
+            v_refresh_token := v_json_req.get_string('refresh_token');
+        exception
+            when others then
+                po_status_code := pkg_aox_util.c_bad_request_code;
+                v_response_json.put('status', 'error');
+                v_response_json.put('message', 'El cuerpo de la petición no es un JSON válido.');
+                po_response_body := v_response_json.to_clob();
+                return;
+        end;
+
+        if v_family is null or v_family = '' then
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'Falta la sesión a cerrar.');
+            po_response_body := v_response_json.to_clob();
+            return;
+        end if;
+
+        if v_refresh_token is not null then
+            begin
+                select s.session_family
+                  into v_current_family
+                  from app_user_session s
+                  join org_member m on m.id_org_member = s.use_id_user
+                 where s.refresh_token = v_refresh_token
+                   and m.platform_user_id = v_platform_user_id
+                   and s.is_revoked = 0
+                   and s.expires_at > current_timestamp;
+            exception
+                when no_data_found then
+                    v_current_family := null;
+            end;
+        end if;
+
+        if v_current_family is not null and v_current_family = v_family then
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'No podés cerrar la sesión actual desde aquí.');
+            po_response_body := v_response_json.to_clob();
+            return;
+        end if;
+
+        update app_user_session s
+           set s.is_revoked = 1
+         where s.session_family = v_family
+           and s.is_revoked = 0
+           and exists (
+                select 1
+                  from org_member m
+                 where m.id_org_member = s.use_id_user
+                   and m.platform_user_id = v_platform_user_id
+           );
+
+        v_updated := sql%rowcount;
+        if v_updated = 0 then
+            po_status_code := pkg_aox_util.c_not_found_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('message', 'No encontramos esa sesión activa.');
+            po_response_body := v_response_json.to_clob();
+            return;
+        end if;
+
+        commit;
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('message', 'Sesión cerrada correctamente.');
+        po_response_body := v_response_json.to_clob();
+    exception
+        when others then
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    end pr_revoke_session;
 
     procedure pr_verify_email(
         pi_body          in clob,

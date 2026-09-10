@@ -499,6 +499,7 @@ CREATE OR REPLACE package body pkg_aox_util as
                 'reserva-exitosa',
                 'politicas-y-privacidad',
                 'politicas-de-cancelacion-y-reembolso',
+                'terminos-y-condiciones',
                 'icons',
                 'assets',
                 'static',

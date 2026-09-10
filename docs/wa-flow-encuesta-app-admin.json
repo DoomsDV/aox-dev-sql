@@ -1,0 +1,103 @@
+{
+  "version": "7.3",
+  "routing_model": {
+    "SURVEY_APP": []
+  },
+  "screens": [
+    {
+      "id": "SURVEY_APP",
+      "title": "Hasel",
+      "terminal": true,
+      "success": true,
+      "data": {
+        "heading": {
+          "type": "string",
+          "__example__": "¿Cómo te está yendo con Hasel?"
+        },
+        "admin_name": {
+          "type": "string",
+          "__example__": "Dann"
+        },
+        "org_name": {
+          "type": "string",
+          "__example__": "Consultorio General"
+        },
+        "flow_token": {
+          "type": "string",
+          "__example__": "ENCUESTA_APP_1"
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "TextHeading",
+            "text": "${data.heading}"
+          },
+          {
+            "type": "TextBody",
+            "text": "Tu opinión nos ayuda a mejorar la app. Tarda menos de 20 segundos."
+          },
+          {
+            "type": "Form",
+            "name": "app_survey_form",
+            "children": [
+              {
+                "type": "RadioButtonsGroup",
+                "name": "rating",
+                "label": "Calificación de Hasel",
+                "required": true,
+                "data-source": [
+                  {
+                    "id": "5",
+                    "title": "★★★★★ Excelente"
+                  },
+                  {
+                    "id": "4",
+                    "title": "★★★★☆ Muy buena"
+                  },
+                  {
+                    "id": "3",
+                    "title": "★★★☆☆ Regular"
+                  },
+                  {
+                    "id": "2",
+                    "title": "★★☆☆☆ Mala"
+                  },
+                  {
+                    "id": "1",
+                    "title": "★☆☆☆☆ Muy mala"
+                  }
+                ]
+              },
+              {
+                "type": "TextArea",
+                "name": "comment",
+                "label": "Comentario",
+                "label-variant": "large",
+                "required": false,
+                "max-length": 400,
+                "helper-text": "Opcional. Qué te sirve y qué te falta."
+              },
+              {
+                "type": "Footer",
+                "label": "Enviar calificación",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "survey_kind": "app_admin",
+                    "rating": "${form.rating}",
+                    "comment": "${form.comment}",
+                    "admin_name": "${data.admin_name}",
+                    "org_name": "${data.org_name}",
+                    "flow_token": "${data.flow_token}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
