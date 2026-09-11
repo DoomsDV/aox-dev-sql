@@ -1140,7 +1140,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 NVL(
                     NULLIF(TRIM(p.profile_image_url), ''),
                     NULLIF(TRIM(pu.profile_image_url), '')
-                ) AS image_url
+                ) AS image_url,
+                (
+                    SELECT ROUND(AVG(a.survey_score), 1)
+                      FROM appointment a
+                     WHERE a.pro_id_professional = p.id_professional
+                       AND a.org_id_organization = p.org_id_organization
+                       AND a.survey_status = 'COMPLETED'
+                       AND a.survey_score BETWEEN 1 AND 5
+                ) AS rating_avg,
+                (
+                    SELECT COUNT(*)
+                      FROM appointment a
+                     WHERE a.pro_id_professional = p.id_professional
+                       AND a.org_id_organization = p.org_id_organization
+                       AND a.survey_status = 'COMPLETED'
+                       AND a.survey_score BETWEEN 1 AND 5
+                ) AS rating_count
             FROM professional p
             JOIN org_member m ON m.id_org_member = p.usr_id_user
             JOIN platform_user pu ON pu.id_platform_user = m.platform_user_id
@@ -1193,6 +1209,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_service_names_arr.append(srv_rec.name);
             END LOOP;
             v_pro_obj.put('service_names', v_service_names_arr);
+
+            IF pro_rec.rating_avg IS NOT NULL AND NVL(pro_rec.rating_count, 0) > 0 THEN
+                v_pro_obj.put('rating_avg', pro_rec.rating_avg);
+            ELSE
+                v_pro_obj.put_null('rating_avg');
+            END IF;
+            v_pro_obj.put('rating_count', NVL(pro_rec.rating_count, 0));
 
             v_professionals_arr.append(v_pro_obj);
         END LOOP;
