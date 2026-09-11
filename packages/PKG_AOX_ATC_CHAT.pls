@@ -98,8 +98,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_atc_chat IS
                    c.chunk_text,
                    d.file_name,
                    VECTOR_DISTANCE(c.embedding, v_query_vec, COSINE) AS distance
-              FROM atc_kb_chunk c
-              JOIN atc_kb_document d ON d.id_document = c.doc_id_document
+              FROM hasel_admin.ops_atc_kb_chunk c
+              JOIN hasel_admin.ops_atc_kb_document d ON d.id_document = c.doc_id_document
              WHERE d.status = 'READY'
              ORDER BY VECTOR_DISTANCE(c.embedding, v_query_vec, COSINE)
              FETCH FIRST v_top_k ROWS ONLY
