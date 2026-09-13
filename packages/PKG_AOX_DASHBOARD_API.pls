@@ -51,9 +51,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_meta_obj         json_object_t := json_object_t();
         v_pagination_obj   json_object_t := json_object_t();
         v_upcoming_arr     json_array_t  := json_array_t();
+        v_by_day_arr       json_array_t  := json_array_t();
         v_appt_obj         json_object_t;
+        v_day_obj          json_object_t;
         v_api_code         VARCHAR2(30);
         v_error_message    VARCHAR2(4000);
+
+        TYPE t_day_count_tab IS TABLE OF NUMBER INDEX BY VARCHAR2(10);
+        v_day_counts       t_day_count_tab;
+        v_day_key          VARCHAR2(10);
+        v_day_ts           TIMESTAMP;
+        v_day_count        NUMBER;
+        v_chart_end        TIMESTAMP;
 
         v_today_count      NUMBER := 0;
         v_today_completed  NUMBER := 0;
@@ -228,6 +237,38 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
             v_upcoming_arr.append(v_appt_obj);
         END LOOP;
 
+        -- Serie de 7 días calendario (hoy .. hoy+6), independiente de la paginación.
+        v_chart_end := v_today_start + NUMTODSINTERVAL(c_upcoming_days, 'DAY');
+
+        FOR rec IN (
+            SELECT
+                TO_CHAR(TRUNC(a.start_time), 'YYYY-MM-DD') AS appointment_date,
+                COUNT(*) AS cnt
+            FROM appointment a
+            WHERE a.org_id_organization = v_org_id
+              AND (v_is_org_viewer OR a.pro_id_professional = v_prof_id)
+              AND a.start_time >= v_today_start
+              AND a.start_time < v_chart_end
+              AND a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO')
+            GROUP BY TRUNC(a.start_time)
+        ) LOOP
+            v_day_counts(rec.appointment_date) := rec.cnt;
+        END LOOP;
+
+        FOR v_day_i IN 0 .. (c_upcoming_days - 1) LOOP
+            v_day_ts    := v_today_start + NUMTODSINTERVAL(v_day_i, 'DAY');
+            v_day_key   := TO_CHAR(v_day_ts, 'YYYY-MM-DD');
+            v_day_count := 0;
+            IF v_day_counts.EXISTS(v_day_key) THEN
+                v_day_count := v_day_counts(v_day_key);
+            END IF;
+
+            v_day_obj := json_object_t();
+            v_day_obj.put('date' , v_day_key);
+            v_day_obj.put('count', v_day_count);
+            v_by_day_arr.append(v_day_obj);
+        END LOOP;
+
         v_meta_obj.put('timezone'             , pkg_aox_util.fn_app_timezone);
         v_meta_obj.put('upcoming_window_days' , c_upcoming_days);
         v_meta_obj.put('generated_at_local'   , TO_CHAR(v_now_local, 'YYYY-MM-DD"T"HH24:MI:SS'));
@@ -239,6 +280,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
 
         v_data_obj.put('kpis'                 , v_kpis_obj);
         v_data_obj.put('upcoming_appointments', v_upcoming_arr);
+        v_data_obj.put('appointments_by_day'  , v_by_day_arr);
         v_data_obj.put('meta'                 , v_meta_obj);
 
         po_status_code := pkg_aox_util.c_success_ok_code;
