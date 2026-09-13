@@ -522,7 +522,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
                 CASE WHEN p.usr_id_user IS NULL THEN 'pending_invite' ELSE 'active' END AS membership_status,
                 i.status AS invitation_status,
                 s.id_specialty,
-                s.name AS specialty_name
+                s.name AS specialty_name,
+                (
+                    SELECT ROUND(AVG(a.survey_score), 1)
+                      FROM appointment a
+                     WHERE a.pro_id_professional = p.id_professional
+                       AND a.org_id_organization = p.org_id_organization
+                       AND a.survey_status = 'COMPLETED'
+                       AND a.survey_score BETWEEN 1 AND 5
+                ) AS rating_avg,
+                (
+                    SELECT COUNT(*)
+                      FROM appointment a
+                     WHERE a.pro_id_professional = p.id_professional
+                       AND a.org_id_organization = p.org_id_organization
+                       AND a.survey_status = 'COMPLETED'
+                       AND a.survey_score BETWEEN 1 AND 5
+                ) AS rating_count
             FROM professional p
             LEFT JOIN app_user u ON p.usr_id_user = u.id_user
             LEFT JOIN org_invitation i
@@ -595,6 +611,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
             ELSE
                 v_prof_obj.put('specialty', ''); -- Retornamos vacío o null si no tiene
             END IF;
+
+            IF rec.rating_avg IS NOT NULL AND NVL(rec.rating_count, 0) > 0 THEN
+                v_prof_obj.put('rating_avg', rec.rating_avg);
+            ELSE
+                v_prof_obj.put_null('rating_avg');
+            END IF;
+            v_prof_obj.put('rating_count', NVL(rec.rating_count, 0));
 
             v_profs_arr.append(v_prof_obj);
         END LOOP;
@@ -1064,7 +1087,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
                 CASE WHEN p.usr_id_user IS NULL THEN 'pending_invite' ELSE 'active' END AS membership_status,
                 i.status AS invitation_status,
                 s.id_specialty,
-                s.name AS specialty_name
+                s.name AS specialty_name,
+                (
+                    SELECT ROUND(AVG(a.survey_score), 1)
+                      FROM appointment a
+                     WHERE a.pro_id_professional = p.id_professional
+                       AND a.org_id_organization = p.org_id_organization
+                       AND a.survey_status = 'COMPLETED'
+                       AND a.survey_score BETWEEN 1 AND 5
+                ) AS rating_avg,
+                (
+                    SELECT COUNT(*)
+                      FROM appointment a
+                     WHERE a.pro_id_professional = p.id_professional
+                       AND a.org_id_organization = p.org_id_organization
+                       AND a.survey_status = 'COMPLETED'
+                       AND a.survey_score BETWEEN 1 AND 5
+                ) AS rating_count
             FROM professional p
             LEFT JOIN app_user u ON p.usr_id_user = u.id_user
             LEFT JOIN org_invitation i
@@ -1103,6 +1142,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
             ELSE
                 v_prof_obj.put('specialty'    , '');
             END IF;
+
+            IF rec.rating_avg IS NOT NULL AND NVL(rec.rating_count, 0) > 0 THEN
+                v_prof_obj.put('rating_avg', rec.rating_avg);
+            ELSE
+                v_prof_obj.put_null('rating_avg');
+            END IF;
+            v_prof_obj.put('rating_count', NVL(rec.rating_count, 0));
 
             -- ?? AQUI ESTÁ LA MAGIA: Buscamos los servicios ANTES de devolver la respuesta
             DECLARE

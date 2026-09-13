@@ -787,6 +787,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_full_name         VARCHAR2(255);
         v_specialty         VARCHAR2(255);
         v_image_url         VARCHAR2(4000);
+        v_rating_avg        NUMBER;
+        v_rating_count      NUMBER := 0;
     BEGIN
         IF pi_org_slug IS NULL OR trim(pi_org_slug) = ''
            OR pi_prof_slug IS NULL OR trim(pi_prof_slug) = '' THEN
@@ -858,6 +860,23 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         ELSE
             v_profile_obj.put('image_url', '');
         END IF;
+
+        SELECT
+            ROUND(AVG(a.survey_score), 1),
+            COUNT(*)
+          INTO v_rating_avg, v_rating_count
+          FROM appointment a
+         WHERE a.pro_id_professional = v_pro_id
+           AND a.org_id_organization = v_org_id
+           AND a.survey_status = 'COMPLETED'
+           AND a.survey_score BETWEEN 1 AND 5;
+
+        IF v_rating_avg IS NOT NULL AND NVL(v_rating_count, 0) > 0 THEN
+            v_profile_obj.put('rating_avg', v_rating_avg);
+        ELSE
+            v_profile_obj.put_null('rating_avg');
+        END IF;
+        v_profile_obj.put('rating_count', NVL(v_rating_count, 0));
 
         -- 3. Obtener servicios de este médico
         FOR rec IN (
