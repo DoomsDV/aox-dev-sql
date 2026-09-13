@@ -108,6 +108,17 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
         pi_sent_by        IN NUMBER DEFAULT NULL
     );
 
+    -- Encuesta de producto Hasel (ops panel) a staff por WhatsApp Flow SURVEY_APP.
+    PROCEDURE pr_send_app_survey_wa (
+        pi_phone         IN VARCHAR2,
+        pi_flow_token    IN VARCHAR2,
+        pi_heading       IN VARCHAR2,
+        pi_admin_name    IN VARCHAR2,
+        pi_org_name      IN VARCHAR2,
+        pi_template_name IN VARCHAR2 DEFAULT NULL,
+        pi_flow_id       IN VARCHAR2 DEFAULT NULL
+    );
+
     -- Job: envía encuestas CSAT pendientes (fin+2h, quiet hours, fatiga).
     PROCEDURE pr_process_survey_requests (
         pi_batch_size IN NUMBER DEFAULT 100
@@ -1931,6 +1942,149 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             RAISE;
     END pr_send_survey_wa;
 
+    PROCEDURE pr_send_app_survey_wa (
+        pi_phone         IN VARCHAR2,
+        pi_flow_token    IN VARCHAR2,
+        pi_heading       IN VARCHAR2,
+        pi_admin_name    IN VARCHAR2,
+        pi_org_name      IN VARCHAR2,
+        pi_template_name IN VARCHAR2 DEFAULT NULL,
+        pi_flow_id       IN VARCHAR2 DEFAULT NULL
+    ) IS
+        v_clean_phone      VARCHAR2(30);
+        v_heading          VARCHAR2(200);
+        v_admin_name       VARCHAR2(150);
+        v_org_name         VARCHAR2(200);
+        v_flow_token       VARCHAR2(80);
+        v_template_name    VARCHAR2(120);
+        v_flow_id          VARCHAR2(80);
+        v_flow_data_json   VARCHAR2(1500);
+        v_payload          CLOB;
+        v_json_initialized BOOLEAN := FALSE;
+    BEGIN
+        v_clean_phone := fn_clean_whatsapp_phone(pi_phone);
+        IF v_clean_phone IS NULL OR LENGTH(v_clean_phone) < 8 THEN
+            RAISE_APPLICATION_ERROR(-20075, 'El destinatario no tiene un número de WhatsApp válido.');
+        END IF;
+
+        v_flow_token := TRIM(pi_flow_token);
+        IF v_flow_token IS NULL OR UPPER(v_flow_token) NOT LIKE 'ENCUESTA_APP_%' THEN
+            RAISE_APPLICATION_ERROR(-20070, 'flow_token de encuesta de producto inválido.');
+        END IF;
+
+        v_heading := SUBSTR(NVL(NULLIF(TRIM(pi_heading), ''), '¿Cómo te está yendo con Hasel?'), 1, 200);
+        v_admin_name := SUBSTR(NVL(NULLIF(TRIM(pi_admin_name), ''), 'Hola'), 1, 150);
+        v_org_name := SUBSTR(NVL(NULLIF(TRIM(pi_org_name), ''), 'tu negocio'), 1, 200);
+        v_template_name := NULLIF(TRIM(pi_template_name), '');
+        v_flow_id := NULLIF(TRIM(pi_flow_id), '');
+
+        IF v_template_name IS NULL AND v_flow_id IS NULL THEN
+            RAISE_APPLICATION_ERROR(
+                -20078,
+                'Configurá META_WA_FLOW_SURVEY_APP y META_WA_TEMPLATE_SURVEY_APP en OPS_PARAMETER (HASEL_ADMIN).'
+            );
+        END IF;
+
+        v_flow_data_json := '{"heading":"' ||
+            REPLACE(REPLACE(v_heading, '\', '\\'), '"', '\"') ||
+            '","admin_name":"' ||
+            REPLACE(REPLACE(v_admin_name, '\', '\\'), '"', '\"') ||
+            '","org_name":"' ||
+            REPLACE(REPLACE(v_org_name, '\', '\\'), '"', '\"') ||
+            '","flow_token":"' || v_flow_token || '"}';
+
+        APEX_JSON.initialize_clob_output;
+        v_json_initialized := TRUE;
+        APEX_JSON.open_object;
+            APEX_JSON.write('messaging_product', 'whatsapp');
+            APEX_JSON.write('recipient_type', 'individual');
+            APEX_JSON.write('to', v_clean_phone);
+
+            IF v_template_name IS NOT NULL THEN
+                APEX_JSON.write('type', 'template');
+                APEX_JSON.open_object('template');
+                    APEX_JSON.write('name', v_template_name);
+                    APEX_JSON.open_object('language');
+                        APEX_JSON.write('code', NVL(fn_get_parameter('META_WA_TEMPLATE_LANG'), 'es'));
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_array('components');
+                        APEX_JSON.open_object;
+                            APEX_JSON.write('type', 'body');
+                            APEX_JSON.open_array('parameters');
+                                APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_admin_name); APEX_JSON.close_object;
+                                APEX_JSON.open_object; APEX_JSON.write('type', 'text'); APEX_JSON.write('text', v_org_name); APEX_JSON.close_object;
+                            APEX_JSON.close_array;
+                        APEX_JSON.close_object;
+                        APEX_JSON.open_object;
+                            APEX_JSON.write('type', 'button');
+                            APEX_JSON.write('sub_type', 'flow');
+                            APEX_JSON.write('index', '0');
+                            APEX_JSON.open_array('parameters');
+                                APEX_JSON.open_object;
+                                    APEX_JSON.write('type', 'action');
+                                    APEX_JSON.open_object('action');
+                                        APEX_JSON.write('flow_token', v_flow_token);
+                                        APEX_JSON.open_object('flow_action_data');
+                                            APEX_JSON.write('heading', v_heading);
+                                            APEX_JSON.write('admin_name', v_admin_name);
+                                            APEX_JSON.write('org_name', v_org_name);
+                                            APEX_JSON.write('flow_token', v_flow_token);
+                                        APEX_JSON.close_object;
+                                    APEX_JSON.close_object;
+                                APEX_JSON.close_object;
+                            APEX_JSON.close_array;
+                        APEX_JSON.close_object;
+                    APEX_JSON.close_array;
+                APEX_JSON.close_object;
+            ELSE
+                APEX_JSON.write('type', 'interactive');
+                APEX_JSON.open_object('interactive');
+                    APEX_JSON.write('type', 'flow');
+                    APEX_JSON.open_object('header');
+                        APEX_JSON.write('type', 'text');
+                        APEX_JSON.write('text', 'Hasel');
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_object('body');
+                        APEX_JSON.write(
+                            'text',
+                            'Hola ' || v_admin_name || ', ¿cómo te está yendo con Hasel en ' ||
+                            v_org_name || '? Tocá Calificar.'
+                        );
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_object('footer');
+                        APEX_JSON.write('text', 'Hasel');
+                    APEX_JSON.close_object;
+                    APEX_JSON.open_object('action');
+                        APEX_JSON.write('name', 'flow');
+                        APEX_JSON.open_object('parameters');
+                            APEX_JSON.write('flow_message_version', '3');
+                            APEX_JSON.write('flow_token', v_flow_token);
+                            APEX_JSON.write('flow_id', v_flow_id);
+                            APEX_JSON.write('flow_cta', 'Calificar');
+                            APEX_JSON.write('flow_action', 'navigate');
+                            APEX_JSON.open_object('flow_action_payload');
+                                APEX_JSON.write('screen', 'SURVEY_APP');
+                                APEX_JSON.write('data', v_flow_data_json);
+                            APEX_JSON.close_object;
+                        APEX_JSON.close_object;
+                    APEX_JSON.close_object;
+                APEX_JSON.close_object;
+            END IF;
+        APEX_JSON.close_object;
+
+        v_payload := APEX_JSON.get_clob_output;
+        APEX_JSON.free_output;
+        v_json_initialized := FALSE;
+
+        pr_post_whatsapp_message(pi_payload => v_payload);
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF v_json_initialized THEN
+                APEX_JSON.free_output;
+            END IF;
+            RAISE;
+    END pr_send_app_survey_wa;
+
     PROCEDURE pr_process_survey_requests (
         pi_batch_size IN NUMBER DEFAULT 100
     ) IS
@@ -2035,8 +2189,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             RETURN;
         END IF;
 
-        v_appointment_id := TO_NUMBER(REGEXP_SUBSTR(v_flow_token, '[0-9]+$'));
-        v_rating := TO_NUMBER(v_json.get_string('rating'));
+        BEGIN
+            v_rating := TO_NUMBER(v_json.get_string('rating'));
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE_APPLICATION_ERROR(-20076, 'Calificación de encuesta no válida.');
+        END;
 
         IF v_json.has('comment') THEN
             v_comment := SUBSTR(TRIM(v_json.get_string('comment')), 1, 400);
@@ -2045,6 +2203,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         IF v_rating < 1 OR v_rating > 5 THEN
             RAISE_APPLICATION_ERROR(-20076, 'Calificación de encuesta no válida.');
         END IF;
+
+        IF UPPER(v_flow_token) LIKE 'ENCUESTA_APP_%' THEN
+            hasel_admin.pkg_hasel_ops_surveys.pr_apply_nfm_reply(
+                pi_flow_token => v_flow_token,
+                pi_phone_from => fn_clean_whatsapp_phone(pi_phone_from),
+                pi_rating     => v_rating,
+                pi_comment    => v_comment
+            );
+            RETURN;
+        END IF;
+
+        v_appointment_id := TO_NUMBER(REGEXP_SUBSTR(v_flow_token, '[0-9]+$'));
 
         v_clean_from := fn_clean_whatsapp_phone(pi_phone_from);
 

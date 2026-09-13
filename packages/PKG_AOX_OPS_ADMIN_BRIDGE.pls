@@ -41,6 +41,28 @@ CREATE OR REPLACE PACKAGE pkg_aox_ops_admin_bridge AS
         po_success   OUT NUMBER,
         po_error     OUT VARCHAR2
     );
+
+    /** Adelanta el lock READ_ONLY del SaaS (escritura + agenda publica). */
+    PROCEDURE pr_force_subscription_read_only(
+        pi_org_id             IN  NUMBER,
+        pi_reason             IN  VARCHAR2,
+        pi_actor_employee_id  IN  NUMBER,
+        po_status_code        OUT NUMBER,
+        po_response_body      OUT CLOB
+    );
+
+    /** Encuesta de producto Hasel (WhatsApp Flow SURVEY_APP) disparada desde ops. */
+    PROCEDURE pr_send_app_survey_wa(
+        pi_phone         IN  VARCHAR2,
+        pi_flow_token    IN  VARCHAR2,
+        pi_heading       IN  VARCHAR2,
+        pi_admin_name    IN  VARCHAR2,
+        pi_org_name      IN  VARCHAR2,
+        pi_template_name IN  VARCHAR2 DEFAULT NULL,
+        pi_flow_id       IN  VARCHAR2 DEFAULT NULL,
+        po_success       OUT NUMBER,
+        po_error         OUT VARCHAR2
+    );
 END pkg_aox_ops_admin_bridge;
 /
 
@@ -316,6 +338,117 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
             po_error   => po_error
         );
     END pr_send_campaign_push;
+
+    PROCEDURE pr_send_app_survey_wa(
+        pi_phone         IN  VARCHAR2,
+        pi_flow_token    IN  VARCHAR2,
+        pi_heading       IN  VARCHAR2,
+        pi_admin_name    IN  VARCHAR2,
+        pi_org_name      IN  VARCHAR2,
+        pi_template_name IN  VARCHAR2 DEFAULT NULL,
+        pi_flow_id       IN  VARCHAR2 DEFAULT NULL,
+        po_success       OUT NUMBER,
+        po_error         OUT VARCHAR2
+    ) IS
+    BEGIN
+        po_success := 0;
+        po_error   := NULL;
+        pkg_aox_meta_api.pr_send_app_survey_wa(
+            pi_phone         => pi_phone,
+            pi_flow_token    => pi_flow_token,
+            pi_heading       => pi_heading,
+            pi_admin_name    => pi_admin_name,
+            pi_org_name      => pi_org_name,
+            pi_template_name => pi_template_name,
+            pi_flow_id       => pi_flow_id
+        );
+        po_success := 1;
+    EXCEPTION
+        WHEN OTHERS THEN
+            po_success := 0;
+            po_error := SUBSTR(REGEXP_REPLACE(SQLERRM, '^ORA-[0-9]+: ', ''), 1, 4000);
+    END pr_send_app_survey_wa;
+
+    PROCEDURE pr_force_subscription_read_only(
+        pi_org_id             IN  NUMBER,
+        pi_reason             IN  VARCHAR2,
+        pi_actor_employee_id  IN  NUMBER,
+        po_status_code        OUT NUMBER,
+        po_response_body      OUT CLOB
+    ) IS
+        v_response json_object_t := json_object_t();
+        v_data     json_object_t := json_object_t();
+        v_actor    NUMBER := NVL(pi_actor_employee_id, 0);
+        v_reason   VARCHAR2(400) := SUBSTR(TRIM(pi_reason), 1, 400);
+        v_status   VARCHAR2(20);
+        v_founder  NUMBER;
+        v_exempt   NUMBER;
+        v_exists   NUMBER;
+    BEGIN
+        IF v_actor <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Actor de operaciones invalido.');
+        END IF;
+        IF v_reason IS NULL OR LENGTH(v_reason) < 5 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El motivo debe tener al menos 5 caracteres.');
+        END IF;
+        IF NVL(pi_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Organizacion invalida.');
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_exists
+          FROM organization
+         WHERE id_organization = pi_org_id;
+        IF v_exists = 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Organizacion no encontrada.');
+        END IF;
+
+        BEGIN
+            SELECT status, NVL(is_founder, 0), NVL(billing_exempt, 0)
+              INTO v_status, v_founder, v_exempt
+              FROM org_subscription
+             WHERE org_id_organization = pi_org_id
+               FOR UPDATE;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'La organizacion no tiene suscripcion.');
+        END;
+
+        IF v_founder = 1 OR v_exempt = 1 OR v_status = 'FOUNDER' THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'No se puede cortar el acceso de un Founder o exento de cobro.'
+            );
+        END IF;
+        IF v_status = 'READ_ONLY' THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El acceso ya está en solo lectura.');
+        END IF;
+        IF v_status = 'CANCELED' THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'La suscripcion ya está cancelada.');
+        END IF;
+
+        UPDATE org_subscription
+           SET status        = 'READ_ONLY',
+               auto_renew    = 0,
+               grace_ends_at = CURRENT_TIMESTAMP,
+               updated_at    = CURRENT_TIMESTAMP
+         WHERE org_id_organization = pi_org_id;
+
+        COMMIT;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('message', 'Acceso cortado: el negocio quedó en solo lectura.');
+        v_data.put('org_id_organization', pi_org_id);
+        v_data.put('subscription_status', 'READ_ONLY');
+        v_data.put('reason', v_reason);
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_force_subscription_read_only;
 
 END pkg_aox_ops_admin_bridge;
 /
