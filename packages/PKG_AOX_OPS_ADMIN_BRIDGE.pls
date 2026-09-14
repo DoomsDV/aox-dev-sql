@@ -2,6 +2,9 @@ PROMPT CREATE OR REPLACE PACKAGE pkg_aox_ops_admin_bridge
 CREATE OR REPLACE PACKAGE pkg_aox_ops_admin_bridge AS
     -- Puente invocado desde HASEL_ADMIN (JWT ops). Sin HASEL_OPS_USER_IDS ni JWT SaaS.
 
+    /** 1 si DISPUTE_COMPENSATION_ENABLED=1; 0 en cualquier otro valor. */
+    FUNCTION fn_dispute_compensation_enabled RETURN NUMBER;
+
     PROCEDURE pr_resolve_dispute(
         pi_dispute_id         IN  NUMBER,
         pi_resolution_code    IN  VARCHAR2,
@@ -51,6 +54,15 @@ CREATE OR REPLACE PACKAGE pkg_aox_ops_admin_bridge AS
         po_response_body      OUT CLOB
     );
 
+    /** Deshace un corte OPS y restaura escritura (trial/activa/past_due previo). */
+    PROCEDURE pr_restore_subscription_write(
+        pi_org_id             IN  NUMBER,
+        pi_reason             IN  VARCHAR2,
+        pi_actor_employee_id  IN  NUMBER,
+        po_status_code        OUT NUMBER,
+        po_response_body      OUT CLOB
+    );
+
     /** Encuesta de producto Hasel (WhatsApp Flow SURVEY_APP) disparada desde ops. */
     PROCEDURE pr_send_app_survey_wa(
         pi_phone         IN  VARCHAR2,
@@ -68,6 +80,14 @@ END pkg_aox_ops_admin_bridge;
 
 PROMPT CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge
 CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
+
+    FUNCTION fn_dispute_compensation_enabled RETURN NUMBER IS
+    BEGIN
+        IF NVL(fn_get_parameter('DISPUTE_COMPENSATION_ENABLED'), '0') = '1' THEN
+            RETURN 1;
+        END IF;
+        RETURN 0;
+    END fn_dispute_compensation_enabled;
 
     FUNCTION fn_is_terminal_status(pi_status IN VARCHAR2) RETURN NUMBER IS
     BEGIN
@@ -107,7 +127,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
                 'resolution_code invalido. Usa SETTLED, DISMISS, ADVERSE o ISSUE_CREDIT.'
             );
         END IF;
-        IF v_code = 'ISSUE_CREDIT' AND NVL(fn_get_parameter('DISPUTE_COMPENSATION_ENABLED'), '0') <> '1' THEN
+        IF v_code = 'ISSUE_CREDIT' AND fn_dispute_compensation_enabled <> 1 THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_forbidden,
                 'ISSUE_CREDIT no esta habilitado (DISPUTE_COMPENSATION_ENABLED=0).'
@@ -449,6 +469,211 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
             ROLLBACK;
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_force_subscription_read_only;
+
+    PROCEDURE pr_insert_access_audit(
+        pi_org_id      IN NUMBER,
+        pi_action      IN VARCHAR2,
+        pi_reason      IN VARCHAR2,
+        pi_from_status IN VARCHAR2,
+        pi_to_status   IN VARCHAR2,
+        pi_from_auto   IN NUMBER,
+        pi_to_auto     IN NUMBER,
+        pi_from_grace  IN TIMESTAMP WITH TIME ZONE,
+        pi_to_grace    IN TIMESTAMP WITH TIME ZONE,
+        pi_actor       IN NUMBER
+    ) IS
+    BEGIN
+        INSERT INTO org_subscription_access_audit (
+            org_id_organization,
+            action,
+            reason,
+            from_status,
+            to_status,
+            from_auto_renew,
+            to_auto_renew,
+            from_grace_ends_at,
+            to_grace_ends_at,
+            actor_employee_id
+        ) VALUES (
+            pi_org_id,
+            pi_action,
+            pi_reason,
+            pi_from_status,
+            pi_to_status,
+            pi_from_auto,
+            pi_to_auto,
+            pi_from_grace,
+            pi_to_grace,
+            pi_actor
+        );
+    END pr_insert_access_audit;
+
+    PROCEDURE pr_restore_subscription_write(
+        pi_org_id             IN  NUMBER,
+        pi_reason             IN  VARCHAR2,
+        pi_actor_employee_id  IN  NUMBER,
+        po_status_code        OUT NUMBER,
+        po_response_body      OUT CLOB
+    ) IS
+        v_response     json_object_t := json_object_t();
+        v_data         json_object_t := json_object_t();
+        v_actor        NUMBER := NVL(pi_actor_employee_id, 0);
+        v_reason       VARCHAR2(400) := SUBSTR(TRIM(pi_reason), 1, 400);
+        v_status       VARCHAR2(20);
+        v_founder      NUMBER;
+        v_exempt       NUMBER;
+        v_exists       NUMBER;
+        v_auto         NUMBER;
+        v_grace        TIMESTAMP WITH TIME ZONE;
+        v_trial_ends   TIMESTAMP WITH TIME ZONE;
+        v_period_end   TIMESTAMP WITH TIME ZONE;
+        v_from_status  VARCHAR2(20);
+        v_from_auto    NUMBER;
+        v_from_grace   TIMESTAMP WITH TIME ZONE;
+        v_last_action  VARCHAR2(20);
+        v_effective    VARCHAR2(20);
+        v_can_write    NUMBER;
+        v_label        VARCHAR2(40);
+        v_message      VARCHAR2(400);
+    BEGIN
+        IF v_actor <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Actor de operaciones invalido.');
+        END IF;
+        IF v_reason IS NULL OR LENGTH(v_reason) < 5 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El motivo debe tener al menos 5 caracteres.');
+        END IF;
+        IF NVL(pi_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Organizacion invalida.');
+        END IF;
+
+        SELECT COUNT(*)
+          INTO v_exists
+          FROM organization
+         WHERE id_organization = pi_org_id;
+        IF v_exists = 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Organizacion no encontrada.');
+        END IF;
+
+        BEGIN
+            SELECT status,
+                   NVL(is_founder, 0),
+                   NVL(billing_exempt, 0),
+                   NVL(auto_renew, 1),
+                   grace_ends_at,
+                   trial_ends_at,
+                   current_period_end
+              INTO v_status, v_founder, v_exempt, v_auto, v_grace, v_trial_ends, v_period_end
+              FROM org_subscription
+             WHERE org_id_organization = pi_org_id
+               FOR UPDATE;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'La organizacion no tiene suscripcion.');
+        END;
+
+        IF v_founder = 1 OR v_exempt = 1 OR v_status = 'FOUNDER' THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'No se puede restaurar el acceso de un Founder o exento de cobro.'
+            );
+        END IF;
+        IF v_status <> 'READ_ONLY' THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_validation,
+                'No hay un corte de acceso de OPS para restaurar.'
+            );
+        END IF;
+
+        BEGIN
+            SELECT action, from_status, from_auto_renew, from_grace_ends_at
+              INTO v_last_action, v_from_status, v_from_auto, v_from_grace
+              FROM (
+                SELECT action, from_status, from_auto_renew, from_grace_ends_at
+                  FROM org_subscription_access_audit
+                 WHERE org_id_organization = pi_org_id
+                 ORDER BY created_at DESC, id_access_audit DESC
+                 FETCH FIRST 1 ROW ONLY
+              );
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_last_action := NULL;
+                v_from_status := NULL;
+        END;
+
+        IF v_last_action = 'REVOKE' AND v_from_status IS NOT NULL AND v_from_status <> 'READ_ONLY' THEN
+            NULL;
+        ELSE
+            IF v_trial_ends IS NOT NULL AND v_trial_ends > SYSTIMESTAMP THEN
+                v_from_status := 'TRIAL';
+                v_from_auto := 1;
+                v_from_grace := v_grace;
+            ELSIF v_period_end IS NULL OR v_period_end > SYSTIMESTAMP THEN
+                v_from_status := 'ACTIVE';
+                v_from_auto := 1;
+                v_from_grace := CASE
+                    WHEN v_period_end IS NULL THEN NULL
+                    ELSE v_period_end + NUMTODSINTERVAL(3, 'DAY')
+                END;
+            ELSE
+                RAISE_APPLICATION_ERROR(
+                    pkg_aox_util.c_sqlcode_validation,
+                    'No hay un estado previo para restaurar; el período o trial ya venció.'
+                );
+            END IF;
+        END IF;
+
+        UPDATE org_subscription
+           SET status        = v_from_status,
+               auto_renew    = NVL(v_from_auto, 1),
+               grace_ends_at = v_from_grace,
+               updated_at    = CURRENT_TIMESTAMP
+         WHERE org_id_organization = pi_org_id;
+
+        pr_insert_access_audit(
+            pi_org_id      => pi_org_id,
+            pi_action      => 'RESTORE',
+            pi_reason      => v_reason,
+            pi_from_status => 'READ_ONLY',
+            pi_to_status   => v_from_status,
+            pi_from_auto   => v_auto,
+            pi_to_auto     => NVL(v_from_auto, 1),
+            pi_from_grace  => v_grace,
+            pi_to_grace    => v_from_grace,
+            pi_actor       => v_actor
+        );
+
+        COMMIT;
+
+        v_effective := pkg_aox_subscription_api.fn_get_subscription_state(pi_org_id);
+        v_can_write := pkg_aox_subscription_api.fn_org_can_write(pi_org_id);
+        v_label := CASE v_from_status
+                     WHEN 'TRIAL' THEN 'trial'
+                     WHEN 'ACTIVE' THEN 'activa'
+                     WHEN 'PAST_DUE' THEN 'vencida (con gracia)'
+                     ELSE LOWER(v_from_status)
+                   END;
+        IF NVL(v_can_write, 0) = 1 THEN
+            v_message := 'Escritura restaurada: el negocio volvió a ' || v_label || '.';
+        ELSE
+            v_message := 'Se deshizo el corte de OPS, pero el negocio sigue sin escritura porque el período o trial ya venció.';
+        END IF;
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response.put('status', 'success');
+        v_response.put('message', v_message);
+        v_data.put('org_id_organization', pi_org_id);
+        v_data.put('subscription_status', v_from_status);
+        v_data.put('effective_status', v_effective);
+        v_data.put('can_write', NVL(v_can_write, 0));
+        v_data.put('ops_access_locked', 0);
+        v_data.put('reason', v_reason);
+        v_response.put('data', v_data);
+        po_response_body := v_response.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_restore_subscription_write;
 
 END pkg_aox_ops_admin_bridge;
 /
