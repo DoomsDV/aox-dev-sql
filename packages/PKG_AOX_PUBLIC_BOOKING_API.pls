@@ -939,6 +939,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 id_location,
                 name,
                 address,
+                phone,
                 latitude,
                 longitude
             FROM location
@@ -950,6 +951,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_loc_obj.put('id_location', loc_rec.id_location);
             v_loc_obj.put('name'       , loc_rec.name);
             v_loc_obj.put('address'    , loc_rec.address);
+            IF loc_rec.phone IS NULL OR TRIM(loc_rec.phone) IS NULL THEN
+                v_loc_obj.put_null('phone');
+            ELSE
+                v_loc_obj.put('phone', loc_rec.phone);
+            END IF;
 
             IF loc_rec.latitude IS NOT NULL THEN
                 v_loc_obj.put('latitude', loc_rec.latitude);
@@ -1116,6 +1122,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 id_location,
                 name,
                 address,
+                phone,
                 latitude,
                 longitude
             FROM location
@@ -1127,6 +1134,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_loc_obj.put('id_location', loc_rec.id_location);
             v_loc_obj.put('name', loc_rec.name);
             v_loc_obj.put('address', NVL(loc_rec.address, ''));
+            IF loc_rec.phone IS NULL OR TRIM(loc_rec.phone) IS NULL THEN
+                v_loc_obj.put_null('phone');
+            ELSE
+                v_loc_obj.put('phone', loc_rec.phone);
+            END IF;
             IF loc_rec.latitude IS NOT NULL THEN
                 v_loc_obj.put('latitude', loc_rec.latitude);
             END IF;
@@ -2529,7 +2541,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             -- getPublicProfileWithOrds que hacia el frontend solo para esto).
             v_locations_arr := json_array_t();
             FOR loc_rec IN (
-                SELECT id_location, name, address, latitude, longitude
+                SELECT id_location, name, address, phone, latitude, longitude
                   FROM location
                  WHERE org_id_organization = rec.org_id_organization
                    AND is_active = 1
@@ -2539,6 +2551,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_loc_obj.put('id_location', loc_rec.id_location);
                 v_loc_obj.put('name'       , loc_rec.name);
                 v_loc_obj.put('address'    , loc_rec.address);
+                IF loc_rec.phone IS NULL OR TRIM(loc_rec.phone) IS NULL THEN
+                    v_loc_obj.put_null('phone');
+                ELSE
+                    v_loc_obj.put('phone', loc_rec.phone);
+                END IF;
                 IF loc_rec.latitude IS NOT NULL THEN
                     v_loc_obj.put('latitude', loc_rec.latitude);
                 END IF;

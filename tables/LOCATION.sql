@@ -4,6 +4,7 @@ CREATE TABLE location (
   org_id_organization NUMBER                      NOT NULL,
   name                VARCHAR2(100)               NOT NULL,
   address             VARCHAR2(255)               NOT NULL,
+  phone               VARCHAR2(40)                NULL,
   cit_id_city         NUMBER                      NOT NULL,
   latitude            NUMBER(12,8)                NULL,
   longitude           NUMBER(12,8)                NULL,

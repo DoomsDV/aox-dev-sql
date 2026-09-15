@@ -7,6 +7,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_location_api IS
         pi_page          IN  NUMBER DEFAULT 1,
         pi_limit         IN  NUMBER DEFAULT 9,
         pi_is_active     IN  NUMBER DEFAULT NULL,
+        pi_search        IN  VARCHAR2 DEFAULT NULL,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
@@ -62,16 +63,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         pi_address  IN VARCHAR2,
         pi_city_id  IN NUMBER,
         pi_dept_id  IN NUMBER,
-        pi_active   IN NUMBER
+        pi_active   IN NUMBER,
+        pi_phone    IN VARCHAR2 DEFAULT NULL
     ) RETURN json_array_t IS
         v_errors             json_array_t := json_array_t();
         v_error              json_object_t;
         v_name_max_length    NUMBER;
         v_address_max_length NUMBER;
+        v_phone_max_length   NUMBER;
     BEGIN
         -- Longitudes dinámicas
         BEGIN SELECT data_length INTO v_name_max_length FROM user_tab_columns WHERE table_name = 'LOCATION' AND column_name = 'NAME'; EXCEPTION WHEN NO_DATA_FOUND THEN v_name_max_length := 100; END;
         BEGIN SELECT data_length INTO v_address_max_length FROM user_tab_columns WHERE table_name = 'LOCATION' AND column_name = 'ADDRESS'; EXCEPTION WHEN NO_DATA_FOUND THEN v_address_max_length := 255; END;
+        BEGIN SELECT data_length INTO v_phone_max_length FROM user_tab_columns WHERE table_name = 'LOCATION' AND column_name = 'PHONE'; EXCEPTION WHEN NO_DATA_FOUND THEN v_phone_max_length := 40; END;
 
         IF pi_name IS NULL OR TRIM(pi_name) = '' THEN
             v_error := json_object_t(); v_error.put('field', 'name'); v_error.put('message', 'El nombre es obligatorio.'); v_errors.append(v_error);
@@ -83,6 +87,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             v_error := json_object_t(); v_error.put('field', 'address'); v_error.put('message', 'La dirección es obligatoria.'); v_errors.append(v_error);
         ELSIF LENGTH(pi_address) > v_address_max_length THEN
             v_error := json_object_t(); v_error.put('field', 'address'); v_error.put('message', 'Excede ' || v_address_max_length || ' caracteres.'); v_errors.append(v_error);
+        END IF;
+
+        IF pi_phone IS NOT NULL AND LENGTH(TRIM(pi_phone)) > v_phone_max_length THEN
+            v_error := json_object_t(); v_error.put('field', 'phone'); v_error.put('message', 'Excede ' || v_phone_max_length || ' caracteres.'); v_errors.append(v_error);
         END IF;
 
         IF pi_city_id IS NULL THEN
@@ -106,6 +114,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         pi_page          IN  NUMBER DEFAULT 1,
         pi_limit         IN  NUMBER DEFAULT 9,
         pi_is_active     IN  NUMBER DEFAULT NULL,
+        pi_search        IN  VARCHAR2 DEFAULT NULL,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
@@ -122,16 +131,35 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         v_offset        NUMBER;
         v_total_records NUMBER := 0;
         v_total_pages   NUMBER := 0;
+        v_search        VARCHAR2(200) := TRANSLATE(
+            UPPER(TRIM(pi_search)),
+            'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ',
+            'AEIOUUNAEIOUAAEIOU'
+        );
     BEGIN
         v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
 
+        IF v_search IS NOT NULL AND LENGTH(v_search) = 0 THEN
+            v_search := NULL;
+        END IF;
+
         SELECT COUNT(*)
         INTO v_total_records
-        FROM location
-        WHERE org_id_organization = v_org_id
-          AND (pi_is_active IS NULL OR is_active = pi_is_active);
+        FROM location l
+        JOIN cities c ON l.cit_id_city = c.id_city
+        JOIN departments d ON l.dep_id_department = d.id_department
+        WHERE l.org_id_organization = v_org_id
+          AND (pi_is_active IS NULL OR l.is_active = pi_is_active)
+          AND (
+                v_search IS NULL
+                OR TRANSLATE(UPPER(l.name), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU') LIKE '%' || v_search || '%'
+                OR TRANSLATE(UPPER(l.address), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU') LIKE '%' || v_search || '%'
+                OR TRANSLATE(UPPER(c.description), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU') LIKE '%' || v_search || '%'
+                OR TRANSLATE(UPPER(d.description), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU') LIKE '%' || v_search || '%'
+                OR UPPER(NVL(l.phone, '')) LIKE '%' || v_search || '%'
+              );
         v_total_pages := CEIL(v_total_records / v_limit);
 
         FOR rec IN (
@@ -139,6 +167,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
                 l.id_location,
                 l.name,
                 l.address,
+                l.phone,
                 l.cit_id_city,
                 c.description AS city_name,          -- Obtenemos el nombre de la ciudad
                 l.dep_id_department,
@@ -152,6 +181,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             JOIN departments d ON l.dep_id_department = d.id_department
             WHERE l.org_id_organization = v_org_id
               AND (pi_is_active IS NULL OR l.is_active = pi_is_active)
+              AND (
+                    v_search IS NULL
+                    OR TRANSLATE(UPPER(l.name), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU') LIKE '%' || v_search || '%'
+                    OR TRANSLATE(UPPER(l.address), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU') LIKE '%' || v_search || '%'
+                    OR TRANSLATE(UPPER(c.description), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU') LIKE '%' || v_search || '%'
+                    OR TRANSLATE(UPPER(d.description), 'ÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÜ', 'AEIOUUNAEIOUAAEIOU') LIKE '%' || v_search || '%'
+                    OR UPPER(NVL(l.phone, '')) LIKE '%' || v_search || '%'
+                  )
             ORDER BY l.id_location DESC
             OFFSET v_offset ROWS FETCH NEXT v_limit ROWS ONLY
         ) LOOP
@@ -159,6 +196,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             v_loc_obj.put('id_location', rec.id_location);
             v_loc_obj.put('name'    , rec.name);
             v_loc_obj.put('address' , rec.address);
+            IF rec.phone IS NULL OR TRIM(rec.phone) IS NULL THEN
+                v_loc_obj.put_null('phone');
+            ELSE
+                v_loc_obj.put('phone', rec.phone);
+            END IF;
 
             -- Construimos el objeto City
             v_city_obj := json_object_t();
@@ -227,6 +269,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
                 l.id_location,
                 l.name,
                 l.address,
+                l.phone,
                 l.cit_id_city,
                 c.description AS city_name,
                 l.dep_id_department,
@@ -244,6 +287,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             v_loc_obj.put('id_location', rec.id_location);
             v_loc_obj.put('name', rec.name);
             v_loc_obj.put('address', rec.address);
+            IF rec.phone IS NULL OR TRIM(rec.phone) IS NULL THEN
+                v_loc_obj.put_null('phone');
+            ELSE
+                v_loc_obj.put('phone', rec.phone);
+            END IF;
 
             v_city_obj := json_object_t();
             v_city_obj.put('id_city', rec.cit_id_city);
@@ -302,6 +350,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
 
         v_name              location.name%TYPE;
         v_address           location.address%TYPE;
+        v_phone             location.phone%TYPE;
         v_city_id           location.cit_id_city%TYPE;
         v_dept_id           location.dep_id_department%TYPE;
         v_lat               location.latitude%TYPE;
@@ -319,6 +368,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             v_address  := v_json_req.get_string('address');
             v_city_id  := v_json_req.get_number('cit_id_city');
             v_dept_id  := v_json_req.get_number('dep_id_department');
+            IF v_json_req.has('phone') THEN v_phone := TRIM(v_json_req.get_string('phone')); END IF;
             IF v_json_req.has('latitude') THEN v_lat := v_json_req.get_number('latitude'); END IF;
             IF v_json_req.has('longitude') THEN v_lon := v_json_req.get_number('longitude'); END IF;
             IF v_json_req.has('is_active') THEN v_is_active := v_json_req.get_number('is_active'); ELSE v_is_active := 1; END IF;
@@ -326,7 +376,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             WHEN OTHERS THEN RAISE_APPLICATION_ERROR(-20002, 'JSON inválido o malformado.');
         END;
 
-        v_validation_errors := fn_validate_loc_inputs(v_name, v_address, v_city_id, v_dept_id, v_is_active);
+        v_validation_errors := fn_validate_loc_inputs(v_name, v_address, v_city_id, v_dept_id, v_is_active, v_phone);
 
         IF v_validation_errors.get_size() > 0 THEN
             po_status_code := pkg_aox_util.c_bad_request_code;
@@ -337,8 +387,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             RETURN;
         END IF;
 
-        INSERT INTO location (org_id_organization, name, address, cit_id_city, dep_id_department, latitude, longitude, is_active)
-        VALUES (v_org_id, TRIM(v_name), TRIM(v_address), v_city_id, v_dept_id, v_lat, v_lon, v_is_active)
+        INSERT INTO location (org_id_organization, name, address, phone, cit_id_city, dep_id_department, latitude, longitude, is_active)
+        VALUES (v_org_id, TRIM(v_name), TRIM(v_address), NULLIF(TRIM(v_phone), ''), v_city_id, v_dept_id, v_lat, v_lon, v_is_active)
         RETURNING id_location INTO v_new_id;
 
         COMMIT;
@@ -369,6 +419,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
 
         v_name              location.name%TYPE;
         v_address           location.address%TYPE;
+        v_phone             location.phone%TYPE;
         v_city_id           location.cit_id_city%TYPE;
         v_dept_id           location.dep_id_department%TYPE;
         v_lat               location.latitude%TYPE;
@@ -386,6 +437,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             v_address  := v_json_req.get_string('address');
             v_city_id  := v_json_req.get_number('cit_id_city');
             v_dept_id  := v_json_req.get_number('dep_id_department');
+            IF v_json_req.has('phone') THEN v_phone := TRIM(v_json_req.get_string('phone')); END IF;
             IF v_json_req.has('latitude') THEN v_lat := v_json_req.get_number('latitude'); END IF;
             IF v_json_req.has('longitude') THEN v_lon := v_json_req.get_number('longitude'); END IF;
             IF v_json_req.has('is_active') THEN v_is_active := v_json_req.get_number('is_active'); END IF;
@@ -393,7 +445,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
             WHEN OTHERS THEN RAISE_APPLICATION_ERROR(-20002, 'JSON inválido o malformado.');
         END;
 
-        v_validation_errors := fn_validate_loc_inputs(v_name, v_address, v_city_id, v_dept_id, NVL(v_is_active, 1));
+        v_validation_errors := fn_validate_loc_inputs(v_name, v_address, v_city_id, v_dept_id, NVL(v_is_active, 1), v_phone);
 
         IF v_validation_errors.get_size() > 0 THEN
             po_status_code := pkg_aox_util.c_bad_request_code;
@@ -407,6 +459,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         UPDATE location
         SET name              = TRIM(v_name),
             address           = TRIM(v_address),
+            phone             = NULLIF(TRIM(v_phone), ''),
             cit_id_city       = v_city_id,
             dep_id_department = v_dept_id,
             latitude          = v_lat,
