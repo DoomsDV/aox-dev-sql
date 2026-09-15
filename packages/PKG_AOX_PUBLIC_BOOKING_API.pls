@@ -787,6 +787,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         v_full_name         VARCHAR2(255);
         v_specialty         VARCHAR2(255);
         v_image_url         VARCHAR2(4000);
+        v_short_bio         VARCHAR2(280);
         v_rating_avg        NUMBER;
         v_rating_count      NUMBER := 0;
     BEGIN
@@ -811,7 +812,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 NVL(
                     NULLIF(TRIM(p.profile_image_url), ''),
                     NULLIF(TRIM(pu.profile_image_url), '')
-                )
+                ),
+                p.short_bio
             INTO
                 v_pro_id,
                 v_org_id,
@@ -820,7 +822,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                 v_prof_slug,
                 v_full_name,
                 v_specialty,
-                v_image_url
+                v_image_url,
+                v_short_bio
             FROM professional p
             JOIN workspace_setting ws ON ws.org_id_organization = p.org_id_organization
             JOIN organization o ON o.id_organization = p.org_id_organization
@@ -860,6 +863,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
         ELSE
             v_profile_obj.put('image_url', '');
         END IF;
+        v_profile_obj.put('short_bio', NVL(TRIM(v_short_bio), ''));
 
         SELECT
             ROUND(AVG(a.survey_score), 1),
@@ -1160,6 +1164,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
                     NULLIF(TRIM(p.profile_image_url), ''),
                     NULLIF(TRIM(pu.profile_image_url), '')
                 ) AS image_url,
+                TRIM(p.short_bio) AS short_bio,
                 (
                     SELECT ROUND(AVG(a.survey_score), 1)
                       FROM appointment a
@@ -1184,6 +1189,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
               AND p.is_active = 1
               AND p.profile_slug IS NOT NULL
               AND TRIM(p.profile_slug) IS NOT NULL
+              AND NVL(
+                    NULLIF(TRIM(p.profile_image_url), ''),
+                    NULLIF(TRIM(pu.profile_image_url), '')
+                  ) IS NOT NULL
+              AND p.short_bio IS NOT NULL
+              AND TRIM(p.short_bio) IS NOT NULL
               AND pkg_aox_payment_settings_api.fn_org_is_unpublished(v_org_id) = 0
             ORDER BY full_name
         ) LOOP
@@ -1192,6 +1203,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             v_pro_obj.put('full_name', pro_rec.full_name);
             v_pro_obj.put('specialty', pro_rec.specialty);
             v_pro_obj.put('image_url', NVL(pro_rec.image_url, ''));
+            v_pro_obj.put('short_bio', NVL(pro_rec.short_bio, ''));
             v_pro_obj.put('profile_slug', pro_rec.profile_slug);
             v_booking_path :=
                 '/' || lower(trim(v_org_slug)) ||
