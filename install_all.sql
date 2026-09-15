@@ -16,6 +16,11 @@ PROMPT [3/29] org_specialty
 PROMPT [4/29] role
 @@tables\ROLE.sql
 
+PROMPT [4b] capability catalog + org overrides (HAS-29)
+@@tables\CAPABILITY.sql
+@@tables\ROLE_CAPABILITY_DEFAULT.sql
+@@tables\ORG_ROLE_CAPABILITY.sql
+
 PROMPT [5/29] app_parameter
 @@tables\APP_PARAMETER.sql
 
@@ -447,6 +452,7 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 -- Facturacion comercial de suscripcion (Fase 5): depende de SUBSCRIPTION_API + PAGOPAR_API.
 @@packages\PKG_AOX_SUBSCRIPTION_BILLING_API.pls
 @@packages\PKG_AOX_ADDON_API.pls
+@@packages\PKG_AOX_PERMISSION_API.pls
 @@packages\PKG_AOX_ODONTOGRAM_API.pls
 @@packages\PKG_AOX_BODY_MAP_API.pls
 @@packages\PKG_AOX_USER_API.pls
@@ -457,6 +463,7 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 
 PROMPT --- Migraciones incrementales ---
 @@migrations\20260906_einvoice_webhook_durable.sql
+@@migrations\20260915_role_capabilities.sql
 @@migrations\20260915_appointment_series.sql
 @@migrations\20260915_appointment_series_ords.sql
 

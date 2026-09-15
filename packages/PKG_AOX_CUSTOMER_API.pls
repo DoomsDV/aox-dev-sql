@@ -1084,9 +1084,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
 
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
-        IF v_role_id NOT IN (pkg_aox_util.fn_rol('ADMIN'), pkg_aox_util.fn_rol('RECEPCIONISTA')) THEN
-            RAISE_APPLICATION_ERROR(-20005, 'No tienes permisos para editar clientes.');
-        END IF;
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'customers.edit',
+            'No tienes permisos para editar clientes.'
+        );
 
         SELECT COUNT(*)
           INTO v_exists_count
@@ -1187,9 +1190,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
 
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
-        IF v_role_id NOT IN (pkg_aox_util.fn_rol('ADMIN'), pkg_aox_util.fn_rol('RECEPCIONISTA')) THEN
-            RAISE_APPLICATION_ERROR(-20005, 'No tienes permisos para crear clientes.');
-        END IF;
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'customers.create',
+            'No tienes permisos para crear clientes.'
+        );
 
         v_json_req := json_object_t.parse(NVL(pi_body, TO_CLOB('{}')));
 
@@ -1292,16 +1298,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
-
-        IF v_role_id NOT IN (pkg_aox_util.fn_rol('ADMIN'), pkg_aox_util.fn_rol('RECEPCIONISTA')) THEN
-            RAISE_APPLICATION_ERROR(
-                -20005,
-                CASE
-                    WHEN v_target_active = 0 THEN 'No tienes permisos para archivar clientes.'
-                    ELSE 'No tienes permisos para restaurar clientes.'
-                END
-            );
-        END IF;
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'customers.edit',
+            CASE
+                WHEN v_target_active = 0 THEN 'No tienes permisos para archivar clientes.'
+                ELSE 'No tienes permisos para restaurar clientes.'
+            END
+        );
 
         BEGIN
             SELECT full_name, first_name, last_name, phone_number, document_number, email,

@@ -361,6 +361,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'locations.manage',
+            'No tienes permisos para crear sucursales.'
+        );
 
         BEGIN
             v_json_req := json_object_t.parse(pi_body);
@@ -430,6 +436,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'locations.manage',
+            'No tienes permisos para editar sucursales.'
+        );
 
         BEGIN
             v_json_req := json_object_t.parse(pi_body);
@@ -501,6 +513,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'locations.manage',
+            'No tienes permisos para eliminar sucursales.'
+        );
 
         DELETE FROM location
         WHERE id_location = pi_location_id AND org_id_organization = v_org_id;
