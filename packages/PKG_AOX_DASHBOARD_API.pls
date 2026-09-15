@@ -83,6 +83,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
 
         v_today_count      NUMBER := 0;
         v_today_completed  NUMBER := 0;
+        v_today_confirmed  NUMBER := 0;
+        v_today_pending    NUMBER := 0;
+        v_week_count       NUMBER := 0;
+        v_week_confirmed   NUMBER := 0;
+        v_week_pending     NUMBER := 0;
+        v_deposit_pending_count  NUMBER := 0;
+        v_deposit_pending_amount NUMBER := 0;
+        v_week_start       TIMESTAMP;
+        v_week_end         TIMESTAMP;
         v_pending_count    NUMBER := 0;
         v_unconfirmed_count NUMBER := 0;
         v_my_customers     NUMBER := 0;
@@ -173,6 +182,54 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
           AND status = 'PENDIENTE'
           AND start_time >= v_today_start;
 
+        -- HAS-56: confirmadas vs pendientes de hoy (completadas cuentan como confirmadas).
+        SELECT
+            NVL(SUM(CASE WHEN status IN ('CONFIRMADO', 'COMPLETADO') THEN 1 ELSE 0 END), 0),
+            NVL(SUM(CASE WHEN status = 'PENDIENTE' THEN 1 ELSE 0 END), 0)
+          INTO
+            v_today_confirmed,
+            v_today_pending
+          FROM appointment
+         WHERE org_id_organization = v_org_id
+           AND (v_is_org_viewer OR pro_id_professional = v_prof_id)
+           AND start_time >= v_today_start
+           AND start_time <  v_tomorrow_start
+           AND status     <> c_status_canceled;
+
+        -- HAS-56: esta semana calendario (lunes ISO .. domingo).
+        v_week_start := CAST(TRUNC(v_today_start, 'IW') AS TIMESTAMP);
+        v_week_end   := v_week_start + NUMTODSINTERVAL(7, 'DAY');
+
+        SELECT
+            COUNT(*),
+            NVL(SUM(CASE WHEN status IN ('CONFIRMADO', 'COMPLETADO') THEN 1 ELSE 0 END), 0),
+            NVL(SUM(CASE WHEN status = 'PENDIENTE' THEN 1 ELSE 0 END), 0)
+          INTO
+            v_week_count,
+            v_week_confirmed,
+            v_week_pending
+          FROM appointment
+         WHERE org_id_organization = v_org_id
+           AND (v_is_org_viewer OR pro_id_professional = v_prof_id)
+           AND start_time >= v_week_start
+           AND start_time <  v_week_end
+           AND status     <> c_status_canceled;
+
+        -- HAS-56: señas por cobrar (citas vigentes de hoy en adelante, seña aún PENDING).
+        SELECT
+            COUNT(*),
+            NVL(SUM(NVL(deposit_amount, 0)), 0)
+          INTO
+            v_deposit_pending_count,
+            v_deposit_pending_amount
+          FROM appointment
+         WHERE org_id_organization = v_org_id
+           AND (v_is_org_viewer OR pro_id_professional = v_prof_id)
+           AND start_time >= v_today_start
+           AND status IN ('PENDIENTE', 'CONFIRMADO')
+           AND NVL(deposit_amount, 0) > 0
+           AND NVL(payment_status, 'PENDING') = 'PENDING';
+
         IF v_is_org_viewer THEN
             SELECT COUNT(*)
               INTO v_total_org
@@ -198,6 +255,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
 
         v_kpis_obj.put('today_appointments'           , v_today_count);
         v_kpis_obj.put('today_completed_appointments' , v_today_completed);
+        v_kpis_obj.put('today_confirmed_appointments' , v_today_confirmed);
+        v_kpis_obj.put('today_pending_appointments'   , v_today_pending);
+        v_kpis_obj.put('week_appointments'            , v_week_count);
+        v_kpis_obj.put('week_confirmed_appointments'  , v_week_confirmed);
+        v_kpis_obj.put('week_pending_appointments'    , v_week_pending);
+        v_kpis_obj.put('pending_deposits_count'       , v_deposit_pending_count);
+        v_kpis_obj.put('pending_deposits_amount'      , v_deposit_pending_amount);
         v_kpis_obj.put('pending_appointments'         , v_pending_count);
         v_kpis_obj.put('unconfirmed_appointments'     , v_unconfirmed_count);
         v_kpis_obj.put('my_customers'                 , v_my_customers);
