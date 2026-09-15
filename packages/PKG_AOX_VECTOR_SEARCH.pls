@@ -219,7 +219,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_vector_search IS
     FUNCTION fn_build_location_source(pi_org_id IN NUMBER, pi_entity_id IN NUMBER) RETURN VARCHAR2 IS
         v_text VARCHAR2(1000);
     BEGIN
-        SELECT SUBSTR(TRIM(name) || ' | ' || TRIM(address), 1, 1000)
+        SELECT SUBSTR(
+                   TRIM(name) || ' | ' || TRIM(address)
+                   || CASE
+                          WHEN phone IS NOT NULL AND TRIM(phone) IS NOT NULL
+                          THEN ' | tel: ' || TRIM(phone)
+                          ELSE ''
+                      END,
+                   1,
+                   1000
+               )
         INTO v_text
         FROM location
         WHERE id_location = pi_entity_id
