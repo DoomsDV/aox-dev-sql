@@ -147,6 +147,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_body_map_api IS
         pr_assert_customer_in_org(v_org_id, pi_customer_id);
         pr_assert_appointment_for_customer(v_org_id, pi_customer_id, pi_appointment_id);
 
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'addons.body_map',
+            'No tienes permisos para ver el mapa corporal.'
+        );
         IF pkg_aox_subscription_api.fn_org_has_feature(v_org_id, c_feature) = 0 THEN
             RAISE_APPLICATION_ERROR(-20003, 'Complemento no activo para esta organización.');
         END IF;
@@ -222,6 +228,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_body_map_api IS
         END IF;
 
         pkg_aox_subscription_api.pr_assert_org_has_feature(v_org_id, c_feature);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'addons.body_map',
+            'No tienes permisos para editar el mapa corporal.'
+        );
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         IF pi_body IS NULL OR DBMS_LOB.getlength(pi_body) = 0 THEN
@@ -316,6 +328,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_body_map_api IS
     BEGIN
         v_org_id := fn_require_org_id(pi_auth_header);
         pr_assert_customer_in_org(v_org_id, pi_customer_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'addons.body_map',
+            'No tienes permisos para ver el mapa corporal.'
+        );
 
         IF pkg_aox_subscription_api.fn_org_has_feature(v_org_id, c_feature) = 0 THEN
             po_status_code := pkg_aox_util.c_success_ok_code;

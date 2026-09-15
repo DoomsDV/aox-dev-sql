@@ -256,6 +256,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
     BEGIN
         v_org_id := fn_require_org_id(pi_auth_header);
         pr_assert_customer_in_org(v_org_id, pi_customer_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'addons.odontogram',
+            'No tienes permisos para ver el odontograma.'
+        );
 
         v_entitled := pkg_aox_subscription_api.fn_org_has_feature(v_org_id, c_feature);
 
@@ -384,6 +390,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         pr_assert_customer_in_org(v_org_id, pi_customer_id);
 
         pkg_aox_subscription_api.pr_assert_org_has_feature(v_org_id, c_feature);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'addons.odontogram',
+            'No tienes permisos para editar el odontograma.'
+        );
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         BEGIN
@@ -518,6 +530,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         pr_assert_customer_in_org(v_org_id, pi_customer_id);
 
         pkg_aox_subscription_api.pr_assert_org_has_feature(v_org_id, c_feature);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'addons.odontogram',
+            'No tienes permisos para editar el odontograma.'
+        );
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
         IF NVL(pi_event_id, 0) <= 0 THEN
