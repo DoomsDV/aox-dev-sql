@@ -106,6 +106,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_phone             professional.phone_number%TYPE;
         v_slug              professional.profile_slug%TYPE;
         v_prof_active       professional.is_active%TYPE;
+        v_short_bio         professional.short_bio%TYPE;
 
         -- ¡NUEVAS VARIABLES PARA LA IMAGEN!
         v_img_base64        CLOB;
@@ -137,6 +138,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
             IF v_json_req.has('spe_id_specialty') THEN v_specialty_id := v_json_req.get_number('spe_id_specialty'); END IF;
             IF v_json_req.has('profile_slug') THEN v_slug := v_json_req.get_string('profile_slug'); END IF;
             IF v_json_req.has('prof_is_active') THEN v_prof_active := v_json_req.get_number('prof_is_active'); ELSE v_prof_active := 1; END IF;
+            IF v_json_req.has('short_bio') THEN v_short_bio := TRIM(v_json_req.get_string('short_bio')); END IF;
 
             -- Extraemos la info de la imagen (Opcional)
             IF v_json_req.has('image_base64') THEN
@@ -170,6 +172,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
           v_error := json_object_t();
           v_error.put('field', 'phone_number');
           v_error.put('message', 'El teléfono es obligatorio.');
+          v_validation_errors.append(v_error);
+        END IF;
+
+        IF v_short_bio IS NOT NULL AND LENGTH(v_short_bio) > 280 THEN
+          v_error := json_object_t();
+          v_error.put('field', 'short_bio');
+          v_error.put('message', 'La bio corta admite hasta 280 caracteres.');
           v_validation_errors.append(v_error);
         END IF;
 
@@ -324,6 +333,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
             usr_id_user,
             profile_slug,
             display_name,
+            short_bio,
             is_active,
             spe_id_specialty,
             phone_number
@@ -332,6 +342,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
             NULL,
             TRIM(v_slug),
             TRIM(v_display_name),
+            v_short_bio,
             0,
             v_specialty_id,
             TRIM(v_phone)
@@ -510,6 +521,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
                 p.profile_slug,
                 p.profile_image_url,
                 p.phone_number,
+                p.short_bio,
                 p.is_active AS prof_is_active,
                 p.created_at AS prof_created_at,
                 p.usr_id_user,
@@ -586,6 +598,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
             v_prof_obj.put('profile_slug'     , rec.profile_slug);
             v_prof_obj.put('profile_image_url', rec.profile_image_url);
             v_prof_obj.put('phone_number'     , rec.phone_number);
+            v_prof_obj.put('short_bio'        , NVL(rec.short_bio, ''));
             v_prof_obj.put('is_active'        , rec.prof_is_active);
             v_prof_obj.put('created_at'       , TO_CHAR(rec.prof_created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
             v_prof_obj.put('membership_status', rec.membership_status);
@@ -672,6 +685,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_phone             professional.phone_number%TYPE;
         v_slug              professional.profile_slug%TYPE;
         v_prof_active       professional.is_active%TYPE;
+        v_short_bio         professional.short_bio%TYPE;
+        v_has_short_bio     pls_integer := 0;
 
         -- Variables para la imagen
         v_img_base64        CLOB;
@@ -744,6 +759,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
               v_slug := v_json_req.get_string('profile_slug');
             END IF;
 
+            IF v_json_req.has('short_bio') THEN
+              v_has_short_bio := 1;
+              v_short_bio := TRIM(v_json_req.get_string('short_bio'));
+            END IF;
+
             IF v_json_req.has('prof_is_active') THEN
               v_prof_active := v_json_req.get_number('prof_is_active');
             END IF;
@@ -776,6 +796,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
           v_error := json_object_t();
           v_error.put('field', 'phone_number');
           v_error.put('message', 'El teléfono es obligatorio.');
+          v_validation_errors.append(v_error);
+        END IF;
+
+        IF v_has_short_bio = 1 AND v_short_bio IS NOT NULL AND LENGTH(v_short_bio) > 280 THEN
+          v_error := json_object_t();
+          v_error.put('field', 'short_bio');
+          v_error.put('message', 'La bio corta admite hasta 280 caracteres.');
           v_validation_errors.append(v_error);
         END IF;
 
@@ -822,7 +849,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
                SET display_name     = TRIM(v_display_name),
                    phone_number     = TRIM(v_phone),
                    spe_id_specialty = v_specialty_id,
-                   profile_slug     = NVL(TRIM(v_slug), profile_slug)
+                   profile_slug     = NVL(TRIM(v_slug), profile_slug),
+                   short_bio        = CASE WHEN v_has_short_bio = 1 THEN v_short_bio ELSE short_bio END
              WHERE id_professional = pi_prof_id;
 
             IF v_services_arr IS NOT NULL THEN
@@ -1005,6 +1033,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
             phone_number      = TRIM(v_phone),
             spe_id_specialty  = v_specialty_id,
             profile_slug      = NVL(TRIM(v_slug), profile_slug),
+            short_bio         = CASE WHEN v_has_short_bio = 1 THEN v_short_bio ELSE short_bio END,
             is_active         = NVL(v_prof_active, is_active)
         WHERE id_professional = pi_prof_id;
 
@@ -1075,6 +1104,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
                 p.profile_slug,
                 p.profile_image_url,
                 p.phone_number,
+                p.short_bio,
                 p.is_active AS prof_is_active,
                 p.created_at AS prof_created_at,
                 p.usr_id_user,
@@ -1119,6 +1149,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
             v_prof_obj.put('profile_slug'     , rec.profile_slug);
             v_prof_obj.put('profile_image_url', rec.profile_image_url);
             v_prof_obj.put('phone_number'     , rec.phone_number);
+            v_prof_obj.put('short_bio'        , NVL(rec.short_bio, ''));
             v_prof_obj.put('is_active'        , rec.prof_is_active);
             v_prof_obj.put('created_at'       , TO_CHAR(rec.prof_created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
             v_prof_obj.put('membership_status', rec.membership_status);

@@ -28,6 +28,19 @@ CREATE OR REPLACE PACKAGE pkg_aox_appointment_api IS
         po_response_body OUT CLOB
     );
 
+    -- HAS-22: serie semanal (v1). Genera N citas cada 7 dias a partir de start_time.
+    -- Body: mismos campos que pr_create_appointment + recurrence
+    --   { "frequency": "WEEKLY", "count": 8 } o { "frequency": "WEEKLY", "until": "YYYY-MM-DD" }
+    --   skip_conflicts: si true, omite fechas con solape y crea el resto.
+    -- Bloquea (409 SERIES_CONFLICT) si hay solapes y skip_conflicts no viene.
+    -- Si hay desalineacion de agenda sin acknowledge, 409 SCHEDULE_MISALIGNED con la lista.
+    PROCEDURE pr_create_appointment_series(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
     -- Fase 4 (N+1 fix): guardado masivo de citas (escaneo de agenda). Resuelve
     -- identidad/suscripcion UNA sola vez y reutiliza el mismo enforcement de
     -- pr_create_appointment fila por fila, dentro de la misma conexion PL/SQL
@@ -137,7 +150,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             SELECT
                 a.id_appointment, c.full_name, c.phone_number, a.start_time, a.end_time,
                 a.status, a.attendance_status, a.attendance_reply_at, a.pro_id_professional,
-                a.loc_id_location,
+                a.loc_id_location, a.srs_id_series,
                 a.schedule_exception_approved, a.schedule_exception_start,
                 a.schedule_exception_end, a.schedule_exception_loc, a.schedule_exception_pro,
                 NVL(p.display_name, TRIM(u.first_name || ' ' || u.last_name)) AS professional_name,
@@ -184,6 +197,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             v_extended_props.put('professional_name', rec.professional_name);
             v_extended_props.put('service_name'     , rec.service_name);
             v_extended_props.put('location_name'    , rec.location_name);
+            IF rec.srs_id_series IS NOT NULL THEN
+                v_extended_props.put('series_id', rec.srs_id_series);
+            END IF;
 
             IF rec.status IN ('PENDIENTE', 'CONFIRMADO')
                AND TRUNC(rec.start_time) >= TRUNC(SYSDATE) THEN
@@ -306,6 +322,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 a.refund_status,
                 a.refund_amount,
                 a.cancel_reason,
+                a.srs_id_series,
                 a.schedule_exception_approved,
                 a.schedule_exception_start,
                 a.schedule_exception_end,
@@ -391,6 +408,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             END IF;
             v_app_obj.put('start_time'          , TO_CHAR(rec.start_time, 'YYYY-MM-DD"T"HH24:MI:SS'));
             v_app_obj.put('end_time'            , TO_CHAR(rec.end_time,   'YYYY-MM-DD"T"HH24:MI:SS'));
+            IF rec.srs_id_series IS NOT NULL THEN
+                v_app_obj.put('series_id', rec.srs_id_series);
+            END IF;
 
             IF rec.status IN ('PENDIENTE', 'CONFIRMADO')
                AND TRUNC(rec.start_time) >= TRUNC(SYSDATE) THEN
@@ -574,6 +594,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_saved_reason  VARCHAR2(40);
         v_write_exception BOOLEAN := FALSE;
         v_write_exc_n   NUMBER := 0;
+        v_series_id     NUMBER := NULL;
     BEGIN
         po_new_id := NULL;
         po_misaligned_reason := NULL;
@@ -607,6 +628,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                     v_ack_raw := LOWER(TRIM(NVL(pi_row_json.get_string('acknowledge_schedule_misalignment'), 'false')));
                     v_acknowledge := v_ack_raw IN ('true', '1', 'yes', 'si', 'sí');
             END;
+        END IF;
+
+        IF pi_row_json.has('srs_id_series') THEN
+            BEGIN
+                v_series_id := pi_row_json.get_number('srs_id_series');
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_series_id := NULL;
+            END;
+            IF NVL(v_series_id, 0) <= 0 THEN
+                v_series_id := NULL;
+            END IF;
         END IF;
 
         IF pi_row_json.has('notify_customer') THEN
@@ -847,7 +880,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             schedule_exception_start,
             schedule_exception_end,
             schedule_exception_loc,
-            schedule_exception_pro
+            schedule_exception_pro,
+            srs_id_series
         ) VALUES (
             pi_org_id,
             v_loc_id,
@@ -867,7 +901,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             CASE WHEN v_write_exc_n = 1 THEN v_start_time ELSE NULL END,
             CASE WHEN v_write_exc_n = 1 THEN v_end_time ELSE NULL END,
             CASE WHEN v_write_exc_n = 1 THEN v_loc_id ELSE NULL END,
-            CASE WHEN v_write_exc_n = 1 THEN v_pro_id ELSE NULL END
+            CASE WHEN v_write_exc_n = 1 THEN v_pro_id ELSE NULL END,
+            v_series_id
         )
         RETURNING id_appointment INTO po_new_id;
 
@@ -2472,6 +2507,498 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             ROLLBACK;
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_delete_attachment;
+
+    -- HAS-22: crear serie semanal. Pre-chequea solapes y desalineacion de agenda
+    -- para TODAS las ocurrencias; si hay conflicto de horario bloquea el alta
+    -- (salvo skip_conflicts). Reutiliza pr_create_appointment_row para el insert.
+    PROCEDURE pr_create_appointment_series(
+        pi_auth_header   IN  VARCHAR2,
+        pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id        NUMBER;
+        v_role_id       NUMBER;
+        v_user_id       NUMBER;
+        v_actual_pro_id NUMBER;
+
+        v_json_req      json_object_t;
+        v_recurrence    json_object_t;
+        v_row_json      json_object_t;
+        v_response_json json_object_t := json_object_t();
+        v_conflicts_arr json_array_t := json_array_t();
+        v_created_arr   json_array_t := json_array_t();
+        v_skipped_arr   json_array_t := json_array_t();
+        v_conflict_obj  json_object_t;
+        v_created_obj   json_object_t;
+
+        v_freq          VARCHAR2(20);
+        v_count         NUMBER := NULL;
+        v_until         DATE := NULL;
+        v_until_raw     VARCHAR2(32);
+        v_skip          BOOLEAN := FALSE;
+        v_skip_raw      VARCHAR2(20);
+        v_ack           BOOLEAN := FALSE;
+        v_ack_raw       VARCHAR2(20);
+
+        v_loc_id        NUMBER;
+        v_pro_id        NUMBER;
+        v_ser_id        NUMBER;
+        v_duration      service.duration_minutes%TYPE;
+        v_start_tz      TIMESTAMP WITH TIME ZONE;
+        v_occ_tz        TIMESTAMP WITH TIME ZONE;
+        v_occ_start     TIMESTAMP;
+        v_occ_end       TIMESTAMP;
+        v_iso           VARCHAR2(64);
+
+        v_max_occ       NUMBER;
+        v_lock_dummy    NUMBER;
+        v_overlap       NUMBER;
+        v_misaligned    VARCHAR2(40);
+        v_has_overlap   BOOLEAN := FALSE;
+        v_has_misalign  BOOLEAN := FALSE;
+        v_keep_count    NUMBER := 0;
+
+        TYPE t_flag IS TABLE OF BOOLEAN INDEX BY PLS_INTEGER;
+        TYPE t_ts   IS TABLE OF TIMESTAMP WITH TIME ZONE INDEX BY PLS_INTEGER;
+        TYPE t_wall IS TABLE OF TIMESTAMP INDEX BY PLS_INTEGER;
+        TYPE t_msg  IS TABLE OF VARCHAR2(40) INDEX BY PLS_INTEGER;
+
+        v_occ_tz_tab    t_ts;
+        v_occ_start_tab t_wall;
+        v_occ_end_tab   t_wall;
+        v_overlap_tab   t_flag;
+        v_misalign_tab  t_msg;
+        v_keep_tab      t_flag;
+
+        v_series_id     NUMBER;
+        v_new_id        NUMBER;
+        v_row_misalign  VARCHAR2(40);
+        v_created       NUMBER := 0;
+        v_failed        NUMBER := 0;
+        v_skipped       NUMBER := 0;
+        v_cus_id        NUMBER;
+    BEGIN
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        IF NVL(v_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+        END IF;
+
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'calendar.manage',
+            'No tienes permisos para crear citas.'
+        );
+
+        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            BEGIN
+                SELECT id_professional
+                  INTO v_actual_pro_id
+                  FROM professional
+                 WHERE usr_id_user         = v_user_id
+                   AND org_id_organization = v_org_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20001, 'Perfil profesional no asignado.');
+            END;
+        END IF;
+
+        v_json_req := json_object_t.parse(pi_body);
+        IF NOT v_json_req.has('recurrence') THEN
+            RAISE_APPLICATION_ERROR(-20006, 'Falta recurrence para crear la serie semanal.');
+        END IF;
+        v_recurrence := TREAT(v_json_req.get('recurrence') AS json_object_t);
+        v_freq := UPPER(TRIM(NVL(v_recurrence.get_string('frequency'), 'WEEKLY')));
+        IF v_freq <> 'WEEKLY' THEN
+            RAISE_APPLICATION_ERROR(-20006, 'v1 solo admite frequency WEEKLY.');
+        END IF;
+
+        IF v_recurrence.has('count') THEN
+            BEGIN
+                v_count := v_recurrence.get_number('count');
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_count := NULL;
+            END;
+        END IF;
+
+        IF v_recurrence.has('until') THEN
+            v_until_raw := TRIM(v_recurrence.get_string('until'));
+            IF v_until_raw IS NOT NULL THEN
+                BEGIN
+                    v_until := TO_DATE(SUBSTR(v_until_raw, 1, 10), 'YYYY-MM-DD');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        RAISE_APPLICATION_ERROR(-20003, 'until de la serie tiene formato inválido.');
+                END;
+            END IF;
+        END IF;
+
+        IF v_count IS NULL AND v_until IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20006, 'Indica count o until para la serie semanal.');
+        END IF;
+        IF v_count IS NOT NULL AND (v_count < 2 OR v_count > 52) THEN
+            RAISE_APPLICATION_ERROR(-20006, 'count debe estar entre 2 y 52.');
+        END IF;
+
+        IF v_json_req.has('skip_conflicts') THEN
+            BEGIN
+                v_skip := v_json_req.get_boolean('skip_conflicts');
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_skip_raw := LOWER(TRIM(NVL(v_json_req.get_string('skip_conflicts'), 'false')));
+                    v_skip := v_skip_raw IN ('true', '1', 'yes', 'si', 'sí');
+            END;
+        END IF;
+
+        IF v_json_req.has('acknowledge_schedule_misalignment') THEN
+            BEGIN
+                v_ack := v_json_req.get_boolean('acknowledge_schedule_misalignment');
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_ack_raw := LOWER(TRIM(NVL(v_json_req.get_string('acknowledge_schedule_misalignment'), 'false')));
+                    v_ack := v_ack_raw IN ('true', '1', 'yes', 'si', 'sí');
+            END;
+        END IF;
+
+        v_loc_id := v_json_req.get_number('loc_id_location');
+        v_pro_id := v_json_req.get_number('pro_id_professional');
+        v_ser_id := v_json_req.get_number('ser_id_service');
+        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            v_pro_id := v_actual_pro_id;
+        END IF;
+
+        BEGIN
+            SELECT duration_minutes
+              INTO v_duration
+              FROM service
+             WHERE id_service = v_ser_id
+               AND org_id_organization = v_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(-20005, 'Servicio no encontrado.');
+        END;
+
+        v_start_tz := fn_parse_iso_date(v_json_req.get_string('start_time'));
+        v_max_occ := NVL(v_count, 52);
+
+        FOR i IN 0 .. v_max_occ - 1 LOOP
+            v_occ_tz := v_start_tz + NUMTODSINTERVAL(7 * i, 'DAY');
+            v_occ_start := CAST(v_occ_tz AS TIMESTAMP);
+            IF v_until IS NOT NULL AND TRUNC(v_occ_start) > v_until THEN
+                EXIT;
+            END IF;
+            v_occ_tz_tab(v_occ_tz_tab.COUNT + 1) := v_occ_tz;
+            v_occ_start_tab(v_occ_start_tab.COUNT + 1) := v_occ_start;
+            v_occ_end_tab(v_occ_end_tab.COUNT + 1) := v_occ_start + NUMTODSINTERVAL(v_duration, 'MINUTE');
+            v_overlap_tab(v_overlap_tab.COUNT + 1) := FALSE;
+            v_misalign_tab(v_misalign_tab.COUNT + 1) := NULL;
+            v_keep_tab(v_keep_tab.COUNT + 1) := TRUE;
+        END LOOP;
+
+        IF v_occ_tz_tab.COUNT < 2 THEN
+            RAISE_APPLICATION_ERROR(-20006, 'La serie semanal requiere al menos 2 citas. Amplía count o until.');
+        END IF;
+
+        SELECT 1
+          INTO v_lock_dummy
+          FROM professional
+         WHERE id_professional     = v_pro_id
+           AND org_id_organization = v_org_id
+        FOR UPDATE;
+
+        FOR i IN 1 .. v_occ_tz_tab.COUNT LOOP
+            SELECT COUNT(*)
+              INTO v_overlap
+              FROM appointment a
+             WHERE a.org_id_organization = v_org_id
+               AND a.pro_id_professional = v_pro_id
+               AND a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO')
+               AND a.start_time < v_occ_end_tab(i)
+               AND a.end_time   > v_occ_start_tab(i);
+
+            v_overlap_tab(i) := (v_overlap > 0);
+            IF v_overlap_tab(i) THEN
+                v_has_overlap := TRUE;
+            END IF;
+
+            v_misaligned := pkg_aox_util.fn_get_appointment_schedule_misaligned_reason(
+                v_pro_id,
+                v_occ_start_tab(i),
+                v_occ_end_tab(i),
+                v_loc_id
+            );
+            v_misalign_tab(i) := v_misaligned;
+        END LOOP;
+
+        IF v_has_overlap AND NOT v_skip THEN
+            FOR i IN 1 .. v_occ_tz_tab.COUNT LOOP
+                IF v_overlap_tab(i) THEN
+                    v_conflict_obj := json_object_t();
+                    v_conflict_obj.put(
+                        'start_time',
+                        TO_CHAR(v_occ_tz_tab(i), 'YYYY-MM-DD') || 'T' ||
+                        TO_CHAR(v_occ_start_tab(i), 'HH24:MI:SS')
+                    );
+                    v_conflict_obj.put('reason', 'OVERLAP');
+                    v_conflict_obj.put('message', 'El profesional ya tiene una cita en ese horario.');
+                    v_conflicts_arr.append(v_conflict_obj);
+                END IF;
+            END LOOP;
+            po_status_code := pkg_aox_util.c_conflict_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('code', 'SERIES_CONFLICT');
+            v_response_json.put(
+                'message',
+                'Hay conflictos de agenda en ' || v_conflicts_arr.get_size()
+                || ' de ' || v_occ_tz_tab.COUNT || ' fechas de la serie.'
+            );
+            v_response_json.put('conflicts', v_conflicts_arr);
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        FOR i IN 1 .. v_occ_tz_tab.COUNT LOOP
+            IF v_overlap_tab(i) THEN
+                v_keep_tab(i) := FALSE;
+                v_skipped := v_skipped + 1;
+                v_conflict_obj := json_object_t();
+                v_conflict_obj.put(
+                    'start_time',
+                    TO_CHAR(v_occ_tz_tab(i), 'YYYY-MM-DD') || 'T' ||
+                    TO_CHAR(v_occ_start_tab(i), 'HH24:MI:SS')
+                );
+                v_conflict_obj.put('reason', 'OVERLAP');
+                v_conflict_obj.put('message', 'El profesional ya tiene una cita en ese horario.');
+                v_skipped_arr.append(v_conflict_obj);
+            ELSE
+                v_keep_count := v_keep_count + 1;
+                IF v_misalign_tab(i) IS NOT NULL THEN
+                    v_has_misalign := TRUE;
+                END IF;
+            END IF;
+        END LOOP;
+
+        IF v_keep_count = 0 THEN
+            po_status_code := pkg_aox_util.c_conflict_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('code', 'SERIES_CONFLICT');
+            v_response_json.put('message', 'Todas las fechas de la serie tienen conflicto de agenda.');
+            v_response_json.put('conflicts', v_skipped_arr);
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        IF v_has_misalign AND NOT v_ack THEN
+            FOR i IN 1 .. v_occ_tz_tab.COUNT LOOP
+                IF v_keep_tab(i) AND v_misalign_tab(i) IS NOT NULL THEN
+                    v_conflict_obj := json_object_t();
+                    v_conflict_obj.put(
+                        'start_time',
+                        TO_CHAR(v_occ_tz_tab(i), 'YYYY-MM-DD') || 'T' ||
+                        TO_CHAR(v_occ_start_tab(i), 'HH24:MI:SS')
+                    );
+                    v_conflict_obj.put('reason', v_misalign_tab(i));
+                    v_conflict_obj.put(
+                        'message',
+                        CASE v_misalign_tab(i)
+                            WHEN 'DAY_BLOCKED' THEN
+                                'El profesional tiene ese día bloqueado en excepciones de horario.'
+                            WHEN 'WRONG_LOCATION' THEN
+                                'El profesional no atiende en esa sucursal en el horario elegido.'
+                            WHEN 'LOCATION_CLOSED' THEN
+                                'La sucursal está cerrada ese día.'
+                            ELSE
+                                'El horario elegido no coincide con los turnos del profesional ese día.'
+                        END
+                    );
+                    v_conflicts_arr.append(v_conflict_obj);
+                END IF;
+            END LOOP;
+            po_status_code := pkg_aox_util.c_conflict_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('code', 'SCHEDULE_MISALIGNED');
+            v_response_json.put(
+                'schedule_misaligned_reason',
+                TREAT(v_conflicts_arr.get(0) AS json_object_t).get_string('reason')
+            );
+            v_response_json.put(
+                'message',
+                'Hay ' || v_conflicts_arr.get_size()
+                || ' fecha(s) de la serie fuera de la agenda del profesional.'
+            );
+            v_response_json.put('conflicts', v_conflicts_arr);
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        INSERT INTO appointment_series (
+            org_id_organization,
+            loc_id_location,
+            pro_id_professional,
+            ser_id_service,
+            frequency,
+            occurrence_count,
+            first_start_time,
+            until_date,
+            created_by
+        ) VALUES (
+            v_org_id,
+            v_loc_id,
+            v_pro_id,
+            v_ser_id,
+            'WEEKLY',
+            v_keep_count,
+            v_occ_start_tab(1),
+            v_until,
+            v_user_id
+        )
+        RETURNING id_series INTO v_series_id;
+
+        COMMIT;
+
+        FOR i IN 1 .. v_occ_tz_tab.COUNT LOOP
+            IF v_keep_tab(i) THEN
+
+            v_row_json := TREAT(json_object_t.parse(v_json_req.to_clob()) AS json_object_t);
+            v_row_json.put(
+                'start_time',
+                TO_CHAR(v_occ_tz_tab(i), 'YYYY-MM-DD') || 'T' ||
+                TO_CHAR(v_occ_start_tab(i), 'HH24:MI:SS')
+            );
+            v_row_json.put('srs_id_series', v_series_id);
+            IF v_ack THEN
+                v_row_json.put('acknowledge_schedule_misalignment', TRUE);
+            END IF;
+
+            v_new_id := NULL;
+            v_row_misalign := NULL;
+            BEGIN
+                pr_create_appointment_row(
+                    pi_org_id            => v_org_id,
+                    pi_role_id           => v_role_id,
+                    pi_actual_pro_id     => v_actual_pro_id,
+                    pi_user_id           => v_user_id,
+                    pi_row_json          => v_row_json,
+                    po_new_id            => v_new_id,
+                    po_misaligned_reason => v_row_misalign
+                );
+                IF v_new_id IS NOT NULL THEN
+                    v_created := v_created + 1;
+                    v_created_obj := json_object_t();
+                    v_created_obj.put('id_appointment', v_new_id);
+                    v_created_obj.put(
+                        'start_time',
+                        TO_CHAR(v_occ_tz_tab(i), 'YYYY-MM-DD') || 'T' ||
+                        TO_CHAR(v_occ_start_tab(i), 'HH24:MI:SS')
+                    );
+                    v_created_arr.append(v_created_obj);
+                    IF v_cus_id IS NULL THEN
+                        BEGIN
+                            SELECT cus_id_customer
+                              INTO v_cus_id
+                              FROM appointment
+                             WHERE id_appointment = v_new_id;
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                v_cus_id := NULL;
+                        END;
+                    END IF;
+                ELSE
+                    v_failed := v_failed + 1;
+                    v_conflict_obj := json_object_t();
+                    v_conflict_obj.put(
+                        'start_time',
+                        TO_CHAR(v_occ_tz_tab(i), 'YYYY-MM-DD') || 'T' ||
+                        TO_CHAR(v_occ_start_tab(i), 'HH24:MI:SS')
+                    );
+                    v_conflict_obj.put('reason', NVL(v_row_misalign, 'UNKNOWN'));
+                    v_conflict_obj.put(
+                        'message',
+                        CASE v_row_misalign
+                            WHEN 'DAY_BLOCKED' THEN
+                                'El profesional tiene ese día bloqueado en excepciones de horario.'
+                            WHEN 'WRONG_LOCATION' THEN
+                                'El profesional no atiende en esa sucursal en el horario elegido.'
+                            WHEN 'LOCATION_CLOSED' THEN
+                                'La sucursal está cerrada ese día.'
+                            ELSE
+                                'El horario elegido no coincide con los turnos del profesional ese día.'
+                        END
+                    );
+                    v_skipped_arr.append(v_conflict_obj);
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    ROLLBACK;
+                    v_failed := v_failed + 1;
+                    v_conflict_obj := json_object_t();
+                    v_conflict_obj.put(
+                        'start_time',
+                        TO_CHAR(v_occ_tz_tab(i), 'YYYY-MM-DD') || 'T' ||
+                        TO_CHAR(v_occ_start_tab(i), 'HH24:MI:SS')
+                    );
+                    v_conflict_obj.put('reason', 'ERROR');
+                    v_conflict_obj.put('message', pkg_aox_util.fn_clean_sqlerrm(SQLERRM));
+                    v_skipped_arr.append(v_conflict_obj);
+            END;
+            END IF;
+        END LOOP;
+
+        IF v_cus_id IS NOT NULL THEN
+            UPDATE appointment_series
+               SET cus_id_customer = v_cus_id,
+                   occurrence_count = v_created
+             WHERE id_series = v_series_id;
+            COMMIT;
+        ELSIF v_created > 0 THEN
+            UPDATE appointment_series
+               SET occurrence_count = v_created
+             WHERE id_series = v_series_id;
+            COMMIT;
+        END IF;
+
+        IF v_created = 0 THEN
+            DELETE FROM appointment_series WHERE id_series = v_series_id;
+            COMMIT;
+            po_status_code := pkg_aox_util.c_bad_request_code;
+            v_response_json.put('status', 'error');
+            v_response_json.put('code', 'SERIES_CONFLICT');
+            v_response_json.put('message', 'No se pudo crear ninguna cita de la serie.');
+            v_response_json.put('conflicts', v_skipped_arr);
+            po_response_body := v_response_json.to_clob();
+            RETURN;
+        END IF;
+
+        po_status_code := pkg_aox_util.c_success_create_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put(
+            'message',
+            CASE
+                WHEN v_skipped + v_failed = 0 THEN
+                    'Se crearon ' || v_created || ' citas de la serie semanal.'
+                ELSE
+                    'Se crearon ' || v_created || ' citas y se omitieron '
+                    || (v_skipped + v_failed) || ' por conflicto.'
+            END
+        );
+        v_response_json.put('id_series', v_series_id);
+        v_response_json.put('created', v_created);
+        v_response_json.put('skipped', v_skipped + v_failed);
+        v_response_json.put('appointments', v_created_arr);
+        IF v_skipped_arr.get_size() > 0 THEN
+            v_response_json.put('skipped_conflicts', v_skipped_arr);
+        END IF;
+        po_response_body := v_response_json.to_clob();
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_create_appointment_series;
 
 END pkg_aox_appointment_api;
 /

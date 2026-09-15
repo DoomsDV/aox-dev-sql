@@ -7,6 +7,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_customer_api IS
         pi_limit         IN  NUMBER DEFAULT 9,
         pi_pro_id        IN  NUMBER DEFAULT NULL,
         pi_search        IN  VARCHAR2 DEFAULT NULL,
+        pi_archived      IN  NUMBER DEFAULT 0,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
@@ -33,6 +34,15 @@ CREATE OR REPLACE PACKAGE pkg_aox_customer_api IS
         pi_auth_header   IN  VARCHAR2,
         pi_cus_id        IN  NUMBER,
         pi_body          IN  CLOB,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    );
+
+    -- ORDS: POST /customers/:id/archive (pi_is_active=0) y /restore (pi_is_active=1)
+    PROCEDURE pr_set_customer_active(
+        pi_auth_header   IN  VARCHAR2,
+        pi_cus_id        IN  NUMBER,
+        pi_is_active     IN  NUMBER,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     );
@@ -464,6 +474,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         pi_limit         IN  NUMBER DEFAULT 9,
         pi_pro_id        IN  NUMBER DEFAULT NULL,
         pi_search        IN  VARCHAR2 DEFAULT NULL,
+        pi_archived      IN  NUMBER DEFAULT 0,
         po_status_code   OUT NUMBER,
         po_response_body OUT CLOB
     ) IS
@@ -481,6 +492,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_offset        NUMBER;
         v_total_records NUMBER := 0;
         v_total_pages   NUMBER := 0;
+        v_want_active   NUMBER := CASE WHEN NVL(pi_archived, 0) = 1 THEN 0 ELSE 1 END;
         -- Mayúsculas + sin tildes/diacríticos para LIKE accent-insensitive (Maria = María).
         v_search        VARCHAR2(200) := TRANSLATE(
             UPPER(TRIM(pi_search)),
@@ -507,6 +519,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
           INTO v_total_records
           FROM customer c
          WHERE c.org_id_organization = v_org_id
+           AND NVL(c.is_active, 1) = v_want_active
            AND (v_effective_pro_id IS NULL OR EXISTS (
                  SELECT 1
                    FROM appointment a
@@ -535,6 +548,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                 c.email,
                 c.phone_number,
                 c.created_at,
+                NVL(c.is_active, 1) AS is_active,
                 NVL(agg.appointment_count, 0) AS appointment_count,
                 agg.last_appointment_at
             FROM customer c
@@ -558,6 +572,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
               ON agg.cus_id_customer = c.id_customer
              AND agg.org_id_organization = c.org_id_organization
             WHERE c.org_id_organization = v_org_id
+              AND NVL(c.is_active, 1) = v_want_active
               AND (v_effective_pro_id IS NULL OR EXISTS (
                     SELECT 1
                       FROM appointment a
@@ -588,6 +603,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                 rec.email
             );
             v_customer_obj.put('created_at'        , TO_CHAR(rec.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
+            v_customer_obj.put('is_active'         , NVL(rec.is_active, 1));
             v_customer_obj.put('appointment_count' , NVL(rec.appointment_count, 0));
             IF rec.last_appointment_at IS NOT NULL THEN
                 v_customer_obj.put(
@@ -644,6 +660,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_email            VARCHAR2(150);
         v_phone_number     VARCHAR2(50);
         v_created_at       TIMESTAMP;
+        v_is_active        NUMBER;
 
         v_attended_count   NUMBER := 0;
         v_cancelled_count  NUMBER := 0;
@@ -698,7 +715,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                 c.document_number,
                 c.email,
                 c.phone_number,
-                c.created_at
+                c.created_at,
+                NVL(c.is_active, 1)
               INTO
                 v_full_name,
                 v_first_name,
@@ -706,7 +724,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
                 v_document_number,
                 v_email,
                 v_phone_number,
-                v_created_at
+                v_created_at,
+                v_is_active
               FROM customer c
              WHERE c.id_customer         = pi_cus_id
                AND c.org_id_organization = v_org_id
@@ -1019,6 +1038,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
             v_email
         );
         v_data_obj.put('created_at'   , TO_CHAR(v_created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
+        v_data_obj.put('is_active'    , NVL(v_is_active, 1));
         v_data_obj.put('stats'        , v_stats_obj);
 
         po_status_code := pkg_aox_util.c_success_ok_code;
@@ -1245,6 +1265,93 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         WHEN OTHERS THEN
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_create_customer;
+
+    PROCEDURE pr_set_customer_active(
+        pi_auth_header   IN  VARCHAR2,
+        pi_cus_id        IN  NUMBER,
+        pi_is_active     IN  NUMBER,
+        po_status_code   OUT NUMBER,
+        po_response_body OUT CLOB
+    ) IS
+        v_org_id         NUMBER;
+        v_user_id        NUMBER;
+        v_role_id        NUMBER;
+        v_response_json  json_object_t := json_object_t();
+        v_data_obj       json_object_t;
+        v_full_name      customer.full_name%TYPE;
+        v_first_name     customer.first_name%TYPE;
+        v_last_name      customer.last_name%TYPE;
+        v_phone          customer.phone_number%TYPE;
+        v_document       customer.document_number%TYPE;
+        v_email          customer.email%TYPE;
+        v_is_active      NUMBER;
+        v_target_active  NUMBER;
+    BEGIN
+        IF NVL(pi_cus_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Cliente invalido.');
+        END IF;
+
+        v_target_active := CASE WHEN NVL(pi_is_active, 0) = 1 THEN 1 ELSE 0 END;
+
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+
+        pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'customers.edit',
+            CASE
+                WHEN v_target_active = 0 THEN 'No tienes permisos para archivar clientes.'
+                ELSE 'No tienes permisos para restaurar clientes.'
+            END
+        );
+
+        BEGIN
+            SELECT full_name, first_name, last_name, phone_number, document_number, email,
+                   NVL(is_active, 1)
+              INTO v_full_name, v_first_name, v_last_name, v_phone, v_document, v_email,
+                   v_is_active
+              FROM customer
+             WHERE id_customer         = pi_cus_id
+               AND org_id_organization = v_org_id
+               FOR UPDATE;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(-20004, 'Cliente no encontrado.');
+        END;
+
+        IF v_is_active != v_target_active THEN
+            UPDATE /*+ no_parallel */ customer
+               SET is_active = v_target_active
+             WHERE id_customer         = pi_cus_id
+               AND org_id_organization = v_org_id;
+            v_is_active := v_target_active;
+        END IF;
+
+        v_data_obj := json_object_t();
+        pr_put_customer_contact(
+            v_data_obj,
+            pi_cus_id,
+            v_full_name,
+            v_first_name,
+            v_last_name,
+            v_phone,
+            v_document,
+            v_email
+        );
+        v_data_obj.put('is_active', v_is_active);
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data'  , v_data_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
+    END pr_set_customer_active;
 
 END pkg_aox_customer_api;
 /

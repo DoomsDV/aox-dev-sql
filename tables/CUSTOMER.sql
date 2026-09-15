@@ -8,7 +8,8 @@ CREATE TABLE customer (
   document_number     VARCHAR2(20),
   email               VARCHAR2(150),
   phone_number        VARCHAR2(20),
-  created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
+  created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  is_active           NUMBER(1,0)                 DEFAULT 1 NOT NULL
 )
   INITRANS  10
   STORAGE (
@@ -66,6 +67,25 @@ CREATE UNIQUE INDEX uq_customer_email
   )
 /
 
+PROMPT ALTER TABLE customer ADD CONSTRAINT ck_customer_is_active CHECK
+ALTER TABLE customer
+  ADD CONSTRAINT ck_customer_is_active CHECK (
+    is_active IN (0, 1)
+  )
+/
+
+PROMPT CREATE INDEX idx_customer_org_active
+CREATE INDEX idx_customer_org_active
+  ON customer (
+    org_id_organization,
+    is_active
+  )
+  INITRANS  20
+  STORAGE (
+    NEXT       1024 K
+  )
+/
+
 PROMPT ALTER TABLE customer ADD CONSTRAINT fk_customer_org FOREIGN KEY
 ALTER TABLE customer
   ADD CONSTRAINT fk_customer_org FOREIGN KEY (
@@ -80,3 +100,4 @@ COMMENT ON COLUMN customer.last_name IS 'Apellido. Nullable por el mismo motivo 
 COMMENT ON COLUMN customer.document_number IS 'CI paraguaya, solo digitos (5-8). Unica por organizacion cuando no es NULL.';
 COMMENT ON COLUMN customer.email IS 'Correo en minusculas. Unico por organizacion cuando no es NULL.';
 COMMENT ON COLUMN customer.full_name IS 'Nombre visible. En alta/edicion del panel se arma como TRIM(first_name || '' '' || last_name).';
+COMMENT ON COLUMN customer.is_active IS '1 = visible en listado/busqueda del dia a dia. 0 = archivado (soft delete). Nunca se borra la fila.';

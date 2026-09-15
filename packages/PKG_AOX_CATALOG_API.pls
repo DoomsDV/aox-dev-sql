@@ -239,7 +239,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_catalog_api IS
         FOR rec IN (
             SELECT
               id_location,
+              name,
               address,
+              phone,
               latitude,
               longitude
             FROM location
@@ -248,7 +250,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_catalog_api IS
         ) LOOP
             v_item_obj := json_object_t();
             v_item_obj.put('id_location', rec.id_location);
+            v_item_obj.put('name'     , rec.name);
             v_item_obj.put('address'  , rec.address);
+            IF rec.phone IS NULL OR TRIM(rec.phone) IS NULL THEN
+                v_item_obj.put_null('phone');
+            ELSE
+                v_item_obj.put('phone', rec.phone);
+            END IF;
             v_item_obj.put('latitude'  , rec.latitude);
             v_item_obj.put('longitude'  , rec.longitude);
             v_data_arr.append(v_item_obj);

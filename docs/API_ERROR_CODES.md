@@ -21,6 +21,8 @@ Respuestas de error JSON estándar:
 | `VALIDATION_ERROR` | 400 | Datos inválidos | Mostrar error de formulario |
 | `NOT_FOUND` | 404 | Recurso inexistente | Error contextual |
 | `CONFLICT` | 409 | Conflicto de negocio | Error contextual |
+| `SERIES_CONFLICT` | 409 | Solape en una o más fechas de una serie semanal | Listar `conflicts[]` y ofrecer crear solo fechas libres |
+| `SCHEDULE_MISALIGNED` | 409 | Horario fuera de agenda (cita o serie) | Pedir acknowledge o reprogramar |
 | `INTERNAL_ERROR` | 500 | Error no controlado | Error genérico |
 
 ## SQLCODE en PL/SQL (`PKG_AOX_UTIL`)
