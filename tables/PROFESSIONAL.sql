@@ -10,7 +10,8 @@ CREATE TABLE professional (
   created_at          TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
   spe_id_specialty    NUMBER                      NULL,
   phone_number        VARCHAR2(20)                NOT NULL,
-  display_name        VARCHAR2(150)               NULL
+  display_name        VARCHAR2(150)               NULL,
+  short_bio           VARCHAR2(280)               NULL
 )
   INITRANS  10
   STORAGE (
