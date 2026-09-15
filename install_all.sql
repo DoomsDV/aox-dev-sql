@@ -76,6 +76,9 @@ PROMPT [17c/31] ref_holiday
 PROMPT [18/31] appointment
 @@tables\APPOINTMENT.sql
 
+PROMPT [18b/31] appointment_series (HAS-22 citas recurrentes semanales)
+@@tables\APPOINTMENT_SERIES.sql
+
 PROMPT [19/31] app_user_email_verification
 @@tables\APP_USER_EMAIL_VERIFICATION.sql
 
@@ -454,6 +457,8 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 
 PROMPT --- Migraciones incrementales ---
 @@migrations\20260906_einvoice_webhook_durable.sql
+@@migrations\20260915_appointment_series.sql
+@@migrations\20260915_appointment_series_ords.sql
 
 --------------------------------------------------------------------------------
 -- FASE 5: PAQUETES (IA)
