@@ -2,37 +2,39 @@
 -- Reversible: DELETE FROM role_capability_default / capability WHERE code='analytics.view'
 -- y ORDS.DELETE_HANDLER de dashboard/analytics.
 
-PROMPT === 20260916_tenant_analytics ===
+-- capability analytics.view
+BEGIN
+    MERGE INTO capability t
+    USING (
+        SELECT
+            'analytics.view' AS code,
+            'analytics' AS group_code,
+            'Analiticas' AS group_label,
+            'Ver analiticas' AS label,
+            'Ver el resumen de citas, inasistencias y senas del negocio.' AS description,
+            'MENU' AS kind,
+            15 AS sort_order
+          FROM dual
+    ) s
+    ON (t.code = s.code)
+    WHEN MATCHED THEN UPDATE SET
+        t.group_code   = s.group_code,
+        t.group_label  = s.group_label,
+        t.label        = s.label,
+        t.description  = s.description,
+        t.kind         = s.kind,
+        t.sort_order   = s.sort_order,
+        t.is_active    = 1
+    WHEN NOT MATCHED THEN INSERT (
+        code, group_code, group_label, label, description, kind, sort_order, is_active
+    ) VALUES (
+        s.code, s.group_code, s.group_label, s.label, s.description, s.kind, s.sort_order, 1
+    );
+    COMMIT;
+END;
+/
 
-PROMPT --- capability analytics.view ---
-MERGE INTO capability t
-USING (
-    SELECT
-        'analytics.view' AS code,
-        'analytics' AS group_code,
-        'Analiticas' AS group_label,
-        'Ver analiticas' AS label,
-        'Ver el resumen de citas, inasistencias y senas del negocio.' AS description,
-        'MENU' AS kind,
-        15 AS sort_order
-      FROM dual
-) s
-ON (t.code = s.code)
-WHEN MATCHED THEN UPDATE SET
-    t.group_code   = s.group_code,
-    t.group_label  = s.group_label,
-    t.label        = s.label,
-    t.description  = s.description,
-    t.kind         = s.kind,
-    t.sort_order   = s.sort_order,
-    t.is_active    = 1
-WHEN NOT MATCHED THEN INSERT (
-    code, group_code, group_label, label, description, kind, sort_order, is_active
-) VALUES (
-    s.code, s.group_code, s.group_label, s.label, s.description, s.kind, s.sort_order, 1
-);
-COMMIT;
-
+-- Defaults: Admin ON; recepcion y profesional OFF.
 DECLARE
     v_admin  NUMBER := pkg_aox_util.fn_rol('ADMIN');
     v_prof   NUMBER := pkg_aox_util.fn_rol('PROFESIONAL');
@@ -57,10 +59,10 @@ END;
 /
 COMMIT;
 
-PROMPT --- PKG_AOX_DASHBOARD_API (pr_get_analytics) ---
+-- PKG_AOX_DASHBOARD_API (pr_get_analytics)
 @@../packages/PKG_AOX_DASHBOARD_API.pls
 
-PROMPT --- ORDS GET /dashboard/analytics ---
+-- ORDS GET /dashboard/analytics
 BEGIN
     ORDS.define_template(p_module_name => 'hasel', p_pattern => 'dashboard/analytics');
     ORDS.define_handler(
@@ -113,5 +115,3 @@ END;
     COMMIT;
 END;
 /
-
-PROMPT === 20260916_tenant_analytics finalizada ===
