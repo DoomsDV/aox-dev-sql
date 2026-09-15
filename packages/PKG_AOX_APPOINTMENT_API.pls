@@ -951,6 +951,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'calendar.manage',
+            'No tienes permisos para crear citas.'
+        );
 
         IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
             BEGIN
@@ -1076,6 +1082,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
         -- Gate de suscripción: se valida UNA sola vez para todo el lote (no por fila).
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'calendar.manage',
+            'No tienes permisos para crear citas.'
+        );
 
         IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
             BEGIN
@@ -1247,6 +1259,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'calendar.manage',
+            'No tienes permisos para modificar citas.'
+        );
 
         IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
             BEGIN
@@ -1833,6 +1851,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
         -- Gate de suscripción: bloquea eliminación en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'calendar.manage',
+            'No tienes permisos para eliminar citas.'
+        );
 
         -- Fase 5: mismo alcance PROFESIONAL que ya usan pr_get_appointment y
         -- pr_update_appointment (evita el IDOR horizontal: un PROFESIONAL borrando
@@ -1993,6 +2017,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         END IF;
 
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'calendar.manage',
+            'No tienes permisos para modificar citas.'
+        );
 
         IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
             BEGIN
