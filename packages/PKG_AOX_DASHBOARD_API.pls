@@ -19,6 +19,20 @@ CREATE OR REPLACE PACKAGE pkg_aox_dashboard_api IS
         po_response_body OUT CLOB
     );
 
+    -- HAS-50 / HAS-57 / HAS-62: analíticas del tenant (volumen 7/15/30/custom,
+    -- estados, inasistencias, sucursal/profesional y totales de señas).
+    -- Requiere analytics.view. from/to = YYYY-MM-DD, máximo 90 días.
+    PROCEDURE pr_get_analytics(
+        pi_auth_header     IN  VARCHAR2,
+        pi_days            IN  NUMBER DEFAULT 7,
+        pi_location_id     IN  NUMBER DEFAULT NULL,
+        pi_professional_id IN  NUMBER DEFAULT NULL,
+        pi_from_date       IN  VARCHAR2 DEFAULT NULL,
+        pi_to_date         IN  VARCHAR2 DEFAULT NULL,
+        po_status_code     OUT NUMBER,
+        po_response_body   OUT CLOB
+    );
+
 END pkg_aox_dashboard_api;
 /
 
@@ -618,6 +632,522 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         WHEN OTHERS THEN
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     END pr_get_profitability;
+
+    -- HAS-50: un solo agregado para Analíticas (no listar próximas citas).
+    -- Inasistencia = cita ya vencida que sigue PENDIENTE o CONFIRMADO
+    -- (no se completó ni se canceló). Denominador: esas + COMPLETADO.
+    PROCEDURE pr_get_analytics(
+        pi_auth_header     IN  VARCHAR2,
+        pi_days            IN  NUMBER DEFAULT 7,
+        pi_location_id     IN  NUMBER DEFAULT NULL,
+        pi_professional_id IN  NUMBER DEFAULT NULL,
+        pi_from_date       IN  VARCHAR2 DEFAULT NULL,
+        pi_to_date         IN  VARCHAR2 DEFAULT NULL,
+        po_status_code     OUT NUMBER,
+        po_response_body   OUT CLOB
+    ) IS
+        v_user_id          NUMBER;
+        v_org_id           NUMBER;
+        v_role_id          NUMBER;
+        v_prof_id          NUMBER := -1;
+        v_is_org_viewer    BOOLEAN := FALSE;
+
+        v_days             NUMBER;
+        v_loc_id           NUMBER;
+        v_filter_pro_id    NUMBER;
+        v_custom           BOOLEAN := FALSE;
+        v_from_d           DATE;
+        v_to_d             DATE;
+        v_tmp_d            DATE;
+        v_period_kind      VARCHAR2(10) := 'preset';
+
+        v_now_local        TIMESTAMP;
+        v_today_start      TIMESTAMP;
+        v_tomorrow_start   TIMESTAMP;
+        v_period_start     TIMESTAMP;
+        v_period_end       TIMESTAMP;
+        v_period_last      TIMESTAMP;
+        v_prev_start       TIMESTAMP;
+        v_prev_end         TIMESTAMP;
+
+        v_pendiente        NUMBER := 0;
+        v_confirmada       NUMBER := 0;
+        v_completada       NUMBER := 0;
+        v_cancelada        NUMBER := 0;
+        v_volume_total     NUMBER := 0;
+
+        v_ns_count         NUMBER := 0;
+        v_ns_eligible      NUMBER := 0;
+        v_ns_pct           NUMBER;
+        v_prev_ns_count    NUMBER := 0;
+        v_prev_ns_eligible NUMBER := 0;
+        v_prev_ns_pct      NUMBER;
+        v_ns_delta         NUMBER;
+
+        v_paid_total       NUMBER := 0;
+        v_pending_total    NUMBER := 0;
+        v_paid_count       NUMBER := 0;
+        v_pending_count    NUMBER := 0;
+        v_deposit_count    NUMBER := 0;
+
+        v_response_json    json_object_t := json_object_t();
+        v_data_obj         json_object_t := json_object_t();
+        v_status_obj       json_object_t := json_object_t();
+        v_no_show_obj      json_object_t := json_object_t();
+        v_payments_obj     json_object_t := json_object_t();
+        v_filters_obj      json_object_t := json_object_t();
+        v_meta_obj         json_object_t := json_object_t();
+        v_by_day_arr       json_array_t  := json_array_t();
+        v_by_branch_arr    json_array_t  := json_array_t();
+        v_by_prof_arr      json_array_t  := json_array_t();
+        v_branch_opts      json_array_t  := json_array_t();
+        v_prof_opts        json_array_t  := json_array_t();
+        v_row_obj          json_object_t;
+        v_day_obj          json_object_t;
+
+        TYPE t_day_count_tab IS TABLE OF NUMBER INDEX BY VARCHAR2(10);
+        v_day_counts       t_day_count_tab;
+        v_day_key          VARCHAR2(10);
+        v_day_ts           TIMESTAMP;
+        v_day_count        NUMBER;
+        v_api_code         VARCHAR2(30);
+        v_error_message    VARCHAR2(4000);
+    BEGIN
+        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+
+        IF NVL(v_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+        END IF;
+
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'analytics.view',
+            'No tienes permisos para ver analíticas.'
+        );
+
+        v_is_org_viewer := v_role_id IN (
+            pkg_aox_util.fn_rol('ADMIN'),
+            pkg_aox_util.fn_rol('RECEPCIONISTA')
+        );
+
+        BEGIN
+            SELECT id_professional
+              INTO v_prof_id
+              FROM professional
+             WHERE usr_id_user           = v_user_id
+               AND org_id_organization   = v_org_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_prof_id := -1;
+        END;
+
+        IF NVL(pi_days, 7) = 15 THEN
+            v_days := 15;
+        ELSIF NVL(pi_days, 7) = 30 THEN
+            v_days := 30;
+        ELSE
+            v_days := 7;
+        END IF;
+
+        BEGIN
+            IF TRIM(pi_from_date) IS NOT NULL AND TRIM(pi_to_date) IS NOT NULL THEN
+                v_from_d := TRUNC(TO_DATE(TRIM(pi_from_date), 'YYYY-MM-DD'));
+                v_to_d   := TRUNC(TO_DATE(TRIM(pi_to_date), 'YYYY-MM-DD'));
+                IF v_from_d > v_to_d THEN
+                    v_tmp_d := v_from_d;
+                    v_from_d := v_to_d;
+                    v_to_d := v_tmp_d;
+                END IF;
+                IF (v_to_d - v_from_d + 1) BETWEEN 1 AND 90 THEN
+                    v_custom := TRUE;
+                    v_days := v_to_d - v_from_d + 1;
+                    v_period_kind := 'custom';
+                END IF;
+            END IF;
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_custom := FALSE;
+                v_period_kind := 'preset';
+        END;
+
+        v_loc_id := CASE WHEN NVL(pi_location_id, 0) > 0 THEN pi_location_id ELSE NULL END;
+
+        IF v_is_org_viewer THEN
+            v_filter_pro_id := CASE
+                WHEN NVL(pi_professional_id, 0) > 0 THEN pi_professional_id
+                ELSE NULL
+            END;
+        ELSE
+            IF v_prof_id <= 0 THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
+            END IF;
+            v_filter_pro_id := v_prof_id;
+        END IF;
+
+        IF v_loc_id IS NOT NULL THEN
+            DECLARE
+                v_loc_ok NUMBER;
+            BEGIN
+                SELECT COUNT(*)
+                  INTO v_loc_ok
+                  FROM location
+                 WHERE id_location         = v_loc_id
+                   AND org_id_organization = v_org_id;
+                IF v_loc_ok = 0 THEN
+                    RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Sucursal inválida.');
+                END IF;
+            END;
+        END IF;
+
+        IF v_is_org_viewer AND v_filter_pro_id IS NOT NULL THEN
+            DECLARE
+                v_pro_ok NUMBER;
+            BEGIN
+                SELECT COUNT(*)
+                  INTO v_pro_ok
+                  FROM professional
+                 WHERE id_professional     = v_filter_pro_id
+                   AND org_id_organization = v_org_id;
+                IF v_pro_ok = 0 THEN
+                    RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Profesional inválido.');
+                END IF;
+            END;
+        END IF;
+
+        v_now_local      := CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP);
+        v_today_start    := CAST(TRUNC(v_now_local) AS TIMESTAMP);
+        v_tomorrow_start := v_today_start + NUMTODSINTERVAL(1, 'DAY');
+        IF v_custom THEN
+            v_period_start := CAST(v_from_d AS TIMESTAMP);
+            v_period_last  := CAST(v_to_d AS TIMESTAMP);
+            v_period_end   := v_period_last + NUMTODSINTERVAL(1, 'DAY');
+        ELSE
+            v_period_start := v_today_start - NUMTODSINTERVAL(v_days - 1, 'DAY');
+            v_period_last  := v_today_start;
+            v_period_end   := v_tomorrow_start;
+        END IF;
+        v_prev_start     := v_period_start - NUMTODSINTERVAL(v_days, 'DAY');
+        v_prev_end       := v_period_start;
+
+        SELECT
+            NVL(SUM(CASE WHEN a.status = 'PENDIENTE'  THEN 1 ELSE 0 END), 0),
+            NVL(SUM(CASE WHEN a.status = 'CONFIRMADO' THEN 1 ELSE 0 END), 0),
+            NVL(SUM(CASE WHEN a.status = 'COMPLETADO' THEN 1 ELSE 0 END), 0),
+            NVL(SUM(CASE WHEN a.status = 'CANCELADO'  THEN 1 ELSE 0 END), 0),
+            NVL(SUM(CASE WHEN a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO') THEN 1 ELSE 0 END), 0)
+          INTO
+            v_pendiente,
+            v_confirmada,
+            v_completada,
+            v_cancelada,
+            v_volume_total
+          FROM appointment a
+         WHERE a.org_id_organization = v_org_id
+           AND (v_is_org_viewer OR a.pro_id_professional = v_prof_id)
+           AND (v_loc_id IS NULL OR a.loc_id_location = v_loc_id)
+           AND (v_filter_pro_id IS NULL OR a.pro_id_professional = v_filter_pro_id)
+           AND a.start_time >= v_period_start
+           AND a.start_time <  v_period_end;
+
+        SELECT
+            NVL(SUM(CASE
+                WHEN a.status IN ('PENDIENTE', 'CONFIRMADO') THEN 1 ELSE 0
+            END), 0),
+            NVL(SUM(CASE
+                WHEN a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO') THEN 1 ELSE 0
+            END), 0)
+          INTO
+            v_ns_count,
+            v_ns_eligible
+          FROM appointment a
+         WHERE a.org_id_organization = v_org_id
+           AND (v_is_org_viewer OR a.pro_id_professional = v_prof_id)
+           AND (v_loc_id IS NULL OR a.loc_id_location = v_loc_id)
+           AND (v_filter_pro_id IS NULL OR a.pro_id_professional = v_filter_pro_id)
+           AND a.start_time >= v_period_start
+           AND a.start_time <  LEAST(v_now_local, v_period_end)
+           AND a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO');
+
+        SELECT
+            NVL(SUM(CASE
+                WHEN a.status IN ('PENDIENTE', 'CONFIRMADO') THEN 1 ELSE 0
+            END), 0),
+            NVL(SUM(CASE
+                WHEN a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO') THEN 1 ELSE 0
+            END), 0)
+          INTO
+            v_prev_ns_count,
+            v_prev_ns_eligible
+          FROM appointment a
+         WHERE a.org_id_organization = v_org_id
+           AND (v_is_org_viewer OR a.pro_id_professional = v_prof_id)
+           AND (v_loc_id IS NULL OR a.loc_id_location = v_loc_id)
+           AND (v_filter_pro_id IS NULL OR a.pro_id_professional = v_filter_pro_id)
+           AND a.start_time >= v_prev_start
+           AND a.start_time <  v_prev_end
+           AND a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO');
+
+        IF v_ns_eligible > 0 THEN
+            v_ns_pct := ROUND(100 * v_ns_count / v_ns_eligible, 1);
+        END IF;
+        IF v_prev_ns_eligible > 0 THEN
+            v_prev_ns_pct := ROUND(100 * v_prev_ns_count / v_prev_ns_eligible, 1);
+        END IF;
+        IF v_ns_pct IS NOT NULL AND v_prev_ns_pct IS NOT NULL THEN
+            v_ns_delta := ROUND(v_ns_pct - v_prev_ns_pct, 1);
+        END IF;
+
+        SELECT
+            NVL(SUM(CASE
+                WHEN a.payment_status IN ('PAID', 'PAID_TRANSFER', 'PAID_CASH')
+                THEN NVL(a.deposit_amount, 0) ELSE 0
+            END), 0),
+            NVL(SUM(CASE
+                WHEN a.payment_status = 'PENDING'
+                THEN NVL(a.deposit_amount, 0) ELSE 0
+            END), 0),
+            NVL(SUM(CASE
+                WHEN a.payment_status IN ('PAID', 'PAID_TRANSFER', 'PAID_CASH')
+                 AND NVL(a.deposit_amount, 0) > 0
+                THEN 1 ELSE 0
+            END), 0),
+            NVL(SUM(CASE
+                WHEN a.payment_status = 'PENDING'
+                 AND NVL(a.deposit_amount, 0) > 0
+                THEN 1 ELSE 0
+            END), 0),
+            NVL(SUM(CASE
+                WHEN NVL(a.deposit_amount, 0) > 0
+                 AND a.payment_status IN ('PAID', 'PAID_TRANSFER', 'PAID_CASH', 'PENDING')
+                THEN 1 ELSE 0
+            END), 0)
+          INTO
+            v_paid_total,
+            v_pending_total,
+            v_paid_count,
+            v_pending_count,
+            v_deposit_count
+          FROM appointment a
+         WHERE a.org_id_organization = v_org_id
+           AND (v_is_org_viewer OR a.pro_id_professional = v_prof_id)
+           AND (v_loc_id IS NULL OR a.loc_id_location = v_loc_id)
+           AND (v_filter_pro_id IS NULL OR a.pro_id_professional = v_filter_pro_id)
+           AND a.start_time >= v_period_start
+           AND a.start_time <  v_period_end;
+
+        FOR rec IN (
+            SELECT
+                TO_CHAR(TRUNC(a.start_time), 'YYYY-MM-DD') AS appointment_date,
+                COUNT(*) AS cnt
+              FROM appointment a
+             WHERE a.org_id_organization = v_org_id
+               AND (v_is_org_viewer OR a.pro_id_professional = v_prof_id)
+               AND (v_loc_id IS NULL OR a.loc_id_location = v_loc_id)
+               AND (v_filter_pro_id IS NULL OR a.pro_id_professional = v_filter_pro_id)
+               AND a.start_time >= v_period_start
+               AND a.start_time <  v_period_end
+               AND a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO')
+             GROUP BY TRUNC(a.start_time)
+        ) LOOP
+            v_day_counts(rec.appointment_date) := rec.cnt;
+        END LOOP;
+
+        FOR v_day_i IN 0 .. (v_days - 1) LOOP
+            v_day_ts    := v_period_start + NUMTODSINTERVAL(v_day_i, 'DAY');
+            v_day_key   := TO_CHAR(v_day_ts, 'YYYY-MM-DD');
+            v_day_count := 0;
+            IF v_day_counts.EXISTS(v_day_key) THEN
+                v_day_count := v_day_counts(v_day_key);
+            END IF;
+            v_day_obj := json_object_t();
+            v_day_obj.put('date' , v_day_key);
+            v_day_obj.put('count', v_day_count);
+            v_by_day_arr.append(v_day_obj);
+        END LOOP;
+
+        FOR rec IN (
+            SELECT
+                l.id_location,
+                l.name,
+                COUNT(*) AS cnt
+              FROM appointment a
+              JOIN location l ON l.id_location = a.loc_id_location
+             WHERE a.org_id_organization = v_org_id
+               AND (v_is_org_viewer OR a.pro_id_professional = v_prof_id)
+               AND (v_loc_id IS NULL OR a.loc_id_location = v_loc_id)
+               AND (v_filter_pro_id IS NULL OR a.pro_id_professional = v_filter_pro_id)
+               AND a.start_time >= v_period_start
+               AND a.start_time <  v_period_end
+               AND a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO', 'CANCELADO')
+             GROUP BY l.id_location, l.name
+             ORDER BY cnt DESC, l.name
+        ) LOOP
+            v_row_obj := json_object_t();
+            v_row_obj.put('id'   , rec.id_location);
+            v_row_obj.put('name' , rec.name);
+            v_row_obj.put('count', rec.cnt);
+            v_by_branch_arr.append(v_row_obj);
+        END LOOP;
+
+        FOR rec IN (
+            SELECT
+                p.id_professional,
+                NVL(p.display_name, TRIM(u.first_name || ' ' || u.last_name)) AS prof_name,
+                COUNT(*) AS cnt
+              FROM appointment a
+              JOIN professional p ON p.id_professional = a.pro_id_professional
+              JOIN app_user u     ON u.id_user         = p.usr_id_user
+             WHERE a.org_id_organization = v_org_id
+               AND (v_is_org_viewer OR a.pro_id_professional = v_prof_id)
+               AND (v_loc_id IS NULL OR a.loc_id_location = v_loc_id)
+               AND (v_filter_pro_id IS NULL OR a.pro_id_professional = v_filter_pro_id)
+               AND a.start_time >= v_period_start
+               AND a.start_time <  v_period_end
+               AND a.status IN ('PENDIENTE', 'CONFIRMADO', 'COMPLETADO', 'CANCELADO')
+             GROUP BY p.id_professional,
+                      NVL(p.display_name, TRIM(u.first_name || ' ' || u.last_name))
+             ORDER BY cnt DESC, prof_name
+        ) LOOP
+            v_row_obj := json_object_t();
+            v_row_obj.put('id'   , rec.id_professional);
+            v_row_obj.put('name' , rec.prof_name);
+            v_row_obj.put('count', rec.cnt);
+            v_by_prof_arr.append(v_row_obj);
+        END LOOP;
+
+        FOR rec IN (
+            SELECT l.id_location, l.name
+              FROM location l
+             WHERE l.org_id_organization = v_org_id
+             ORDER BY l.is_active DESC, l.name
+        ) LOOP
+            v_row_obj := json_object_t();
+            v_row_obj.put('id'  , rec.id_location);
+            v_row_obj.put('name', rec.name);
+            v_branch_opts.append(v_row_obj);
+        END LOOP;
+
+        IF v_is_org_viewer THEN
+            FOR rec IN (
+                SELECT
+                    p.id_professional,
+                    NVL(p.display_name, TRIM(u.first_name || ' ' || u.last_name)) AS prof_name
+                  FROM professional p
+                  JOIN app_user u ON u.id_user = p.usr_id_user
+                 WHERE p.org_id_organization = v_org_id
+                 ORDER BY prof_name
+            ) LOOP
+                v_row_obj := json_object_t();
+                v_row_obj.put('id'  , rec.id_professional);
+                v_row_obj.put('name', rec.prof_name);
+                v_prof_opts.append(v_row_obj);
+            END LOOP;
+        END IF;
+
+        v_status_obj.put('pendiente' , v_pendiente);
+        v_status_obj.put('confirmada', v_confirmada);
+        v_status_obj.put('completada', v_completada);
+        v_status_obj.put('cancelada' , v_cancelada);
+
+        v_no_show_obj.put('count'          , v_ns_count);
+        v_no_show_obj.put('eligible_count' , v_ns_eligible);
+        IF v_ns_pct IS NULL THEN
+            v_no_show_obj.put_null('pct');
+        ELSE
+            v_no_show_obj.put('pct', v_ns_pct);
+        END IF;
+        IF v_prev_ns_pct IS NULL THEN
+            v_no_show_obj.put_null('prev_pct');
+        ELSE
+            v_no_show_obj.put('prev_pct', v_prev_ns_pct);
+        END IF;
+        IF v_ns_delta IS NULL THEN
+            v_no_show_obj.put_null('delta_pct');
+        ELSE
+            v_no_show_obj.put('delta_pct', v_ns_delta);
+        END IF;
+
+        v_payments_obj.put('currency'       , 'PYG');
+        v_payments_obj.put('paid_total'     , v_paid_total);
+        v_payments_obj.put('pending_total'  , v_pending_total);
+        v_payments_obj.put('paid_count'     , v_paid_count);
+        v_payments_obj.put('pending_count'  , v_pending_count);
+        v_payments_obj.put('deposit_count'  , v_deposit_count);
+
+        v_filters_obj.put('period_days', v_days);
+        v_filters_obj.put('period_kind', v_period_kind);
+        v_filters_obj.put('from_date', TO_CHAR(v_period_start, 'YYYY-MM-DD'));
+        v_filters_obj.put('to_date', TO_CHAR(v_period_last, 'YYYY-MM-DD'));
+        IF v_loc_id IS NULL THEN
+            v_filters_obj.put_null('location_id');
+        ELSE
+            v_filters_obj.put('location_id', v_loc_id);
+        END IF;
+        IF v_filter_pro_id IS NULL THEN
+            v_filters_obj.put_null('professional_id');
+        ELSE
+            v_filters_obj.put('professional_id', v_filter_pro_id);
+        END IF;
+        v_filters_obj.put('can_filter_professional', CASE WHEN v_is_org_viewer THEN 1 ELSE 0 END);
+        v_filters_obj.put('branches'     , v_branch_opts);
+        v_filters_obj.put('professionals', v_prof_opts);
+
+        v_meta_obj.put('timezone'           , pkg_aox_util.fn_app_timezone);
+        v_meta_obj.put('period_start'       , TO_CHAR(v_period_start, 'YYYY-MM-DD'));
+        v_meta_obj.put('period_end'         , TO_CHAR(v_period_last, 'YYYY-MM-DD'));
+        v_meta_obj.put('period_kind'        , v_period_kind);
+        v_meta_obj.put('generated_at_local' , TO_CHAR(v_now_local, 'YYYY-MM-DD"T"HH24:MI:SS'));
+
+        v_data_obj.put('period_days'         , v_days);
+        v_data_obj.put('period_kind'        , v_period_kind);
+        v_data_obj.put('total_appointments'  , v_volume_total);
+        v_data_obj.put('appointments_by_day' , v_by_day_arr);
+        v_data_obj.put('by_status'           , v_status_obj);
+        v_data_obj.put('no_show'             , v_no_show_obj);
+        v_data_obj.put('by_branch'           , v_by_branch_arr);
+        v_data_obj.put('by_professional'     , v_by_prof_arr);
+        v_data_obj.put('payments'            , v_payments_obj);
+        v_data_obj.put('filters'             , v_filters_obj);
+        v_data_obj.put('meta'                , v_meta_obj);
+
+        po_status_code := pkg_aox_util.c_success_ok_code;
+        v_response_json.put('status', 'success');
+        v_response_json.put('data'  , v_data_obj);
+        po_response_body := v_response_json.to_clob();
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_util.pr_resolve_api_error(SQLCODE, SQLERRM, po_status_code, v_api_code, v_error_message);
+            pkg_aox_util.pr_log_api(
+                pi_api_name        => 'DASHBOARD_ANALYTICS',
+                pi_process_name    => 'PKG_AOX_DASHBOARD_API.PR_GET_ANALYTICS',
+                pi_http_method     => 'GET',
+                pi_endpoint        => '/dashboard/analytics',
+                pi_org_id          => v_org_id,
+                pi_user_id         => v_user_id,
+                pi_status          => 'ERROR',
+                pi_status_code     => po_status_code,
+                pi_error_code      => SQLCODE,
+                pi_error_message   => SQLERRM,
+                pi_error_stack     => DBMS_UTILITY.FORMAT_ERROR_STACK,
+                pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                pi_request_params  => 'days=' || pi_days
+                    || ';from_date=' || pi_from_date
+                    || ';to_date=' || pi_to_date
+                    || ';location_id=' || pi_location_id
+                    || ';professional_id=' || pi_professional_id
+            );
+
+            pkg_aox_util.pr_build_api_error_response(
+                pi_status_code   => po_status_code,
+                pi_api_code      => pkg_aox_util.fn_resolve_api_code(po_status_code, SQLCODE, SQLERRM),
+                pi_message       => v_error_message,
+                po_response_body => po_response_body
+            );
+    END pr_get_analytics;
 
 END pkg_aox_dashboard_api;
 /
