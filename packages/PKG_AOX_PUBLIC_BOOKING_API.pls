@@ -1197,16 +1197,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_public_booking_api IS
             JOIN org_member m ON m.id_org_member = p.usr_id_user
             JOIN platform_user pu ON pu.id_platform_user = m.platform_user_id
             LEFT JOIN specialty s ON p.spe_id_specialty = s.id_specialty
+            -- HAS-112: foto y bio son opcionales. Filtro restante:
+            -- activo, slug publico, org no unpublished.
             WHERE p.org_id_organization = v_org_id
               AND p.is_active = 1
               AND p.profile_slug IS NOT NULL
               AND TRIM(p.profile_slug) IS NOT NULL
-              AND NVL(
-                    NULLIF(TRIM(p.profile_image_url), ''),
-                    NULLIF(TRIM(pu.profile_image_url), '')
-                  ) IS NOT NULL
-              AND p.short_bio IS NOT NULL
-              AND TRIM(p.short_bio) IS NOT NULL
               AND pkg_aox_payment_settings_api.fn_org_is_unpublished(v_org_id) = 0
             ORDER BY full_name
         ) LOOP
