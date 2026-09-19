@@ -234,7 +234,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_catalog_api IS
         v_response_json json_object_t := json_object_t();
         v_data_arr      json_array_t  := json_array_t();
         v_item_obj      json_object_t;
+        v_found         NUMBER := 0;
     BEGIN
+        -- LOCATION es tenant: resolver org via ORG_PUBLIC_DIRECTORY (sin VPD).
+        FOR rec IN (
+            SELECT d.org_id_organization
+              FROM org_public_directory d
+        ) LOOP
+            pkg_aox_session.set_org(rec.org_id_organization);
+            SELECT COUNT(*)
+              INTO v_found
+              FROM location l
+             WHERE l.id_location = pi_id
+               AND ROWNUM = 1;
+            IF v_found > 0 THEN
+                EXIT;
+            END IF;
+        END LOOP;
+        IF v_found = 0 THEN
+            pkg_aox_session.clear;
+        END IF;
+
         -- Consulta sin paginación, ordenada alfabéticamente
         FOR rec IN (
             SELECT

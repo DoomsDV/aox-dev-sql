@@ -58,6 +58,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_exception_api IS
     ) IS
         v_role_id NUMBER;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         IF v_role_id NOT IN (
@@ -172,7 +173,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_exception_api IS
         v_item          json_object_t;
         v_slot_count    NUMBER;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         pr_assert_professional_in_org(pi_prof_id, v_org_id);
 
         v_from_date := fn_parse_exception_date(pi_from_date);
@@ -245,7 +246,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_exception_api IS
         v_exc_type        VARCHAR2(20);
         v_note            VARCHAR2(500);
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         pr_assert_professional_in_org(pi_prof_id, v_org_id);
         v_exception_date := fn_parse_exception_date(pi_exception_date);
 
@@ -354,7 +355,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_exception_api IS
         v_response_json   json_object_t := json_object_t();
     BEGIN
         pr_assert_schedule_manager(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -473,11 +474,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_exception_api IS
                 INSERT INTO professional_schedule_exception_slot (
                     exc_id_schedule_exception,
                     loc_id_location,
+                    org_id_organization,
                     start_time,
                     end_time
                 ) VALUES (
                     v_exc_id,
                     v_loc_id,
+                    v_org_id,
                     v_start,
                     v_end
                 );
@@ -526,7 +529,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_exception_api IS
         v_response_json  json_object_t := json_object_t();
     BEGIN
         pr_assert_schedule_manager(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);

@@ -300,7 +300,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         v_fcm_token           user_fcm_devices.fcm_token%TYPE;
         v_platform            user_fcm_devices.platform%TYPE;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_jwt_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         BEGIN
@@ -402,7 +402,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         v_response_json     json_object_t := json_object_t();
         v_fcm_token         user_fcm_devices.fcm_token%TYPE;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         BEGIN
             v_json_req  := json_object_t.parse(pi_body);
@@ -675,6 +675,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
         INNER JOIN organization o ON o.id_organization = m.org_id_organization
         WHERE m.id_org_member = pi_org_member_id
           AND m.is_active = 1;
+        pkg_aox_session.set_org(v_org_id);
 
         v_inbox_type := fn_infer_inbox_ntype(pi_ntype, pi_process_name);
         IF NULLIF(TRIM(pi_url), '') IS NOT NULL THEN
@@ -778,6 +779,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
           JOIN organization o ON o.id_organization = m.org_id_organization
          WHERE m.id_org_member = pi_org_member_id
            AND m.is_active = 1;
+        pkg_aox_session.set_org(v_org_id);
 
         v_inbox_type := fn_infer_inbox_ntype(pi_ntype, pi_process_name);
         IF NULLIF(TRIM(pi_url), '') IS NOT NULL THEN
@@ -896,6 +898,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
             RETURN;
         END IF;
 
+        pkg_aox_session.pr_enter_scheduler_job;
         FOR admin_rec IN (
             SELECT
                 m.id_org_member,
@@ -931,6 +934,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                )
              FETCH FIRST NVL(pi_batch_size, 500) ROWS ONLY
         ) LOOP
+            pkg_aox_session.set_org(admin_rec.org_id_organization);
             IF admin_rec.total_global > 0
                AND NOT fn_digest_already_sent(admin_rec.id_org_member, v_local_date) THEN
 
@@ -967,11 +971,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                     );
                 END IF;
             END IF;
+            pkg_aox_session.pr_enter_scheduler_job;
         END LOOP;
 
         FOR prof_rec IN (
             SELECT
                 m.id_org_member,
+                m.org_id_organization,
                 p.id_professional,
                 TRIM(pu.first_name) AS nombre_profesional,
                 (
@@ -998,6 +1004,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                )
              FETCH FIRST NVL(pi_batch_size, 500) ROWS ONLY
         ) LOOP
+            pkg_aox_session.set_org(prof_rec.org_id_organization);
             IF prof_rec.mis_citas > 0
                AND fn_is_professional_working_day(prof_rec.id_professional, v_today_date)
                AND NOT fn_digest_already_sent(prof_rec.id_org_member, v_local_date) THEN
@@ -1031,9 +1038,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_fcm_api IS
                     );
                 END IF;
             END IF;
+            pkg_aox_session.pr_enter_scheduler_job;
         END LOOP;
+        pkg_aox_session.pr_leave_scheduler_job;
     EXCEPTION
         WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
             pkg_aox_util.pr_log_push_fcm(
                 pi_process_name    => c_process_digest,
                 pi_status          => 'ERROR',

@@ -48,6 +48,11 @@ ALTER TABLE org_refund_dispute
   ADD CONSTRAINT pk_org_refund_dispute PRIMARY KEY (id_dispute)
 /
 
+PROMPT ALTER TABLE org_refund_dispute ADD CONSTRAINT uq_refund_disp_id_org UNIQUE
+ALTER TABLE org_refund_dispute
+  ADD CONSTRAINT uq_refund_disp_id_org UNIQUE (id_dispute, org_id_organization)
+/
+
 PROMPT ALTER TABLE org_refund_dispute ADD CONSTRAINT fk_refund_dispute_org FOREIGN KEY
 ALTER TABLE org_refund_dispute
   ADD CONSTRAINT fk_refund_dispute_org FOREIGN KEY (org_id_organization)

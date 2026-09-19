@@ -127,6 +127,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_compensation_api IS
     BEGIN
         pr_assert_enabled;
         pr_lock_dispute(pi_dispute_id, v_org_id, v_app_id, v_cus_id, v_amount, v_status);
+        pkg_aox_session.set_org(v_org_id);
 
         IF NVL(v_amount, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'No hay monto de reembolso para compensar.');
@@ -222,6 +223,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_compensation_api IS
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Monto de recupero invalido.');
         END IF;
 
+        pkg_aox_session.set_org(pi_org_id);
         SELECT id_compensation, amount_gs, recovered_amount_gs, debt_status
           INTO v_comp_id, v_due, v_recovered, v_status
           FROM org_refund_dispute_compensation
@@ -267,6 +269,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_compensation_api IS
           FROM org_refund_dispute_compensation
          WHERE dispute_id = pi_dispute_id
          FOR UPDATE;
+        pkg_aox_session.set_org(v_org_id);
 
         IF v_credit <> 'ISSUED' THEN
             RETURN;

@@ -38,6 +38,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_org_integration_api IS
     ) IS
         v_role_id NUMBER;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
         IF v_role_id <> pkg_aox_util.fn_rol('ADMIN') THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
@@ -76,7 +77,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_org_integration_api IS
         v_private_key   VARCHAR2(500);
     BEGIN
         pr_assert_admin(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         BEGIN
             v_json_req    := json_object_t.parse(pi_body);
@@ -164,7 +165,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_org_integration_api IS
             RETURN;
         END IF;
 
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         FOR rec IN (
             SELECT public_key, private_key, is_active, updated_at
@@ -213,7 +214,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_org_integration_api IS
             RETURN;
         END IF;
 
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         DELETE FROM org_integration
          WHERE org_id_organization = v_org_id

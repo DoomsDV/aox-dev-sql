@@ -14,10 +14,34 @@ CREATE TABLE ai_chat_session (
   )
 /
 
+PROMPT CREATE INDEX idx_ai_chat_ses_org
+CREATE INDEX idx_ai_chat_ses_org
+  ON ai_chat_session (
+    org_id_organization
+  )
+  INITRANS  20
+  STORAGE (
+    NEXT       1024 K
+  )
+/
+
 PROMPT ALTER TABLE ai_chat_session ADD CONSTRAINT pk_ai_chat_session PRIMARY KEY
 ALTER TABLE ai_chat_session
   ADD CONSTRAINT pk_ai_chat_session PRIMARY KEY (
     id_session
+  )
+  USING INDEX
+    INITRANS  20
+    STORAGE (
+      NEXT       1024 K
+    )
+/
+
+PROMPT ALTER TABLE ai_chat_session ADD CONSTRAINT uq_ai_chat_ses_id_org UNIQUE
+ALTER TABLE ai_chat_session
+  ADD CONSTRAINT uq_ai_chat_ses_id_org UNIQUE (
+    id_session,
+    org_id_organization
   )
   USING INDEX
     INITRANS  20

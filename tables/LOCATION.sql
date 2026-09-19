@@ -70,6 +70,19 @@ ALTER TABLE location
     )
 /
 
+PROMPT ALTER TABLE location ADD CONSTRAINT uq_loc_id_org UNIQUE
+ALTER TABLE location
+  ADD CONSTRAINT uq_loc_id_org UNIQUE (
+    id_location,
+    org_id_organization
+  )
+  USING INDEX
+    INITRANS  20
+    STORAGE (
+      NEXT       1024 K
+    )
+/
+
 PROMPT ALTER TABLE location ADD CONSTRAINT fk_loc_city FOREIGN KEY
 ALTER TABLE location
   ADD CONSTRAINT fk_loc_city FOREIGN KEY (

@@ -35,6 +35,11 @@ ALTER TABLE org_member
   ADD CONSTRAINT pk_org_member PRIMARY KEY (id_org_member)
 /
 
+PROMPT ALTER TABLE org_member ADD CONSTRAINT uq_om_id_org UNIQUE
+ALTER TABLE org_member
+  ADD CONSTRAINT uq_om_id_org UNIQUE (id_org_member, org_id_organization)
+/
+
 PROMPT ALTER TABLE org_member ADD CONSTRAINT uq_om_user_org UNIQUE (platform_user_id, org_id_organization)
 ALTER TABLE org_member
   ADD CONSTRAINT uq_om_user_org UNIQUE (platform_user_id, org_id_organization)

@@ -24,6 +24,11 @@ ALTER TABLE org_refund_strike
   REFERENCES organization (id_organization) ON DELETE CASCADE
 /
 
+PROMPT CREATE INDEX idx_refund_strike_org
+CREATE INDEX idx_refund_strike_org
+  ON org_refund_strike (org_id_organization)
+/
+
 PROMPT ALTER TABLE org_refund_strike ADD CONSTRAINT fk_refund_strike_dispute FOREIGN KEY
 ALTER TABLE org_refund_strike
   ADD CONSTRAINT fk_refund_strike_dispute FOREIGN KEY (dispute_id)

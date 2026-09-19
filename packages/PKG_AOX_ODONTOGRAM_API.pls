@@ -54,7 +54,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
     ) RETURN NUMBER IS
         v_org_id NUMBER;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_session,
@@ -254,6 +254,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_teeth         json_array_t  := json_array_t();
         v_events        json_array_t  := json_array_t();
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_org_id := fn_require_org_id(pi_auth_header);
         pr_assert_customer_in_org(v_org_id, pi_customer_id);
         pkg_aox_permission_api.pr_assert_capability(
@@ -385,6 +386,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_needs_faces   NUMBER := 0;
         v_face_sum      NUMBER;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_org_id  := fn_require_org_id(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
         pr_assert_customer_in_org(v_org_id, pi_customer_id);
@@ -525,6 +527,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_user_id       NUMBER;
         v_response_json json_object_t := json_object_t();
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_org_id  := fn_require_org_id(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
         pr_assert_customer_in_org(v_org_id, pi_customer_id);
@@ -571,6 +574,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_odontogram_api IS
         v_response_json json_object_t := json_object_t();
         v_data          json_object_t := json_object_t();
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_org_id := fn_require_org_id(pi_auth_header);
         v_data.put('catalog', fn_catalog_json());
         po_status_code := pkg_aox_util.c_success_ok_code;

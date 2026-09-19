@@ -345,9 +345,9 @@ CREATE OR REPLACE package body pkg_aox_bucket as
 
         -- Guardamos el registro en la tabla
         insert into professional_image (
-            pro_id_professional, file_name, mime_type
+            pro_id_professional, file_name, mime_type, org_id_organization
         ) values (
-            pi_id_professional, v_file_name, pi_mime_type
+            pi_id_professional, v_file_name, pi_mime_type, v_id_organization
         );
 
         -- Estructura bucket: organizations/{org_id}/users/{archivo}
@@ -418,11 +418,13 @@ CREATE OR REPLACE package body pkg_aox_bucket as
         insert into professional_image (
             pro_id_professional,
             file_name,
-            mime_type
+            mime_type,
+            org_id_organization
         ) values (
             pi_id_professional,
             v_file_name,
-            v_mime_type
+            v_mime_type,
+            v_id_organization
         );
 
         -- Estructura bucket: organizations/{org_id}/users/{archivo}

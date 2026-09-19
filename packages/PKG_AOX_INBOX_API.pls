@@ -350,7 +350,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
         v_payload_obj   json_object_t;
         v_unread        NUMBER := 0;
     BEGIN
-        v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         pr_ensure_upcoming_holiday_inbox(
@@ -450,7 +450,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
         v_response  json_object_t := json_object_t();
         v_data      json_object_t := json_object_t();
     BEGIN
-        v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         pr_ensure_upcoming_holiday_inbox(
@@ -489,7 +489,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
         v_response  json_object_t := json_object_t();
         v_data      json_object_t := json_object_t();
     BEGIN
-        v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         IF pi_notification_id IS NULL OR pi_notification_id <= 0 THEN
@@ -529,7 +529,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
         v_response  json_object_t := json_object_t();
         v_data      json_object_t := json_object_t();
     BEGIN
-        v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         UPDATE user_notification n
@@ -563,7 +563,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
         v_response  json_object_t := json_object_t();
         v_data      json_object_t := json_object_t();
     BEGIN
-        v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         IF pi_notification_id IS NULL OR pi_notification_id <= 0 THEN
@@ -604,7 +604,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
         v_response  json_object_t := json_object_t();
         v_data      json_object_t := json_object_t();
     BEGIN
-        v_org_id    := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         UPDATE /*+ no_parallel */ user_notification n
@@ -644,7 +644,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
         v_days       NUMBER;
         v_closure    VARCHAR2(200);
     BEGIN
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         po_status_code := pkg_aox_util.c_success_ok_code;
@@ -723,7 +723,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
         v_payload    CLOB;
         v_closure    VARCHAR2(200);
         v_date_label VARCHAR2(20);
+        v_closure_cnt NUMBER;
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         v_target := v_today + v_lead;
         v_base := RTRIM(NVL(fn_get_parameter('APP_PUBLIC_BASE_URL'), 'https://hasel.app'), '/');
 
@@ -755,14 +757,18 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
                 SELECT o.id_organization
                   FROM organization o
                  WHERE NVL(o.country_code, 'PY') = h.country_code
-                   AND NOT EXISTS (
-                        SELECT 1
-                          FROM location_closure c
-                         WHERE c.org_id_organization = o.id_organization
-                           AND c.start_date <= h.holiday_date
-                           AND c.end_date   >= h.holiday_date
-                   )
             ) LOOP
+                pkg_aox_session.set_org(org_rec.id_organization);
+                SELECT COUNT(*)
+                  INTO v_closure_cnt
+                  FROM location_closure c
+                 WHERE c.org_id_organization = org_rec.id_organization
+                   AND c.start_date <= h.holiday_date
+                   AND c.end_date   >= h.holiday_date
+                   AND ROWNUM = 1;
+                IF v_closure_cnt > 0 THEN
+                    CONTINUE;
+                END IF;
                 FOR mem IN (
                     SELECT m.id_org_member
                       FROM org_member m
@@ -795,8 +801,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_inbox_api IS
                 COMMIT;
             END LOOP;
         END LOOP;
+        pkg_aox_session.pr_leave_scheduler_job;
     EXCEPTION
         WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
             pkg_aox_util.pr_log_push_fcm(
                 pi_process_name    => c_process_holiday,
                 pi_status          => 'ERROR',

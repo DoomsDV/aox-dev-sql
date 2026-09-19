@@ -27,6 +27,17 @@ CREATE INDEX idx_sch_exc_pro_date
   )
 /
 
+PROMPT CREATE INDEX idx_sch_exc_org
+CREATE INDEX idx_sch_exc_org
+  ON professional_schedule_exception (
+    org_id_organization
+  )
+  INITRANS  20
+  STORAGE (
+    NEXT       1024 K
+  )
+/
+
 PROMPT ALTER TABLE professional_schedule_exception ADD CONSTRAINT chk_sch_exc_type CHECK
 ALTER TABLE professional_schedule_exception
   ADD CONSTRAINT chk_sch_exc_type CHECK (
@@ -51,6 +62,19 @@ PROMPT ALTER TABLE professional_schedule_exception ADD CONSTRAINT pk_sch_excepti
 ALTER TABLE professional_schedule_exception
   ADD CONSTRAINT pk_sch_exception PRIMARY KEY (
     id_schedule_exception
+  )
+  USING INDEX
+    INITRANS  20
+    STORAGE (
+      NEXT       1024 K
+    )
+/
+
+PROMPT ALTER TABLE professional_schedule_exception ADD CONSTRAINT uq_sch_exc_id_org UNIQUE
+ALTER TABLE professional_schedule_exception
+  ADD CONSTRAINT uq_sch_exc_id_org UNIQUE (
+    id_schedule_exception,
+    org_id_organization
   )
   USING INDEX
     INITRANS  20

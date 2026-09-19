@@ -49,9 +49,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_user_api IS
         v_public_obj    json_object_t := json_object_t();
         v_prof_obj      json_object_t;
     BEGIN
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
 
         IF NVL(v_user_id, 0) <= 0 OR NVL(v_org_id, 0) <= 0 OR NVL(v_role_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(-20001, 'Token inválido o sesión no autorizada.');
@@ -154,8 +157,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_user_api IS
         v_img_mime      VARCHAR2(100);
         v_img_blob      BLOB;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
         IF NVL(v_user_id, 0) <= 0 OR NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(-20001, 'Token inválido o sesión no autorizada.');
@@ -341,6 +344,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_user_api IS
         v_response_json      json_object_t := json_object_t();
         v_final_slug         VARCHAR2(100);
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         IF NVL(v_user_id, 0) <= 0 THEN
@@ -398,6 +402,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_user_api IS
         v_new_salt            platform_user.password_salt%TYPE;
         v_new_iterations      platform_user.password_iterations%TYPE;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         BEGIN

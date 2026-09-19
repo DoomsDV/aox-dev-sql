@@ -453,7 +453,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
     PROCEDURE pr_assert_admin(pi_auth_header IN VARCHAR2, po_org_id OUT NUMBER) IS
         v_role_id NUMBER;
     BEGIN
-        po_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, po_org_id);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         IF NVL(po_org_id, 0) <= 0 THEN
@@ -3799,7 +3799,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_auto_renew      NUMBER(1,0) := 1;
         v_canceled_at     TIMESTAMP WITH TIME ZONE;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_session, 'Token inv?lido o sin organizaci?n asociada.');
         END IF;
@@ -4917,7 +4917,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_response json_object_t := json_object_t();
         v_data     json_object_t := json_object_t();
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_session, 'Token inv?lido o sin organizaci?n asociada.');
         END IF;
@@ -4982,7 +4982,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_plan_name VARCHAR2(100);
         v_founder  NUMBER;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_session, 'Token invalido o sin organizacion asociada.');
         END IF;
@@ -5079,7 +5079,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_response   json_object_t := json_object_t();
         v_data       json_object_t := json_object_t();
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_session, 'Token invalido o sin organizacion asociada.');
         END IF;
@@ -5160,6 +5160,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_public_key     VARCHAR2(500);
         v_private_key    VARCHAR2(500);
         v_echo           json_array_t := json_array_t();
+        v_bind_org       NUMBER;
     BEGIN
         v_req        := json_object_t.parse(pi_body);
         v_result_arr := v_req.get_array('resultado');
@@ -5168,6 +5169,29 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_hash_pedido    := v_result_obj.get_string('hash_pedido');
         v_token_received := LOWER(TRIM(v_result_obj.get_string('token')));
         v_pagado         := v_result_obj.get_boolean('pagado');
+
+        BEGIN
+            v_bind_org := NULL;
+            FOR rec IN (
+                SELECT id_organization
+                  FROM organization
+            ) LOOP
+                pkg_aox_session.set_org(rec.id_organization);
+                SELECT MIN(org_id_organization)
+                  INTO v_bind_org
+                  FROM org_subscription_invoice
+                 WHERE external_reference = v_hash_pedido
+                   AND org_id_organization = rec.id_organization;
+                EXIT WHEN v_bind_org IS NOT NULL;
+            END LOOP;
+            IF v_bind_org IS NULL THEN
+                pkg_aox_session.clear;
+            END IF;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_session.clear;
+                NULL;
+        END;
 
         BEGIN
             FOR r IN (
@@ -5603,8 +5627,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_touched    t_org_set;
         v_org_id     NUMBER;
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         -- Guardrail de ambiente: en DEV (BILLING_ENABLED=0) el job global no cobra.
         IF NVL(fn_get_parameter('BILLING_ENABLED'), '0') <> '1' THEN
+            pkg_aox_session.pr_leave_scheduler_job;
             pkg_aox_util.pr_log_api(
                 pi_api_name => 'SUBSCRIPTION_BILLING_CYCLE',
                 pi_process_name => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_RUN_BILLING_CYCLE',
@@ -5627,6 +5653,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                )
         ) LOOP
             BEGIN
+                pkg_aox_session.set_org(rec.org_id);
                 pr_apply_due_pending_plan(rec.org_id);
                 v_touched(rec.org_id) := TRUE;
                 COMMIT;
@@ -5655,6 +5682,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
                AND NVL(s.charge_retry_count, 0) < v_max_retry
         ) LOOP
             BEGIN
+                pkg_aox_session.set_org(rec.org_id);
                 SELECT p.code, NVL(s.auto_renew, 1)
                   INTO v_plan_code, v_auto_renew
                   FROM org_subscription s
@@ -5714,6 +5742,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_org_id := v_touched.FIRST;
         WHILE v_org_id IS NOT NULL LOOP
             BEGIN
+                pkg_aox_session.set_org(v_org_id);
                 pr_notify_subscription_lifecycle(v_org_id);
                 COMMIT;
             EXCEPTION
@@ -5731,6 +5760,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             WHEN OTHERS THEN
                 NULL;
         END;
+        pkg_aox_session.pr_leave_scheduler_job;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
+            RAISE;
     END pr_run_billing_cycle;
 
     PROCEDURE pr_run_billing_cycle_for_org(pi_org_id IN NUMBER) IS
@@ -5748,6 +5782,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         IF NVL(pi_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'org_id invalido para ciclo de billing.');
         END IF;
+        pkg_aox_session.set_org(pi_org_id);
 
         -- Aislamiento fixture: exige QA_BILLING_E2E_ORG_ID inmutable (nombre solo como chequeo).
         BEGIN
@@ -6627,6 +6662,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         v_warning        INTEGER;
         v_internal_body  CLOB;
         v_svc            VARCHAR2(4000);
+        v_org_id         NUMBER;
     BEGIN
         v_secret  := TRIM(fn_get_parameter('ESIGN_WEBHOOK_SECRET'));
         v_api_key := TRIM(fn_get_parameter('ESIGN_API_KEY'));
@@ -6704,6 +6740,41 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
         END IF;
 
         v_invoice_id := TO_NUMBER(REGEXP_SUBSTR(v_idem, '[0-9]+'));
+        BEGIN
+            v_org_id := NULL;
+            FOR rec IN (
+                SELECT id_organization
+                  FROM organization
+            ) LOOP
+                pkg_aox_session.set_org(rec.id_organization);
+                BEGIN
+                    SELECT org_id_organization
+                      INTO v_org_id
+                      FROM org_subscription_invoice
+                     WHERE id_invoice = v_invoice_id
+                       AND org_id_organization = rec.id_organization;
+                    EXIT;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        v_org_id := NULL;
+                END;
+            END LOOP;
+            IF v_org_id IS NULL THEN
+                pkg_aox_session.clear;
+                RAISE NO_DATA_FOUND;
+            END IF;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                pr_log_esign_webhook(
+                    pi_delivery_id, v_invoice_id, v_cdc, v_idem, 'REJECTED', 404,
+                    'factura no encontrada'
+                );
+                po_status_code := 404;
+                v_response.put('status', 'error');
+                v_response.put('message', 'Factura no encontrada.');
+                po_response_body := v_response.to_clob();
+                RETURN;
+        END;
         BEGIN
             SELECT einvoice_cdc, einvoice_status, status
               INTO v_cur_cdc, v_cur_status, v_invoice_status

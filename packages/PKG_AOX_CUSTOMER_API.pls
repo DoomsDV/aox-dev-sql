@@ -66,9 +66,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
     ) IS
         v_actual_pro_id NUMBER;
     BEGIN
-        po_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        po_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        po_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => po_org_id,
+            po_user_id     => po_user_id,
+            po_role_id     => po_role_id
+        );
         po_effective_pro_id := pi_pro_id;
 
         IF po_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
@@ -1078,9 +1081,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Cliente invalido.');
         END IF;
 
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
 
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
@@ -1184,9 +1190,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
         v_email             customer.email%TYPE;
         v_cus_id            NUMBER;
     BEGIN
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
 
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
 
@@ -1293,9 +1302,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
 
         v_target_active := CASE WHEN NVL(pi_is_active, 0) = 1 THEN 1 ELSE 0 END;
 
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
 
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
         pkg_aox_permission_api.pr_assert_capability(

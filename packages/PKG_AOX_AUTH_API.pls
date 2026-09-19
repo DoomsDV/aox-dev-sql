@@ -92,6 +92,12 @@ CREATE OR REPLACE package pkg_aox_auth_api as
         po_response_body out clob
     );
 
+    /**
+     * Job: marca is_revoked=1 en APP_USER_SESSION vencidas.
+     * Tabla C (sin VPD). No requiere begin_job.
+     */
+    procedure pr_revoke_expired_sessions;
+
     procedure pr_verify_email(
         pi_body          in  clob,
         po_status_code   out number,
@@ -644,6 +650,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
             v_id_org_specialty
         )
         returning id_organization into v_org_id;
+        pkg_aox_session.set_org(v_org_id);
 
         pkg_aox_addon_eligibility.pr_set_org_specialties(
             pi_org_id        => v_org_id,
@@ -1301,6 +1308,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         end if;
 
         begin
+            pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
             v_caller_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
             select m.platform_user_id
               into v_platform_user_id
@@ -1409,6 +1417,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         end if;
 
         begin
+            pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
             v_caller_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
             select m.platform_user_id
               into v_platform_user_id
@@ -1555,6 +1564,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         end if;
 
         begin
+            pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
             v_caller_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
             select m.platform_user_id
               into v_platform_user_id
@@ -1641,6 +1651,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         end if;
 
         begin
+            pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
             v_caller_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
             select m.platform_user_id
               into v_platform_user_id
@@ -1730,6 +1741,15 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         when others then
             pkg_aox_util.pr_handle_api_exception(po_status_code, po_response_body);
     end pr_revoke_session;
+
+    procedure pr_revoke_expired_sessions is
+    begin
+        -- Identidad/sesion (taxonomia C): sin VPD. Sweep global seguro.
+        update app_user_session
+           set is_revoked = 1
+         where is_revoked = 0
+           and expires_at <= current_timestamp;
+    end pr_revoke_expired_sessions;
 
     procedure pr_verify_email(
         pi_body          in clob,
@@ -2369,6 +2389,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
 
         if v_platform_user_id is null then
             begin
+                pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
                 v_caller_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
                 select m.platform_user_id
@@ -2470,6 +2491,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
             v_id_org_specialty
         )
         returning id_organization into v_org_id;
+        pkg_aox_session.set_org(v_org_id);
 
         pkg_aox_addon_eligibility.pr_set_org_specialties(
             pi_org_id        => v_org_id,
@@ -2792,6 +2814,7 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
             );
 
             if v_caller_platform_id is null then
+                pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
                 v_caller_member_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
                 select m.platform_user_id
                   into v_caller_platform_id
@@ -3081,9 +3104,12 @@ CREATE OR REPLACE package body pkg_aox_auth_api as
         v_admin_role_id  org_member.rol_id_role%type := pkg_aox_util.fn_rol('ADMIN');
         v_prof_role_id   org_member.rol_id_role%type := pkg_aox_util.fn_rol('PROFESIONAL');
     begin
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
 
         begin
             select m.is_active,

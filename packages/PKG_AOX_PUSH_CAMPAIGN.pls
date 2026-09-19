@@ -590,6 +590,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
         v_err_msg      VARCHAR2(4000);
         PRAGMA AUTONOMOUS_TRANSACTION;
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         SELECT *
           INTO v_camp
           FROM push_campaign
@@ -698,6 +699,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
                       OR (v_audience = 'ROLE' AND om.rol_id_role = v_role_id)
                        )
             ) LOOP
+                pkg_aox_session.set_org(mem.org_id_organization);
                 pkg_aox_inbox_api.pr_enqueue(
                     pi_org_id         => mem.org_id_organization,
                     pi_org_member_id  => mem.id_org_member,
@@ -711,6 +713,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
                 );
                 v_inbox_count := v_inbox_count + 1;
             END LOOP;
+            pkg_aox_session.pr_enter_scheduler_job;
 
             FOR device IN (
                 SELECT f.fcm_token
@@ -745,6 +748,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
         END IF;
 
         COMMIT;
+        pkg_aox_session.pr_leave_scheduler_job;
     EXCEPTION
         WHEN OTHERS THEN
             v_err_msg := SUBSTR(SQLERRM, 1, 4000);
@@ -760,6 +764,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_push_campaign IS
                 WHEN OTHERS THEN
                     NULL;
             END;
+            pkg_aox_session.pr_leave_scheduler_job;
             RAISE;
     END pr_execute_campaign;
 

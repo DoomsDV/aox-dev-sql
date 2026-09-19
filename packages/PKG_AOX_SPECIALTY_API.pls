@@ -110,7 +110,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_specialty_api IS
             'AEIOUUNAEIOUAAEIOU'
         );
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
 
@@ -179,7 +179,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_specialty_api IS
         v_response_json json_object_t := json_object_t();
         v_spec_obj      json_object_t;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         FOR rec IN (
             SELECT id_specialty, name, description, is_active, created_at
@@ -226,7 +226,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_specialty_api IS
         v_desc              specialty.description%TYPE;
         v_is_active         specialty.is_active%TYPE;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -285,7 +285,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_specialty_api IS
         v_desc              specialty.description%TYPE;
         v_is_active         specialty.is_active%TYPE;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -346,7 +346,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_specialty_api IS
         v_org_id        NUMBER;
         v_response_json json_object_t := json_object_t();
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);

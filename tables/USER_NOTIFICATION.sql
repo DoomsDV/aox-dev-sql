@@ -97,6 +97,17 @@ ALTER TABLE user_notification
     )
 /
 
+PROMPT CREATE INDEX idx_unotif_org
+CREATE INDEX idx_unotif_org
+  ON user_notification (
+    org_id_organization
+  )
+  INITRANS  20
+  STORAGE (
+    NEXT       1024 K
+  )
+/
+
 PROMPT CREATE INDEX idx_unotif_member_created
 CREATE INDEX idx_unotif_member_created
   ON user_notification (

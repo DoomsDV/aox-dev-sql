@@ -118,7 +118,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_services_arr      json_array_t;
         v_ser_id            NUMBER;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -467,7 +467,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         );
     BEGIN
         -- 1. Validar JWT y Organización
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
@@ -708,7 +708,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_current_username    platform_user.apex_user_name%TYPE;
     BEGIN
         -- 1. Validar JWT y Organización
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -1095,7 +1095,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_user_obj      json_object_t;
         v_spec_obj      json_object_t;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Utilizamos el mismo JOIN robusto del listado
         FOR rec IN (
@@ -1234,7 +1234,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_usr_id        NUMBER;
         v_response_json json_object_t := json_object_t();
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -1309,7 +1309,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_count         NUMBER;
     BEGIN
         -- 1. Validar el token
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         IF pi_full_name IS NULL OR TRIM(pi_full_name) = '' THEN
             po_status_code := pkg_aox_util.c_bad_request_code;
@@ -1364,7 +1364,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_prof_obj      json_object_t;
     BEGIN
         -- 1. Obtenemos la Organización del Token
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- 2. Lógica de la Bandera "Only Me"
         IF pi_only_me = 1 THEN

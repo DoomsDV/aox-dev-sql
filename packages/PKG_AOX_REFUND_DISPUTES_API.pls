@@ -444,6 +444,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
             pi_max_attempts => 5,
             pi_window_sec   => 86400
         );
+        pkg_aox_session.pr_bind_tenant_from_public_token(pi_public_token);
         pkg_aox_util.pr_assert_rate_limit(
             pi_scope        => 'PUBLIC_REFUND_DISPUTE_IP',
             pi_key          => pkg_aox_util.fn_client_ip,
@@ -651,6 +652,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
             pi_max_attempts => 5,
             pi_window_sec   => 86400
         );
+        pkg_aox_session.pr_bind_tenant_from_public_token(pi_public_token);
 
         SELECT a.id_appointment, a.org_id_organization, ws.public_whatsapp
           INTO v_app_id, v_org_id, v_whatsapp
@@ -752,6 +754,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         END IF;
         v_json := json_object_t.parse(pi_body);
         v_confirm := fn_digits(v_json.get_string('phone_last4'));
+        pkg_aox_session.pr_bind_tenant_from_public_token(pi_public_token);
 
         SELECT a.id_appointment, c.phone_number
           INTO v_app_id, v_phone
@@ -852,6 +855,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_object_key VARCHAR2(500);
         v_mime       VARCHAR2(150);
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_public_token(pi_public_token);
         SELECT a.id_appointment
           INTO v_app_id
           FROM appointment a
@@ -1017,12 +1021,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_ops_due       TIMESTAMP WITH TIME ZONE;
         v_late          NUMBER := 0;
     BEGIN
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
         IF v_role_id NOT IN (pkg_aox_util.fn_rol('ADMIN'), pkg_aox_util.fn_rol('RECEPCIONISTA')) THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
@@ -1157,10 +1164,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         );
 
         INSERT INTO org_refund_dispute_evidence (
-            dispute_id, attempt_n, object_key, mime_type, size_bytes, sha256,
+            dispute_id, org_id_organization, attempt_n, object_key, mime_type, size_bytes, sha256,
             uploaded_by, ocr_status, extractor_version
         ) VALUES (
-            v_dispute_id, v_attempt, v_object_key, v_mime, v_size, v_sha,
+            v_dispute_id, v_org_id, v_attempt, v_object_key, v_mime, v_size, v_sha,
             v_user_id, 'PROCESSING', c_extractor_version
         ) RETURNING id_evidence INTO v_ev_id;
 
@@ -1287,17 +1294,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         po_response_body  OUT CLOB
     ) IS
         v_org_id     NUMBER;
+        v_user_id    NUMBER;
         v_role_id    NUMBER;
         v_app_id     NUMBER;
         v_status     VARCHAR2(30);
         v_object_key VARCHAR2(500);
         v_mime       VARCHAR2(150);
     BEGIN
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
         IF v_role_id NOT IN (pkg_aox_util.fn_rol('ADMIN'), pkg_aox_util.fn_rol('RECEPCIONISTA')) THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
 
         SELECT pt.app_id_appointment
           INTO v_app_id
@@ -1373,6 +1385,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
           FROM org_refund_dispute
          WHERE id_dispute = pi_dispute_id
          FOR UPDATE;
+        pkg_aox_session.set_org(v_org_id);
 
         IF fn_is_terminal_status(v_status) = 1 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El caso ya esta cerrado.');
@@ -1497,6 +1510,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         IF NVL(pi_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'organization_id invalido.');
         END IF;
+        pkg_aox_session.set_org(pi_org_id);
         IF pi_body IS NULL OR DBMS_LOB.GETLENGTH(pi_body) = 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Indica el motivo.');
         END IF;
@@ -1529,6 +1543,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_limit      NUMBER := LEAST(GREATEST(NVL(pi_batch_size, 100), 1), 500);
         v_outbox_id  NUMBER;
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         FOR rec IN (
             SELECT /*+ no_parallel */ d.id_dispute
               FROM org_refund_dispute d
@@ -1596,6 +1611,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                     ROLLBACK;
             END;
         END LOOP;
+        pkg_aox_session.pr_leave_scheduler_job;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
+            RAISE;
     END pr_process_dispute_timeouts;
 
     PROCEDURE pr_process_notify_outbox_row(
@@ -1670,6 +1690,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                    )
                AND attempts < 8
              FOR UPDATE SKIP LOCKED;
+            pkg_aox_session.set_org(v_org_id);
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 BEGIN
@@ -1864,6 +1885,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
         v_row_notified  NUMBER;
         v_row_pending   NUMBER;
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         -- No usar FETCH FIRST ... FOR UPDATE: Oracle lo reescribe como vista
         -- analitica y dispara ORA-02014. Subconsulta + ROWNUM ordena por FIFO,
         -- cierra el cursor antes del COMMIT por fila y evita ORA-01002.
@@ -1904,6 +1926,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_refund_disputes_api IS
                 END;
             END LOOP;
         END IF;
+        pkg_aox_session.pr_leave_scheduler_job;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
+            RAISE;
     END pr_process_notify_outbox;
 
     PROCEDURE pr_dismiss_for_appointment(

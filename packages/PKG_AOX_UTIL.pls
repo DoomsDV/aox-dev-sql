@@ -71,6 +71,7 @@ CREATE OR REPLACE package pkg_aox_util as
         po_message       out varchar2
     );
 
+    /** Traduce SQLCODE a JSON de error y limpia AOX_TENANT_CTX (fail-closed). */
     procedure pr_handle_api_exception(
         po_status_code   out number,
         po_response_body out clob,
@@ -151,8 +152,7 @@ CREATE OR REPLACE package pkg_aox_util as
     function fn_get_schedule_exception_type (
         pi_pro_id      in number,
         pi_target_date in date
-    ) return varchar2
-    result_cache;
+    ) return varchar2;
 
     /**
      * Cierre vigente de una sucursal en una fecha.
@@ -162,8 +162,7 @@ CREATE OR REPLACE package pkg_aox_util as
     function fn_is_location_closed_full_day (
         pi_loc_id      in number,
         pi_target_date in date
-    ) return number
-    result_cache;
+    ) return number;
 
     /**
      * Nombre del cierre vigente hoy para una sucursal (o NULL si no hay).
@@ -223,8 +222,7 @@ CREATE OR REPLACE package pkg_aox_util as
     /** Minutos entre slots publicos segun workspace (default 30). */
     function fn_get_org_booking_slot_minutes (
         pi_org_id in number
-    ) return number
-    result_cache;
+    ) return number;
 
     /** Horas antes del turno para enviar recordatorio (default 24). */
     function fn_get_org_reminder_hours (
@@ -557,12 +555,23 @@ CREATE OR REPLACE package body pkg_aox_util as
             end if;
 
             if fn_is_reserved_org_slug(v_candidate) = 0 then
+                -- Directorio publico (sin VPD): unicidad global real.
                 select count(*)
                   into v_exists
-                  from workspace_setting ws
-                 where lower(trim(ws.profile_slug)) = lower(v_candidate)
+                  from org_public_directory d
+                 where d.profile_slug = lower(v_candidate)
                    and (pi_exclude_org_id is null
-                        or ws.org_id_organization <> pi_exclude_org_id);
+                        or d.org_id_organization <> pi_exclude_org_id);
+
+                if v_exists = 0 then
+                    -- Por si el trigger todavia no sincronizo el slug de esta org.
+                    select count(*)
+                      into v_exists
+                      from workspace_setting ws
+                     where lower(trim(ws.profile_slug)) = lower(v_candidate)
+                       and (pi_exclude_org_id is null
+                            or ws.org_id_organization <> pi_exclude_org_id);
+                end if;
 
                 if v_exists = 0 then
                     return v_candidate;
@@ -645,8 +654,7 @@ CREATE OR REPLACE package body pkg_aox_util as
     function fn_get_schedule_exception_type (
         pi_pro_id      in number,
         pi_target_date in date
-    ) return varchar2
-    result_cache is
+    ) return varchar2 is
         v_type professional_schedule_exception.exception_type%type;
     begin
         select e.exception_type
@@ -664,8 +672,7 @@ CREATE OR REPLACE package body pkg_aox_util as
     function fn_is_location_closed_full_day (
         pi_loc_id      in number,
         pi_target_date in date
-    ) return number
-    result_cache is
+    ) return number is
         v_count number;
         v_target date := trunc(pi_target_date);
     begin
@@ -1701,8 +1708,7 @@ CREATE OR REPLACE package body pkg_aox_util as
 
     function fn_get_org_booking_slot_minutes (
         pi_org_id in number
-    ) return number
-    result_cache is
+    ) return number is
         v_minutes number;
     begin
         if nvl(pi_org_id, 0) <= 0 then
@@ -1949,6 +1955,12 @@ CREATE OR REPLACE package body pkg_aox_util as
             return;
         end if;
 
+        if pi_sqlcode = -20025 then
+            po_status_code := c_not_found_code;
+            po_api_code    := c_api_code_not_found;
+            return;
+        end if;
+
         if pi_sqlcode = -20005 then
             po_status_code := c_forbidden_code;
             po_api_code    := c_api_code_forbidden;
@@ -1977,6 +1989,14 @@ CREATE OR REPLACE package body pkg_aox_util as
         v_api_code varchar2(30);
         v_message  varchar2(4000);
     begin
+        -- Fail-closed del tenant al salir por EXCEPTION (pool ORDS).
+        -- execute immediate evita dependencia circular de compilacion con pkg_aox_session.
+        begin
+            execute immediate 'BEGIN pkg_aox_session.clear; END;';
+        exception
+            when others then
+                null;
+        end;
         pr_resolve_api_error(pi_sqlcode, pi_sqlerrm, po_status_code, v_api_code, v_message);
         v_api_code := fn_resolve_api_code(po_status_code, pi_sqlcode, pi_sqlerrm);
         pr_build_api_error_response(po_status_code, v_api_code, v_message, po_response_body);

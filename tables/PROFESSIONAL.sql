@@ -49,6 +49,19 @@ ALTER TABLE professional
     )
 /
 
+PROMPT ALTER TABLE professional ADD CONSTRAINT uq_pro_id_org UNIQUE
+ALTER TABLE professional
+  ADD CONSTRAINT uq_pro_id_org UNIQUE (
+    id_professional,
+    org_id_organization
+  )
+  USING INDEX
+    INITRANS  20
+    STORAGE (
+      NEXT       1024 K
+    )
+/
+
 PROMPT ALTER TABLE professional ADD CONSTRAINT uq_pro_org_slug UNIQUE
 ALTER TABLE professional
   ADD CONSTRAINT uq_pro_org_slug UNIQUE (

@@ -13,6 +13,17 @@ CREATE TABLE specialty (
   )
 /
 
+PROMPT CREATE INDEX idx_specialty_org
+CREATE INDEX idx_specialty_org
+  ON specialty (
+    org_id_organization
+  )
+  INITRANS  20
+  STORAGE (
+    NEXT       1024 K
+  )
+/
+
 PROMPT ALTER TABLE specialty ADD PRIMARY KEY
 ALTER TABLE specialty
   ADD PRIMARY KEY (

@@ -74,6 +74,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
     ) IS
         v_role_id NUMBER;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
         IF v_role_id <> pkg_aox_util.fn_rol('ADMIN') THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
@@ -500,7 +501,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
         v_response_json json_object_t := json_object_t();
     BEGIN
         pr_assert_admin(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_response_json.put('status', 'success');
@@ -532,7 +533,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
         v_bank_active    NUMBER := 0;
     BEGIN
         pr_assert_admin(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         BEGIN

@@ -139,6 +139,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
           FROM org_refund_dispute
          WHERE id_dispute = pi_dispute_id
          FOR UPDATE;
+        pkg_aox_session.set_org(v_org_id);
 
         IF fn_is_terminal_status(v_status) = 1 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'El caso ya esta cerrado.');
@@ -257,6 +258,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Actor de operaciones invalido.');
         END IF;
 
+        pkg_aox_session.set_org(pi_org_id);
+
         pkg_aox_payment_settings_api.pr_restore_refund_enforcement(
             pi_org_id        => pi_org_id,
             pi_reason        => pi_reason,
@@ -301,6 +304,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
             po_error := 'Parametros de inbox invalidos.';
             RETURN;
         END IF;
+
+        pkg_aox_session.set_org(pi_org_id);
 
         INSERT INTO user_notification (
             org_id_organization,
@@ -414,6 +419,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
         IF NVL(pi_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Organizacion invalida.');
         END IF;
+
+        pkg_aox_session.set_org(pi_org_id);
 
         SELECT COUNT(*)
           INTO v_exists
@@ -545,6 +552,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ops_admin_bridge AS
         IF NVL(pi_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation, 'Organizacion invalida.');
         END IF;
+
+        pkg_aox_session.set_org(pi_org_id);
 
         SELECT COUNT(*)
           INTO v_exists

@@ -38,6 +38,11 @@ ALTER TABLE subscription_einvoice_outbox
   ON DELETE CASCADE
 /
 
+PROMPT CREATE INDEX idx_sub_einv_outbox_org
+CREATE INDEX idx_sub_einv_outbox_org
+  ON subscription_einvoice_outbox (org_id_organization)
+/
+
 PROMPT ALTER TABLE subscription_einvoice_outbox ADD CONSTRAINT chk_sub_einv_outbox_status CHECK
 ALTER TABLE subscription_einvoice_outbox
   ADD CONSTRAINT chk_sub_einv_outbox_status CHECK (

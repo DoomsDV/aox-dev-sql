@@ -45,6 +45,13 @@ ALTER TABLE appointment_session_record
   ) ON DELETE CASCADE
 /
 
+PROMPT CREATE INDEX idx_asr_org
+CREATE INDEX idx_asr_org
+  ON appointment_session_record (
+    org_id_organization
+  )
+/
+
 COMMENT ON TABLE appointment_session_record IS 'Historial (notas) por cita. Feature Premium APPOINTMENT_HISTORY. Se crea al pasar la cita a COMPLETADO (misma transaccion). 1:1 con appointment.';
 COMMENT ON COLUMN appointment_session_record.notes IS 'Notas legacy (texto libre). Solo lectura; usar consultation_reason, procedure_notes y recommendations.';
 COMMENT ON COLUMN appointment_session_record.consultation_reason IS 'Motivo de consulta o requerimiento inicial del cliente.';

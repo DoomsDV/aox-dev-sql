@@ -84,6 +84,9 @@ PROMPT [18/31] appointment
 PROMPT [18b/31] appointment_series (HAS-22 citas recurrentes semanales)
 @@tables\APPOINTMENT_SERIES.sql
 
+PROMPT [18c] org_public_token (token_hash -> org, sin VPD)
+@@tables\ORG_PUBLIC_TOKEN.sql
+
 PROMPT [19/31] app_user_email_verification
 @@tables\APP_USER_EMAIL_VERIFICATION.sql
 
@@ -119,6 +122,9 @@ PROMPT [26/34] ref_cancel_wait_hours
 
 PROMPT [27/35] workspace_setting
 @@tables\WORKSPACE_SETTING.sql
+
+PROMPT [27b] org_public_directory (proyeccion publica sin VPD)
+@@tables\ORG_PUBLIC_DIRECTORY.sql
 
 PROMPT [28/35] org_gallery_image
 @@tables\ORG_GALLERY_IMAGE.sql
@@ -409,6 +415,13 @@ PROMPT --- FASE 2: Funciones ---
 PROMPT --- FASE 3: Paquetes - nucleo ---
 
 @@packages\PKG_AOX_UTIL.pls
+@@packages\PKG_AOX_PUBLIC_DIRECTORY.pls
+@@packages\PKG_AOX_JOB_WRAPPER.pls
+@@packages\PKG_AOX_SESSION.pls
+@@functions\FN_AOX_TENANT_VPD_PREDICATE.pls
+@@packages\PKG_AOX_TENANT_VPD.pls
+@@triggers\TRG_ORG_PUBLIC_DIRECTORY.sql
+@@triggers\TRG_AOX_CHILD_ORG.sql
 @@packages\PKG_AOX_JWT.pls
 @@packages\PKG_AOX_AUTH.pls
 -- SUBSCRIPTION_API en nucleo: BUCKET y otros paquetes dependen de sus gates/entitlements.
@@ -466,6 +479,12 @@ PROMPT --- Migraciones incrementales ---
 @@migrations\20260915_role_capabilities.sql
 @@migrations\20260915_appointment_series.sql
 @@migrations\20260915_appointment_series_ords.sql
+@@migrations\20260919_aox_tenant_session.sql
+@@migrations\20260919_aox_public_directory.sql
+@@migrations\20260919_aox_public_token_trigger_cascade.sql
+@@migrations\20260919_aox_tenant_entrypoints.sql
+@@migrations\20260919_aox_tenant_child_org.sql
+@@migrations\20260919_aox_tenant_vpd_policies.sql
 
 --------------------------------------------------------------------------------
 -- FASE 5: PAQUETES (IA)
@@ -481,13 +500,39 @@ PROMPT --- FASE 5: Paquetes - IA ---
 @@packages\PKG_AOX_AI_AGENT_SETUP.pls
 @@packages\PKG_AOX_CHAT_MANAGER.pls
 @@packages\PKG_AOX_CHAT_API.pls
+@@packages\PKG_AOX_JOB_WRAPPER.pls
 
 --------------------------------------------------------------------------------
--- FASE 6 (OPCIONAL): Contexto seguro para agente IA
+-- FASE 6: Contexto tenant AOX_TENANT_CTX (VPD). Como AOXDEV (PDB_DBA).
+-- Si ORA-01031: CREATE OR REPLACE CONTEXT aox_tenant_ctx USING aoxdev.pkg_aox_session;
+-- como usuario ADMIN de la ADB (no HASEL_ADMIN).
+-- Policies A/B: ADD enable=FALSE (02). Canario CUSTOMER/APPOINTMENT: migration 20260919_aox_tenant_vpd_canary.
+-- Resto A en oleadas 3-5 + hijas B: 20260919_aox_tenant_vpd_enable_waves (probe SELECT; kill switch por oleada).
+-- Lectores publicos (directorio/refresh): 20260919_aox_public_vpd_readers.
+-- Grant directo DBMS_RLS (ADMIN, una vez): policies\00_grant_dbms_rls.sql
+-- Kill switch (no instalar): policies\03_aox_tenant_vpd_kill_switch.sql
+--   DBMS_RLS.ENABLE_POLICY(..., enable => FALSE). No DROP.
+--------------------------------------------------------------------------------
+PROMPT --- FASE 6: Contexto AOX_TENANT_CTX + VPD (canario en migracion) ---
+@@policies\01_aox_tenant_ctx.sql
+@@policies\02_aox_tenant_vpd.sql
+
+PROMPT --- Jobs wrapper + canario VPD CUSTOMER/APPOINTMENT ---
+@@migrations\20260919_aox_tenant_jobs_ops.sql
+@@migrations\20260919_aox_tenant_vpd_canary.sql
+@@migrations\20260919_aox_public_vpd_readers.sql
+@@migrations\20260919_aox_tenant_vpd_enable_waves.sql
+-- Oleadas A 3-5 + hijas B con probe SELECT. HTTP extra:
+--   python3 scripts/enable_vpd_waves.py
+-- Probes HTTP restantes (pool ORDS, login, booking slug, hijas B, job expire):
+--   python3 scripts/dev_probes_vpd.py
+
+--------------------------------------------------------------------------------
+-- FASE 6b (OPCIONAL): Contexto seguro para agente IA
 -- Requiere CREATE ANY CONTEXT o ejecutar como ADMIN
 --------------------------------------------------------------------------------
 /*
-PROMPT --- FASE 6 (opcional): Contexto AOX_AI_CTX ---
+PROMPT --- FASE 6b (opcional): Contexto AOX_AI_CTX ---
 CREATE OR REPLACE CONTEXT aox_ai_ctx USING pkg_aox_ai_context;
 */
 

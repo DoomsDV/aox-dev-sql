@@ -39,6 +39,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_integration_api IS
         po_response_body OUT CLOB
     ) IS
         v_user_id           NUMBER;
+        v_org_id            NUMBER;
         v_json_req          json_object_t;
         v_response_json     json_object_t := json_object_t();
 
@@ -46,7 +47,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_integration_api IS
         v_access_token      user_integration.access_token%TYPE;
         v_refresh_token     user_integration.refresh_token%TYPE;
     BEGIN
-        -- Obtenemos el ID del usuario directamente del token JWT
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         -- Parseamos el Body enviado por Astro
@@ -76,6 +77,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_integration_api IS
         USING (
             SELECT
                 v_user_id AS usr_id_user,
+                v_org_id  AS org_id_organization,
                 LOWER(v_provider) AS provider,
                 -- ENCRIPTAMOS ANTES DE GUARDAR
                 pkg_aox_util.fn_encrypt_data(v_access_token)  AS access_token,
@@ -85,18 +87,21 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_integration_api IS
         ON (ui.usr_id_user = src.usr_id_user AND ui.provider = src.provider)
         WHEN MATCHED THEN
             UPDATE SET
+                org_id_organization = src.org_id_organization,
                 access_token  = src.access_token,
                 refresh_token = COALESCE(src.refresh_token, ui.refresh_token),
                 updated_at    = CURRENT_TIMESTAMP
         WHEN NOT MATCHED THEN
             INSERT (
                 usr_id_user,
+                org_id_organization,
                 provider,
                 access_token,
                 refresh_token
             )
             VALUES (
                 src.usr_id_user,
+                src.org_id_organization,
                 src.provider,
                 src.access_token,
                 src.refresh_token
@@ -124,6 +129,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_integration_api IS
         v_response_json json_object_t := json_object_t();
         v_data_obj      json_object_t;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         FOR rec IN (
@@ -170,6 +176,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_integration_api IS
         v_user_id       NUMBER;
         v_response_json json_object_t := json_object_t();
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         DELETE FROM user_integration

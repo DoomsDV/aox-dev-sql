@@ -104,9 +104,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_total_pages      NUMBER := 0;
         v_is_org_viewer    BOOLEAN := FALSE;
     BEGIN
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
 
         v_is_org_viewer := v_role_id IN (
             pkg_aox_util.fn_rol('ADMIN'),
@@ -459,9 +462,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_by_prof_arr      json_array_t  := json_array_t();
         v_row_obj          json_object_t;
     BEGIN
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
 
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
@@ -777,9 +783,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
         v_api_code         VARCHAR2(30);
         v_error_message    VARCHAR2(4000);
     BEGIN
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
 
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');

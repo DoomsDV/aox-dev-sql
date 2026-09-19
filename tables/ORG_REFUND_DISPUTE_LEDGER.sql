@@ -55,6 +55,11 @@ ALTER TABLE org_refund_dispute_ledger
   REFERENCES organization (id_organization) ON DELETE CASCADE
 /
 
+PROMPT CREATE INDEX idx_refund_ledger_org
+CREATE INDEX idx_refund_ledger_org
+  ON org_refund_dispute_ledger (org_id_organization)
+/
+
 PROMPT ALTER TABLE org_refund_dispute_ledger ADD CONSTRAINT fk_refund_disp_ledger_disp FOREIGN KEY
 ALTER TABLE org_refund_dispute_ledger
   ADD CONSTRAINT fk_refund_disp_ledger_disp FOREIGN KEY (dispute_id)

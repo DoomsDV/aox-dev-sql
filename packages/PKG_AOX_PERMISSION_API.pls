@@ -159,9 +159,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_permission_api IS
         po_role_id     OUT NUMBER
     ) IS
     BEGIN
-        po_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        po_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
-        po_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => po_org_id,
+            po_user_id     => po_user_id,
+            po_role_id     => po_role_id
+        );
 
         IF NVL(po_org_id, 0) <= 0 OR NVL(po_user_id, 0) <= 0 OR NVL(po_role_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(

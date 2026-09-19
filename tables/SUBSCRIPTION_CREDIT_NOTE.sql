@@ -49,6 +49,11 @@ ALTER TABLE subscription_credit_note
   ON DELETE CASCADE
 /
 
+PROMPT CREATE INDEX idx_sub_cn_org
+CREATE INDEX idx_sub_cn_org
+  ON subscription_credit_note (org_id_organization)
+/
+
 PROMPT ALTER TABLE subscription_credit_note ADD CONSTRAINT chk_sub_credit_note_status CHECK
 ALTER TABLE subscription_credit_note
   ADD CONSTRAINT chk_sub_credit_note_status CHECK (

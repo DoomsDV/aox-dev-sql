@@ -38,7 +38,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_api IS
         v_sch_obj       json_object_t;
         v_platform_user_id NUMBER;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         BEGIN
             SELECT om.platform_user_id
@@ -152,7 +152,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_api IS
         v_other_end        VARCHAR2(5);
         v_other_location   VARCHAR2(255);
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);

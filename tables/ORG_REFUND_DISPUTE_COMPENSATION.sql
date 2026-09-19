@@ -40,6 +40,11 @@ ALTER TABLE org_refund_dispute_compensation
   REFERENCES organization (id_organization) ON DELETE CASCADE
 /
 
+PROMPT CREATE INDEX idx_refund_comp_org
+CREATE INDEX idx_refund_comp_org
+  ON org_refund_dispute_compensation (org_id_organization)
+/
+
 PROMPT ALTER TABLE org_refund_dispute_compensation ADD CONSTRAINT chk_refund_disp_comp_credit CHECK
 ALTER TABLE org_refund_dispute_compensation
   ADD CONSTRAINT chk_refund_disp_comp_credit CHECK (

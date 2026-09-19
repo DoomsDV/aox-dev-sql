@@ -42,6 +42,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
     ) IS
         v_role_id NUMBER;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
         IF v_role_id <> pkg_aox_util.fn_rol('ADMIN') AND NVL(v_role_id, 0) <> 1 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
@@ -53,7 +54,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
     ) RETURN NUMBER IS
         v_org_id NUMBER;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(
                 pkg_aox_util.c_sqlcode_session,
@@ -390,6 +391,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         v_item           json_object_t;
     BEGIN
         pr_assert_admin(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_org_id := fn_require_org_id(pi_auth_header);
 
         FOR rec IN (
@@ -471,6 +473,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         v_data           json_object_t := json_object_t();
     BEGIN
         pr_assert_admin(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_org_id := fn_require_org_id(pi_auth_header);
         v_code   := fn_parse_addon_code(pi_body);
 

@@ -15,6 +15,17 @@ CREATE TABLE professional_schedule (
   )
 /
 
+PROMPT CREATE INDEX idx_sch_org
+CREATE INDEX idx_sch_org
+  ON professional_schedule (
+    org_id_organization
+  )
+  INITRANS  20
+  STORAGE (
+    NEXT       1024 K
+  )
+/
+
 PROMPT CREATE INDEX idx_sch_pro_loc_day
 CREATE INDEX idx_sch_pro_loc_day
   ON professional_schedule (

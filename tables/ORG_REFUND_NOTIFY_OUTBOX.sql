@@ -26,6 +26,11 @@ ALTER TABLE org_refund_notify_outbox
   ADD CONSTRAINT uq_refund_notify_dedupe UNIQUE (dedupe_key)
 /
 
+PROMPT CREATE INDEX idx_refund_notify_org
+CREATE INDEX idx_refund_notify_org
+  ON org_refund_notify_outbox (org_id_organization)
+/
+
 PROMPT CREATE INDEX idx_refund_notify_pending
 CREATE INDEX idx_refund_notify_pending
   ON org_refund_notify_outbox (status, created_at)

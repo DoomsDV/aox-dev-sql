@@ -572,6 +572,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_payload          CLOB;
         v_json_initialized BOOLEAN := FALSE;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT
             c.full_name,
             c.phone_number,
@@ -736,6 +737,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_payload           CLOB;
         v_json_initialized  BOOLEAN := FALSE;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT
             c.full_name,
             c.phone_number,
@@ -840,6 +842,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_payload          CLOB;
         v_json_initialized BOOLEAN := FALSE;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT c.full_name, c.phone_number, a.start_time, o.name
           INTO v_customer_name, v_phone_number, v_start_time, v_organization_name
           FROM appointment a
@@ -914,6 +917,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_payload          CLOB;
         v_json_initialized BOOLEAN := FALSE;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT
             c.full_name,
             c.phone_number,
@@ -1015,6 +1019,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_json_initialized  BOOLEAN := FALSE;
         v_template_name     VARCHAR2(100);
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT
             c.full_name,
             c.phone_number,
@@ -1144,6 +1149,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_json_initialized  BOOLEAN := FALSE;
         v_template_name     VARCHAR2(100);
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT
             c.full_name,
             c.phone_number,
@@ -1286,6 +1292,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_json_initialized  BOOLEAN := FALSE;
         v_template_name     VARCHAR2(100);
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT
             c.full_name,
             c.phone_number,
@@ -1407,6 +1414,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_payload          CLOB;
         v_json_initialized BOOLEAN := FALSE;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT c.full_name, c.phone_number, a.start_time, a.status, o.name, s.name, a.org_id_organization
           INTO v_customer_name, v_phone_number, v_start_time, v_status, v_organization_name, v_service_name, v_org_id
           FROM appointment a
@@ -1511,6 +1519,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_rows_updated    NUMBER := 0;
         v_message         VARCHAR2(500);
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         IF v_action IN ('CONFIRMAR', 'CONFIRMADO', 'CONFIRMAR_RESERVA') THEN
             UPDATE appointment
                SET attendance_status   = 'CONFIRMED',
@@ -1682,6 +1691,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_due_at        TIMESTAMP;
         v_flow_token    VARCHAR2(80);
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT NVL(ws.survey_auto_enabled, 0),
                NVL(a.survey_status, 'NONE'),
                a.end_time
@@ -1752,6 +1762,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             RAISE_APPLICATION_ERROR(-20071, 'Las encuestas solo se envían entre las 9:00 y las 21:00.');
         END IF;
 
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(pi_appointment_id);
         SELECT a.status,
                NVL(a.survey_status, 'NONE'),
                a.cus_id_customer,
@@ -2093,9 +2104,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_sent_today      NUMBER;
         v_next_due        TIMESTAMP;
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         v_current_time := CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP);
 
         IF NOT fn_is_survey_send_window_open(v_current_time) THEN
+            pkg_aox_session.pr_leave_scheduler_job;
             RETURN;
         END IF;
 
@@ -2115,6 +2128,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
              FETCH FIRST NVL(pi_batch_size, 100) ROWS ONLY
         ) LOOP
             BEGIN
+                pkg_aox_session.pr_bind_tenant_from_appointment_id(rec.id_appointment);
                 SELECT COUNT(*)
                   INTO v_recent_same_pro
                   FROM appointment a2
@@ -2159,7 +2173,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
                 WHEN OTHERS THEN
                     NULL;
             END;
+            pkg_aox_session.pr_enter_scheduler_job;
         END LOOP;
+        pkg_aox_session.pr_leave_scheduler_job;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
+            RAISE;
     END pr_process_survey_requests;
 
     PROCEDURE pr_apply_survey_nfm_reply (
@@ -2215,6 +2235,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         END IF;
 
         v_appointment_id := TO_NUMBER(REGEXP_SUBSTR(v_flow_token, '[0-9]+$'));
+        pkg_aox_session.pr_bind_tenant_from_appointment_id(v_appointment_id);
 
         v_clean_from := fn_clean_whatsapp_phone(pi_phone_from);
 
@@ -2257,6 +2278,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_current_hour NUMBER;
         v_current_time TIMESTAMP;
     BEGIN 
+        pkg_aox_session.pr_enter_scheduler_job;
         -- Asignamos la hora con la zona horaria correcta                                       
         v_current_time := CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP);
 
@@ -2265,6 +2287,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
 
         IF v_current_hour < pkg_aox_util.fn_param_number('META_REMINDER_START_HOUR', 6)
           OR v_current_hour >= pkg_aox_util.fn_param_number('META_REMINDER_END_HOUR', 22) THEN
+            pkg_aox_session.pr_leave_scheduler_job;
             RETURN;
         END IF;
 
@@ -2285,12 +2308,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             FETCH FIRST NVL(pi_batch_size, 100) ROWS ONLY
         ) LOOP
             BEGIN
+                pkg_aox_session.pr_bind_tenant_from_appointment_id(rec.id_appointment);
                 pr_send_attendance_request_wa(rec.id_appointment);
             EXCEPTION
                 WHEN OTHERS THEN
                     NULL;
             END;
+            pkg_aox_session.pr_enter_scheduler_job;
         END LOOP;
+        pkg_aox_session.pr_leave_scheduler_job;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
+            RAISE;
     END pr_process_attendance_reminders;
 
     PROCEDURE pr_process_attendance_timeouts (
@@ -2302,6 +2332,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         v_payload          CLOB;
         v_json_initialized BOOLEAN := FALSE;
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         -- Asignamos la hora con la zona horaria correcta
         v_current_time := CAST(SYSTIMESTAMP AT TIME ZONE pkg_aox_util.fn_app_timezone AS TIMESTAMP);
 
@@ -2310,6 +2341,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
 
         IF v_current_hour < pkg_aox_util.fn_param_number('META_REMINDER_START_HOUR', 6)
           OR v_current_hour >= pkg_aox_util.fn_param_number('META_REMINDER_END_HOUR', 22) THEN
+            pkg_aox_session.pr_leave_scheduler_job;
             RETURN;
         END IF;
 
@@ -2338,6 +2370,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
             ORDER BY a.attendance_due_at
             FETCH FIRST NVL(pi_batch_size, 100) ROWS ONLY
         ) LOOP
+            pkg_aox_session.pr_bind_tenant_from_appointment_id(rec.id_appointment);
             UPDATE appointment
               SET status            = 'CANCELADO',
                   attendance_status = 'EXPIRED',
@@ -2426,9 +2459,15 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
                     END;
                 END IF;
             END IF;
+            pkg_aox_session.pr_enter_scheduler_job;
         END LOOP;
 
         COMMIT;
+        pkg_aox_session.pr_leave_scheduler_job;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
+            RAISE;
     END pr_process_attendance_timeouts;
 
     FUNCTION fn_verify_webhook_signature (

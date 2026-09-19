@@ -68,6 +68,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
     PROCEDURE pr_assert_manager(pi_auth_header IN VARCHAR2) IS
         v_role_id NUMBER;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         IF v_role_id NOT IN (
@@ -131,7 +132,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         v_data_arr       json_array_t  := json_array_t();
         v_item           json_object_t;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         pr_assert_location_in_org(pi_location_id, v_org_id);
 
         v_from_date := fn_parse_date_opt(pi_from_date);
@@ -222,7 +223,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         v_data_arr       json_array_t  := json_array_t();
         v_item           json_object_t;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_from_date := fn_parse_date_opt(pi_from_date);
         v_to_date   := fn_parse_date_opt(pi_to_date);
         IF v_from_date IS NULL THEN
@@ -366,7 +367,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         v_customs       json_array_t  := json_array_t();
         v_item          json_object_t;
     BEGIN
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         SELECT NVL(o.country_code, 'PY')
           INTO v_country
@@ -481,7 +482,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         v_holiday_id     NUMBER;
     BEGIN
         pr_assert_manager(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
@@ -720,7 +721,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         v_response_json  json_object_t := json_object_t();
     BEGIN
         pr_assert_manager(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -789,7 +790,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_closure_api IS
         v_response_json json_object_t := json_object_t();
     BEGIN
         pr_assert_manager(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);

@@ -71,6 +71,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
     PROCEDURE pr_assert_staff(pi_auth_header IN VARCHAR2) IS
         v_role_id NUMBER;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
         IF v_role_id NOT IN (
             pkg_aox_util.fn_rol('ADMIN'),
@@ -286,7 +287,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_pending_count NUMBER := 0;
     BEGIN
         pr_assert_staff(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
@@ -556,7 +557,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_data     json_object_t := json_object_t();
     BEGIN
         pr_assert_staff(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
@@ -628,7 +629,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_data     json_object_t := json_object_t();
     BEGIN
         pr_assert_staff(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
@@ -735,7 +736,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_data     json_object_t := json_object_t();
     BEGIN
         pr_assert_staff(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
@@ -872,7 +873,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         v_data        json_object_t := json_object_t();
     BEGIN
         pr_assert_staff(pi_auth_header);
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
@@ -1011,6 +1012,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
 
     PROCEDURE pr_expire_pending_payments IS
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         -- Expira holds web SIPAP (reserve_for_deposit) y checkout Pagopar legacy abandonado.
         -- Requiere payment_expires_at: las citas PENDING del panel manual no lo tienen.
         -- El reloj se congela si ya hay un comprobante subido esperando revision del
@@ -1036,6 +1038,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
                        AND NOT (pt.ocr_status = 'MISMATCH' AND pt.reviewed_at IS NOT NULL)
                )
         ) LOOP
+            pkg_aox_session.set_org(rec.org_id_organization);
             UPDATE appointment
                SET payment_status = 'EXPIRED',
                    status         = 'CANCELADO',
@@ -1069,6 +1072,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
             END IF;
         END LOOP;
         COMMIT;
+        pkg_aox_session.pr_leave_scheduler_job;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
+            RAISE;
     END pr_expire_pending_payments;
 
 END pkg_aox_payments_api;

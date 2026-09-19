@@ -28,6 +28,11 @@ ALTER TABLE embedding_sync_outbox
   ADD CONSTRAINT chk_embedding_outbox_status CHECK (status IN ('PENDING', 'PROCESSING', 'DONE', 'FAILED'))
 /
 
+PROMPT CREATE INDEX idx_embedding_outbox_org
+CREATE INDEX idx_embedding_outbox_org
+  ON embedding_sync_outbox (org_id_organization)
+/
+
 PROMPT CREATE INDEX idx_embedding_outbox_pending ON embedding_sync_outbox
 CREATE INDEX idx_embedding_outbox_pending
   ON embedding_sync_outbox (status, created_at)

@@ -73,6 +73,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_user_id NUMBER;
         v_pro_id  NUMBER;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
         IF v_role_id <> pkg_aox_util.fn_rol('PROFESIONAL') THEN
             RETURN NULL;
@@ -95,6 +96,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
     PROCEDURE pr_assert_admin(pi_auth_header IN VARCHAR2) IS
         v_role_id NUMBER;
     BEGIN
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
         IF v_role_id <> pkg_aox_util.fn_rol('ADMIN') THEN
             RAISE_APPLICATION_ERROR(
@@ -134,7 +136,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         );
     BEGIN
         -- 1. Validar Token y obtener Organización
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_pro_id := fn_scope_pro_id(pi_auth_header, v_org_id);
 
         -- 2. Calcular el Offset
@@ -285,7 +287,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
     BEGIN
         -- 1. Validar Token, rol Admin y Organización
         pr_assert_admin(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -509,7 +511,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_created_at       service.created_at%TYPE;
     begin
         -- 1. Validar Token y obtener Organización
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- 2. Consultar el servicio específico
         begin
@@ -636,7 +638,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
     begin
         -- 1. Validar Token, rol Admin y Organización
         pr_assert_admin(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -862,7 +864,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
     begin
         -- 1. Validar Token, rol Admin y Organización
         pr_assert_admin(pi_auth_header);
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         -- Gate de suscripción: bloquea escritura en READ_ONLY / vencido.
         pkg_aox_subscription_api.fn_assert_org_can_write(v_org_id);
@@ -964,7 +966,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
         v_service_obj   json_object_t;
     BEGIN
         -- 1. Validar Token y obtener Organización
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_pro_id := fn_scope_pro_id(pi_auth_header, v_org_id);
 
         -- 2. Consultar SOLO los servicios activos de la organización

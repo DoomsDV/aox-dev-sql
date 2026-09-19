@@ -356,6 +356,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_vector_search IS
         IF NVL(pi_org_id, 0) <= 0 THEN
             RETURN;
         END IF;
+        pkg_aox_session.set_org(pi_org_id);
 
         FOR rec IN (
             SELECT id_customer AS entity_id
@@ -395,12 +396,14 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_vector_search IS
 
     PROCEDURE pr_sync_all_orgs_embeddings IS
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         FOR rec IN (
             SELECT id_organization
               FROM organization
              ORDER BY id_organization
         ) LOOP
             BEGIN
+                pkg_aox_session.set_org(rec.id_organization);
                 pr_sync_org_embeddings(rec.id_organization);
                 COMMIT;
             EXCEPTION
@@ -408,6 +411,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_vector_search IS
                     ROLLBACK;
             END;
         END LOOP;
+        pkg_aox_session.pr_leave_scheduler_job;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
+            RAISE;
     END pr_sync_all_orgs_embeddings;
 
     PROCEDURE pr_on_entity_embedding_changed(
@@ -482,6 +490,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_vector_search IS
         v_params     json_object_t;
         v_err_msg    VARCHAR2(4000);
     BEGIN
+        pkg_aox_session.pr_enter_scheduler_job;
         -- Lock del batch con SKIP LOCKED (soporta ejecuciones concurrentes del job
         -- sin duplicar trabajo). BULK COLLECT cierra el cursor de inmediato: hacer
         -- COMMIT dentro de un FOR-loop atado a un cursor FOR UPDATE abierto rompe
@@ -502,6 +511,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_vector_search IS
                   INTO v_org_id, v_entity_typ, v_entity_id, v_action
                   FROM embedding_sync_outbox
                  WHERE id_outbox = v_ids(i);
+                pkg_aox_session.set_org(v_org_id);
 
                 UPDATE embedding_sync_outbox
                    SET status = 'PROCESSING'
@@ -546,6 +556,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_vector_search IS
                     COMMIT;
             END;
         END LOOP;
+        pkg_aox_session.pr_leave_scheduler_job;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.pr_leave_scheduler_job;
+            RAISE;
     END pr_process_embedding_outbox;
 
     FUNCTION fn_search_top_k(

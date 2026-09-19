@@ -422,7 +422,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_response_json           json_object_t := json_object_t();
         v_org_obj                 json_object_t := json_object_t();
     begin
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         if nvl(v_org_id, 0) <= 0 then
@@ -630,9 +630,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_banner_blob                   blob;
         v_clear_banner                  number := 0;
     begin
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
-        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
-        v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(
+            pi_auth_header => pi_auth_header,
+            po_org_id      => v_org_id,
+            po_user_id     => v_user_id,
+            po_role_id     => v_role_id
+        );
 
         if nvl(v_role_id, 0) <> 1 then
             raise_application_error(pkg_aox_util.c_sqlcode_forbidden, 'Acceso denegado. Solo el administrador puede modificar el perfil del negocio.');
@@ -871,9 +874,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
             begin
                 select count(*)
                   into v_slug_taken
-                  from workspace_setting ws
-                 where lower(trim(ws.profile_slug)) = v_profile_slug
-                   and ws.org_id_organization <> v_org_id;
+                  from org_public_directory d
+                 where d.profile_slug = v_profile_slug
+                   and d.org_id_organization <> v_org_id;
 
                 if v_slug_taken > 0 then
                     raise_application_error(
@@ -1322,7 +1325,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_response_json json_object_t := json_object_t();
         v_data_obj      json_object_t := json_object_t();
     BEGIN
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         IF NVL(v_role_id, 0) <> 1 THEN
@@ -1363,9 +1366,9 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
 
         SELECT COUNT(*)
           INTO v_taken
-          FROM workspace_setting ws
-         WHERE LOWER(TRIM(ws.profile_slug)) = v_slug
-           AND ws.org_id_organization <> v_org_id;
+          FROM org_public_directory d
+         WHERE d.profile_slug = v_slug
+           AND d.org_id_organization <> v_org_id;
 
         po_status_code := pkg_aox_util.c_success_ok_code;
         v_data_obj.put('slug', v_slug);
@@ -1403,7 +1406,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_gallery_id    NUMBER;
         v_url           VARCHAR2(1000);
     BEGIN
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         IF NVL(v_role_id, 0) <> 1 THEN
@@ -1522,7 +1525,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_response_json json_object_t := json_object_t();
         v_data_obj      json_object_t := json_object_t();
     BEGIN
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         IF NVL(v_role_id, 0) <> 1 THEN
@@ -1606,7 +1609,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_count         NUMBER;
         v_owned         NUMBER;
     BEGIN
-        v_org_id  := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
         v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
 
         IF NVL(v_role_id, 0) <> 1 THEN

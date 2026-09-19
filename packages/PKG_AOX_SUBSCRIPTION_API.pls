@@ -443,7 +443,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         v_eligible_features json_array_t  := json_array_t();
         v_eligible_codes    sys.odcivarchar2list;
     begin
-        v_org_id := pkg_aox_util.fn_get_org_id_from_jwt(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
 
         if nvl(v_org_id, 0) <= 0 then
             raise_application_error(pkg_aox_util.c_sqlcode_session, 'Token inválido o sin organización asociada.');

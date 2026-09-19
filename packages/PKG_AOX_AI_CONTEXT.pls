@@ -22,6 +22,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ai_context IS
         pi_session_id IN NUMBER
     ) IS
     BEGIN
+        -- Dual-write: VPD lee AOX_TENANT_CTX, no AOX_AI_CTX.
+        IF NVL(pi_org_id, 0) > 0 THEN
+            pkg_aox_session.set_org(
+                pi_org_id,
+                CASE WHEN NVL(pi_user_id, 0) > 0 THEN pi_user_id ELSE NULL END
+            );
+        END IF;
         DBMS_SESSION.SET_CONTEXT('AOX_AI_CTX', 'ORG_ID', TO_CHAR(pi_org_id));
         DBMS_SESSION.SET_CONTEXT('AOX_AI_CTX', 'USER_ID', TO_CHAR(pi_user_id));
         DBMS_SESSION.SET_CONTEXT('AOX_AI_CTX', 'ROLE_ID', TO_CHAR(pi_role_id));
@@ -31,6 +38,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_ai_context IS
 
     PROCEDURE pr_clear_context IS
     BEGIN
+        -- No limpia AOX_TENANT_CTX: el request JWT/publico sigue necesitando la org.
         DBMS_SESSION.CLEAR_CONTEXT('AOX_AI_CTX', NULL, 'ORG_ID');
         DBMS_SESSION.CLEAR_CONTEXT('AOX_AI_CTX', NULL, 'USER_ID');
         DBMS_SESSION.CLEAR_CONTEXT('AOX_AI_CTX', NULL, 'ROLE_ID');
