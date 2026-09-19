@@ -137,6 +137,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
     BEGIN
         -- 1. Validar Token y obtener Organización
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'services.view',
+            'No tienes permisos para ver servicios.'
+        );
         v_pro_id := fn_scope_pro_id(pi_auth_header, v_org_id);
 
         -- 2. Calcular el Offset
@@ -512,6 +518,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
     begin
         -- 1. Validar Token y obtener Organización
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'services.view',
+            'No tienes permisos para ver servicios.'
+        );
 
         -- 2. Consultar el servicio específico
         begin
@@ -967,6 +979,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
     BEGIN
         -- 1. Validar Token y obtener Organización
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'services.view',
+            'No tienes permisos para ver servicios.'
+        );
         v_pro_id := fn_scope_pro_id(pi_auth_header, v_org_id);
 
         -- 2. Consultar SOLO los servicios activos de la organización
@@ -1016,4 +1034,3 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_service_api IS
     END pr_list_services_lov;
 END pkg_aox_service_api;
 /
-

@@ -468,6 +468,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
     BEGIN
         -- 1. Validar JWT y Organización
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'professionals.view',
+            'No tienes permisos para ver profesionales.'
+        );
 
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
@@ -1096,6 +1102,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_spec_obj      json_object_t;
     BEGIN
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'professionals.view',
+            'No tienes permisos para ver profesionales.'
+        );
 
         -- Utilizamos el mismo JOIN robusto del listado
         FOR rec IN (
@@ -1358,6 +1370,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
         v_org_id        NUMBER;
         v_user_id       NUMBER;
         v_my_prof_id    NUMBER := NULL;
+        v_role_id       NUMBER;
+        v_only_me       NUMBER := NVL(pi_only_me, 0);
 
         v_response_json json_object_t := json_object_t();
         v_data_arr      json_array_t  := json_array_t();
@@ -1365,9 +1379,20 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
     BEGIN
         -- 1. Obtenemos la Organización del Token
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        IF pkg_aox_permission_api.fn_has_capability(v_org_id, v_role_id, 'professionals.view') = 0
+           AND pkg_aox_permission_api.fn_has_capability(v_org_id, v_role_id, 'schedules.view') = 0 THEN
+            RAISE_APPLICATION_ERROR(
+                pkg_aox_util.c_sqlcode_forbidden,
+                'No tienes permisos para ver profesionales u horarios.'
+            );
+        END IF;
+        IF pkg_aox_permission_api.fn_has_capability(v_org_id, v_role_id, 'professionals.view') = 0 THEN
+            v_only_me := 1;
+        END IF;
 
         -- 2. Lógica de la Bandera "Only Me"
-        IF pi_only_me = 1 THEN
+        IF v_only_me = 1 THEN
             v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
             BEGIN
@@ -1395,7 +1420,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
               AND p.is_active = 1
               AND u.is_active = 1
               -- Filtro mágico: Si bandera es 0 ignora esto, si es 1 filtra por el ID encontrado
-              AND ((pi_only_me = 0 OR pi_only_me IS NULL) OR p.id_professional = v_my_prof_id)
+              AND (v_only_me = 0 OR p.id_professional = v_my_prof_id)
               AND u.rol_id_role in (pkg_aox_util.fn_rol('ADMIN'),pkg_aox_util.fn_rol('PROFESIONAL'))
             ORDER BY display_name ASC
         ) LOOP
@@ -1435,4 +1460,3 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_professional_api IS
 
 END pkg_aox_professional_api;
 /
-

@@ -142,6 +142,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             po_role_id     => v_role_id
         );
 
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'calendar.view',
+            'No tienes permisos para ver la agenda.'
+        );
+
         IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
             BEGIN
                 SELECT id_professional INTO v_actual_pro_id
@@ -296,6 +303,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             po_org_id      => v_org_id,
             po_user_id     => v_user_id,
             po_role_id     => v_role_id
+        );
+
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'calendar.view',
+            'No tienes permisos para ver la agenda.'
         );
 
         IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
@@ -3035,4 +3049,3 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
 
 END pkg_aox_appointment_api;
 /
-

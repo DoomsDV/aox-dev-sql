@@ -37,8 +37,36 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_api IS
         v_cross_org_arr json_array_t  := json_array_t();
         v_sch_obj       json_object_t;
         v_platform_user_id NUMBER;
+        v_role_id       NUMBER;
+        v_user_id       NUMBER;
+        v_my_prof_id    NUMBER;
     BEGIN
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'schedules.view',
+            'No tienes permisos para ver horarios.'
+        );
+
+        IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
+            v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
+            BEGIN
+                SELECT p.id_professional
+                  INTO v_my_prof_id
+                  FROM professional p
+                 WHERE p.usr_id_user = v_user_id
+                   AND p.org_id_organization = v_org_id
+                   AND p.is_active = 1;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_my_prof_id := -1;
+            END;
+            IF NVL(pi_prof_id, 0) <> NVL(v_my_prof_id, -1) THEN
+                RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'Un profesional solo puede consultar sus propios horarios.');
+            END IF;
+        END IF;
 
         BEGIN
             SELECT om.platform_user_id
@@ -368,4 +396,3 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_schedule_api IS
 
 END pkg_aox_schedule_api;
 /
-

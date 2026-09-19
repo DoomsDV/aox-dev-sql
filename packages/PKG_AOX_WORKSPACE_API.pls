@@ -423,6 +423,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
         v_org_obj                 json_object_t := json_object_t();
     begin
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'ajustes.view',
+            'No tienes permisos para ver los ajustes del negocio.'
+        );
         v_user_id := pkg_aox_util.fn_get_user_id_from_jwt(pi_auth_header);
 
         if nvl(v_org_id, 0) <= 0 then
@@ -1694,4 +1700,3 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_workspace_api IS
 
 END pkg_aox_workspace_api;
 /
-

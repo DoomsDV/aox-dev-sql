@@ -390,9 +390,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_addon_api IS
         v_available_items json_array_t := json_array_t();
         v_item           json_object_t;
     BEGIN
-        pr_assert_admin(pi_auth_header);
-        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header);
-        v_org_id := fn_require_org_id(pi_auth_header);
+        pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        IF NVL(v_org_id, 0) <= 0 THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_session, 'Token inválido o sin organización asociada.');
+        END IF;
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'addons.view',
+            'No tienes permisos para ver complementos.'
+        );
 
         FOR rec IN (
             SELECT ra.id_addon,

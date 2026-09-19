@@ -138,6 +138,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         );
     BEGIN
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'locations.view',
+            'No tienes permisos para ver sucursales.'
+        );
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
 
@@ -263,6 +269,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         v_dept_obj      json_object_t;
     BEGIN
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'locations.view',
+            'No tienes permisos para ver sucursales.'
+        );
 
         FOR rec IN (
             SELECT
@@ -564,6 +576,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         v_loc_obj       json_object_t;
     BEGIN
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'locations.view',
+            'No tienes permisos para ver sucursales.'
+        );
 
         FOR rec IN (
             SELECT id_location, name, address
@@ -589,4 +607,3 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
 
 END pkg_aox_location_api;
 /
-

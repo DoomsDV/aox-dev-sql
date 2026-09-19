@@ -448,6 +448,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_api IS
         if nvl(v_org_id, 0) <= 0 then
             raise_application_error(pkg_aox_util.c_sqlcode_session, 'Token inválido o sin organización asociada.');
         end if;
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'plan.view',
+            'No tienes permisos para ver la suscripción.'
+        );
 
         select
             s.pln_id_plan,

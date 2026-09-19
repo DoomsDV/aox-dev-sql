@@ -17,6 +17,9 @@ PROMPT === 20260919_aox_tenant_entrypoints ===
 @@../packages/PKG_AOX_PAYMENTS_API.pls
 @@../packages/PKG_AOX_PAYMENT_SETTINGS_API.pls
 @@../packages/PKG_AOX_SUBSCRIPTION_API.pls
+-- La recompilación de SUBSCRIPTION_API puede invalidar el body de permisos
+-- (dependencia mutua); restaurarlo sin reemplazar la especificación.
+ALTER PACKAGE pkg_aox_permission_api COMPILE BODY;
 @@../packages/PKG_AOX_SUBSCRIPTION_BILLING_API.pls
 @@../packages/PKG_AOX_ADDON_API.pls
 @@../packages/PKG_AOX_WORKSPACE_API.pls

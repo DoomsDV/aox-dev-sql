@@ -120,6 +120,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
 
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'dashboard.view',
+            'No tienes permisos para ver el dashboard.'
+        );
+
         IF v_page < 1 THEN
             v_page := 1;
         END IF;
@@ -1224,4 +1231,3 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_dashboard_api IS
 
 END pkg_aox_dashboard_api;
 /
-

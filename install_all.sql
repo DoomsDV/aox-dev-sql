@@ -426,7 +426,15 @@ PROMPT --- FASE 3: Paquetes - nucleo ---
 @@packages\PKG_AOX_AUTH.pls
 -- SUBSCRIPTION_API en nucleo: BUCKET y otros paquetes dependen de sus gates/entitlements.
 @@packages\PKG_AOX_ADDON_ELIGIBILITY.pls
+-- Especificación adelantada: SUBSCRIPTION_API y PERMISSION_API se validan
+-- mutuamente (entitlements/capabilities).
+@@packages\PKG_AOX_PERMISSION_API_SPEC.pls
 @@packages\PKG_AOX_SUBSCRIPTION_API.pls
+-- Cuerpo completo ahora puede resolver fn_org_has_feature de suscripciones.
+@@packages\PKG_AOX_PERMISSION_API.pls
+-- Reemplazar la especificación de permisos invalida dependientes; recompilar
+-- solo el cuerpo evita volver a reemplazar la especificación en ciclo.
+ALTER PACKAGE pkg_aox_subscription_api COMPILE BODY;
 -- Cobros SIPAP (Fase A): SERVICE_API depende de fn_org_deposits_enabled.
 @@packages\PKG_AOX_PAYMENT_SETTINGS_API.pls
 @@packages\PKG_AOX_BILLING_PROFILE_API.pls
@@ -465,7 +473,6 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 -- Facturacion comercial de suscripcion (Fase 5): depende de SUBSCRIPTION_API + PAGOPAR_API.
 @@packages\PKG_AOX_SUBSCRIPTION_BILLING_API.pls
 @@packages\PKG_AOX_ADDON_API.pls
-@@packages\PKG_AOX_PERMISSION_API.pls
 @@packages\PKG_AOX_ODONTOGRAM_API.pls
 @@packages\PKG_AOX_BODY_MAP_API.pls
 @@packages\PKG_AOX_USER_API.pls
@@ -477,6 +484,8 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 PROMPT --- Migraciones incrementales ---
 @@migrations\20260906_einvoice_webhook_durable.sql
 @@migrations\20260915_role_capabilities.sql
+@@migrations\20260916_tenant_analytics.sql
+@@migrations\20260919_bookmate_assistant_foundation.sql
 @@migrations\20260915_appointment_series.sql
 @@migrations\20260915_appointment_series_ords.sql
 @@migrations\20260919_aox_tenant_session.sql

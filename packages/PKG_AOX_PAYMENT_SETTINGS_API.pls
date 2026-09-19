@@ -498,14 +498,33 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payment_settings_api IS
         po_response_body OUT CLOB
     ) IS
         v_org_id        NUMBER;
+        v_role_id       NUMBER;
         v_response_json json_object_t := json_object_t();
+        v_data          json_object_t;
     BEGIN
-        pr_assert_admin(pi_auth_header);
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        v_role_id := pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'cobros.view',
+            'No tienes permisos para ver la configuración de cobros.'
+        );
 
         po_status_code := pkg_aox_util.c_success_ok_code;
+        v_data := fn_build_data_obj(v_org_id);
+        IF pkg_aox_permission_api.fn_has_capability(v_org_id, v_role_id, 'workspace.manage') = 0 THEN
+            v_data.remove('bank_id');
+            v_data.remove('bank_name');
+            v_data.remove('account_holder');
+            v_data.remove('document_id');
+            v_data.remove('bank_alias');
+            v_data.remove('banks');
+            v_data.remove('deposits_suspended_reason');
+            v_data.remove('deposits_suspended_at');
+        END IF;
         v_response_json.put('status', 'success');
-        v_response_json.put('data', fn_build_data_obj(v_org_id));
+        v_response_json.put('data', v_data);
         po_response_body := v_response_json.to_clob();
     EXCEPTION
         WHEN OTHERS THEN

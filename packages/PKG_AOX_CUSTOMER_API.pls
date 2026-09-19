@@ -512,6 +512,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
             v_effective_pro_id
         );
 
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'customers.view',
+            'No tienes permisos para ver clientes.'
+        );
+
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
         IF v_search IS NOT NULL AND LENGTH(v_search) = 0 THEN
@@ -697,6 +704,13 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_customer_api IS
             v_user_id,
             v_role_id,
             v_effective_pro_id
+        );
+
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            v_role_id,
+            'customers.view',
+            'No tienes permisos para ver clientes.'
         );
 
         -- Historial (Fase 4): ¿el plan incluye historial por cita?

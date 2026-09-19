@@ -291,6 +291,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'cobros.view',
+            'No tienes permisos para ver cobros.'
+        );
         pr_assert_deposit_feature(v_org_id);
 
         pr_resolve_date_range(pi_date_preset, pi_date_from, pi_date_to, v_from, v_to);
@@ -561,6 +567,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_payments_api IS
         IF NVL(v_org_id, 0) <= 0 THEN
             RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_forbidden, 'No autorizado.');
         END IF;
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'cobros.view',
+            'No tienes permisos para ver cobros.'
+        );
 
         -- Sin feature: badge 0 (no 403) para no romper el shell del panel.
         IF pkg_aox_subscription_api.fn_org_has_feature(v_org_id, 'DEPOSIT_COLLECTION') <> 1 THEN

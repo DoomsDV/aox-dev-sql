@@ -111,6 +111,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_specialty_api IS
         );
     BEGIN
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'specialties.view',
+            'No tienes permisos para ver especialidades.'
+        );
         IF v_page < 1 THEN v_page := 1; END IF;
         v_offset := (v_page - 1) * v_limit;
 
@@ -180,6 +186,12 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_specialty_api IS
         v_spec_obj      json_object_t;
     BEGIN
         pkg_aox_session.pr_bind_tenant_from_jwt(pi_auth_header, v_org_id);
+        pkg_aox_permission_api.pr_assert_capability(
+            v_org_id,
+            pkg_aox_util.fn_get_role_id_from_jwt(pi_auth_header),
+            'specialties.view',
+            'No tienes permisos para ver especialidades.'
+        );
 
         FOR rec IN (
             SELECT id_specialty, name, description, is_active, created_at
@@ -386,4 +398,3 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_specialty_api IS
 
 END pkg_aox_specialty_api;
 /
-
