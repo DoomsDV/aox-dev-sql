@@ -1,0 +1,3 @@
+# Local agent indexes and Python bytecode
+.codebase-memory/
+scripts/__pycache__/
