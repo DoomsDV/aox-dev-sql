@@ -487,6 +487,7 @@ PROMPT --- Migraciones incrementales ---
 @@migrations\20260916_tenant_analytics.sql
 @@migrations\20260919_bookmate_assistant_foundation.sql
 @@migrations\20260920_assistant_schedules_insights.sql
+@@migrations\20260920_assistant_appointments.sql
 @@migrations\20260915_appointment_series.sql
 @@migrations\20260915_appointment_series_ords.sql
 @@migrations\20260919_aox_tenant_session.sql
