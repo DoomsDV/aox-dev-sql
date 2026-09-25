@@ -538,6 +538,10 @@ PROMPT --- Jobs wrapper + canario VPD CUSTOMER/APPOINTMENT ---
 -- Probes HTTP restantes (pool ORDS, login, booking slug, hijas B, job expire):
 --   python3 scripts/dev_probes_vpd.py
 
+PROMPT --- Monitor de incidentes (alertas ops por WhatsApp) ---
+@@migrations\20260924_ops_incident_monitor.sql
+-- Cargar OPS_ALERT_PHONE y poner OPS_ALERT_ENABLED=1 por entorno.
+
 --------------------------------------------------------------------------------
 -- FASE 6b (OPCIONAL): Contexto seguro para agente IA
 -- Requiere CREATE ANY CONTEXT o ejecutar como ADMIN
