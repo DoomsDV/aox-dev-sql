@@ -40,7 +40,7 @@ Pegar en el comercio **HASEL - API** (placeholder de hash con paréntesis, segú
 
 | Entorno | URL de respuesta (webhook ORDS) | URL de redireccionamiento |
 |---|---|---|
-| **DESARROLLO** | `https://g9549f707e8ebfa-aoxdev.adb.sa-saopaulo-1.oraclecloudapps.com/ords/aoxdev/pagopar/v1/subscription/webhook` | `https://staging.hasel.app/pagopar/resultado/($hash)` |
+| **DESARROLLO** | `https://g9549f707e8ebfa-aoxdevelop.adb.sa-saopaulo-1.oraclecloudapps.com/ords/aoxdev/pagopar/v1/subscription/webhook` | `https://staging.hasel.app/pagopar/resultado/($hash)` |
 | **PRODUCCIÓN** | `https://g9549f707e8ebfa-aox.adb.sa-saopaulo-1.oraclecloudapps.com/ords/bookmate/pagopar/v1/subscription/webhook` | `https://hasel.app/pagopar/resultado/($hash)` |
 
 La ruta Astro `/pagopar/resultado/[hash]` redirige a `/panel/plan?checkout={hash}` (polling de factura). El return del catastro uPay **no** usa esta URL: va por `PAGOPAR_UPAY_RETURN_URL` (`/panel/plan?status=add_new_card_*`).

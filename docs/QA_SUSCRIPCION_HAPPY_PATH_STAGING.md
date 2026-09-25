@@ -295,7 +295,7 @@ UI: recargar `/panel/plan` → historial con la factura pagada.
 Si a los 2–3 minutos sigue `PENDING` y `fn_pay` fue OK (hay `external_reference`): el webhook no llegó al ORDS de aoxdev. Revisar URL en el panel Pagopar (comercio HASEL):
 
 ```text
-https://g9549f707e8ebfa-aoxdev.adb.sa-saopaulo-1.oraclecloudapps.com/ords/aoxdev/pagopar/v1/subscription/webhook
+https://g9549f707e8ebfa-aoxdevelop.adb.sa-saopaulo-1.oraclecloudapps.com/ords/aoxdev/pagopar/v1/subscription/webhook
 ```
 
 Último recurso (solo si el cobro **real** ya ocurrió en Pagopar y el webhook no llega): simular el webhook con el `external_reference` real, igual que `qa_billing_e2e_modules.sql` (~229–235):
@@ -339,7 +339,7 @@ El mail **no** lo manda Astro ni el cron `poll-kude`. Camino feliz:
 3. El worker del firmador POSTea HMAC a ORDS:
 
 ```text
-POST https://g9549f707e8ebfa-aoxdev.adb.sa-saopaulo-1.oraclecloudapps.com/ords/aoxdev/public/v1/esign/webhook
+POST https://g9549f707e8ebfa-aoxdevelop.adb.sa-saopaulo-1.oraclecloudapps.com/ords/aoxdev/public/v1/esign/webhook
 ```
 
 4. `pr_receive_esign_webhook` baja el XML, persiste artefactos (`pr_save_einvoice_artifacts`) y **encola el mail** (`pr_send_einvoice_email`).
