@@ -1586,10 +1586,60 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
 
     -- Baja KuDE (PDF) + adjunta XML privado; un solo push_queue.
     -- Claim solo si CDC + XML integro + kude_url. Fallo de email NO marca FE FAILED.
+    -- El kude_url del webhook es el link estable del firmador
+    -- (/v1/documents/{cdc}/kude/pdf): exige la API key y redirige a un link
+    -- temporal del bucket privado. Se pide ese link a GET .../kude (JSON) y el
+    -- PDF se baja de ahi sin headers. Un link OCI directo (legacy) va tal cual.
+    FUNCTION fn_resolve_kude_pdf_url(pi_kude_url IN VARCHAR2) RETURN VARCHAR2 IS
+        v_api_key  VARCHAR2(256);
+        v_response CLOB;
+        v_data     json_object_t;
+        v_url      VARCHAR2(4000);
+    BEGIN
+        IF NOT REGEXP_LIKE(pi_kude_url, '^https://api(-staging)?\.etick\.uno/v1/documents/[0-9]{44}/kude/pdf$') THEN
+            RETURN pi_kude_url;
+        END IF;
+
+        v_api_key := TRIM(fn_get_parameter('ESIGN_API_KEY'));
+        IF v_api_key IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20090, 'ESIGN_API_KEY no configurada para descargar el KuDE.');
+        END IF;
+
+        apex_web_service.g_request_headers.delete();
+        apex_web_service.g_request_headers(1).name  := 'Authorization';
+        apex_web_service.g_request_headers(1).value := 'Bearer ' || v_api_key;
+        apex_web_service.g_request_headers(2).name  := 'Accept';
+        apex_web_service.g_request_headers(2).value := 'application/json';
+        v_response := apex_web_service.make_rest_request(
+            p_url         => REGEXP_REPLACE(pi_kude_url, '/pdf$'),
+            p_http_method => 'GET'
+        );
+        apex_web_service.g_request_headers.delete();
+
+        IF apex_web_service.g_status_code NOT BETWEEN 200 AND 299 THEN
+            RAISE_APPLICATION_ERROR(-20090, 'No se pudo consultar el KuDE (' || apex_web_service.g_status_code || ').');
+        END IF;
+
+        v_data := json_object_t.parse(v_response).get_object('data');
+        IF v_data IS NULL OR NVL(v_data.get_string('estado'), '-') <> 'ready' THEN
+            RAISE_APPLICATION_ERROR(-20090, 'El KuDE todavia no esta listo.');
+        END IF;
+        v_url := v_data.get_string('kudeUrl');
+        -- PAR: endpoint regional o el dedicado por namespace (*.oci.customer-oci.com).
+        IF v_url IS NULL OR NOT REGEXP_LIKE(
+               v_url,
+               '^https://([a-z0-9-]+\.)?objectstorage\.[a-z0-9-]+\.(oraclecloud\.com|oci\.customer-oci\.com)/'
+           ) THEN
+            RAISE_APPLICATION_ERROR(-20090, 'Link temporal del KuDE invalido.');
+        END IF;
+        RETURN v_url;
+    END fn_resolve_kude_pdf_url;
+
     PROCEDURE pr_send_einvoice_email(pi_invoice_id IN NUMBER) IS
         v_org_id         NUMBER;
         v_cdc            org_subscription_invoice.einvoice_cdc%TYPE;
         v_kude_url       org_subscription_invoice.einvoice_kude_url%TYPE;
+        v_pdf_url        VARCHAR2(4000);
         v_xml_clob       CLOB;
         v_xml_sha        VARCHAR2(64);
         v_xml_size       NUMBER;
@@ -1694,9 +1744,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             RAISE_APPLICATION_ERROR(-20092, 'Tamano del XML no coincide con metadatos.');
         END IF;
 
+        v_pdf_url := fn_resolve_kude_pdf_url(v_kude_url);
         apex_web_service.g_request_headers.delete();
         v_pdf_blob := apex_web_service.make_rest_request_b(
-            p_url         => v_kude_url,
+            p_url         => v_pdf_url,
             p_http_method => 'GET'
         );
 
@@ -1705,8 +1756,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             RAISE_APPLICATION_ERROR(-20090, 'No se pudo descargar el KuDE (' || apex_web_service.g_status_code || ').');
         END IF;
 
+        -- La app APEX que da identidad de workspace al mail: 100 en prod (AOX),
+        -- 2100 en aoxdevelop (AOXDEV).
         apex_session.create_session(
-            p_app_id   => 100,
+            p_app_id   => NVL(TO_NUMBER(fn_get_parameter('APEX_MAIL_APP_ID')), 100),
             p_page_id  => 1,
             p_username => 'AOX'
         );
