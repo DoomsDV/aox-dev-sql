@@ -14,6 +14,7 @@ CREATE OR REPLACE PACKAGE pkg_aox_job_wrapper AS
     PROCEDURE pr_expire_pagopar_payments;
     PROCEDURE pr_revoke_expired_sessions;
     PROCEDURE pr_sync_org_embeddings;
+    PROCEDURE pr_process_incident_monitor;
 END pkg_aox_job_wrapper;
 /
 
@@ -139,6 +140,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_job_wrapper AS
                 RAISE;
         END;
     END pr_sync_org_embeddings;
+
+    PROCEDURE pr_process_incident_monitor IS
+    BEGIN
+        pkg_aox_session.begin_job;
+        BEGIN
+            pkg_aox_incident_monitor.pr_run;
+            pkg_aox_session.end_job;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_session.end_job;
+                RAISE;
+        END;
+    END pr_process_incident_monitor;
 
 END pkg_aox_job_wrapper;
 /

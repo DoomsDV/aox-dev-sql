@@ -144,6 +144,19 @@ CREATE OR REPLACE PACKAGE pkg_aox_meta_api IS
         pi_signature_header IN VARCHAR2
     ) RETURN NUMBER;
 
+    -- Envía una plantilla con parámetros de texto en el body (avisos internos, ej. monitor de incidentes).
+    PROCEDURE pr_send_template_wa (
+        pi_phone_number  IN VARCHAR2,
+        pi_template_name IN VARCHAR2,
+        pi_body_params   IN apex_t_varchar2
+    );
+
+    -- Texto libre: Meta solo lo entrega si el destinatario escribió al número en las últimas 24 h.
+    PROCEDURE pr_send_whatsapp_text (
+        pi_phone_number IN VARCHAR2,
+        pi_message      IN VARCHAR2
+    );
+
 END pkg_aox_meta_api;
 /
 
@@ -2530,6 +2543,64 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_meta_api IS
         WHEN OTHERS THEN
             ROLLBACK;
     END pr_log_webhook_meta;
+
+    PROCEDURE pr_send_template_wa (
+        pi_phone_number  IN VARCHAR2,
+        pi_template_name IN VARCHAR2,
+        pi_body_params   IN apex_t_varchar2
+    ) IS
+        v_clean_phone      VARCHAR2(30);
+        v_payload          CLOB;
+        v_json_initialized BOOLEAN := FALSE;
+    BEGIN
+        v_clean_phone := fn_clean_whatsapp_phone(pi_phone_number);
+
+        IF v_clean_phone IS NULL OR TRIM(pi_template_name) IS NULL THEN
+            RETURN;
+        END IF;
+
+        APEX_JSON.initialize_clob_output;
+        v_json_initialized := TRUE;
+        APEX_JSON.open_object;
+            APEX_JSON.write('messaging_product', 'whatsapp');
+            APEX_JSON.write('to', v_clean_phone);
+            APEX_JSON.write('type', 'template');
+            APEX_JSON.open_object('template');
+                APEX_JSON.write('name', TRIM(pi_template_name));
+                APEX_JSON.open_object('language');
+                    APEX_JSON.write('code', NVL(fn_get_parameter('META_WA_TEMPLATE_LANG'), 'es'));
+                APEX_JSON.close_object;
+                APEX_JSON.open_array('components');
+                    APEX_JSON.open_object;
+                        APEX_JSON.write('type', 'body');
+                        APEX_JSON.open_array('parameters');
+                            IF pi_body_params IS NOT NULL THEN
+                                FOR i IN 1 .. pi_body_params.COUNT LOOP
+                                    -- Meta rechaza parámetros vacíos, con saltos de línea/tabs o más de 4 espacios seguidos.
+                                    APEX_JSON.open_object;
+                                        APEX_JSON.write('type', 'text');
+                                        APEX_JSON.write('text', NVL(TRIM(REGEXP_REPLACE(pi_body_params(i), '\s+', ' ')), '-'));
+                                    APEX_JSON.close_object;
+                                END LOOP;
+                            END IF;
+                        APEX_JSON.close_array;
+                    APEX_JSON.close_object;
+                APEX_JSON.close_array;
+            APEX_JSON.close_object;
+        APEX_JSON.close_object;
+
+        v_payload := APEX_JSON.get_clob_output;
+        APEX_JSON.free_output;
+        v_json_initialized := FALSE;
+
+        pr_post_whatsapp_message(pi_payload => v_payload);
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF v_json_initialized THEN
+                APEX_JSON.free_output;
+            END IF;
+            RAISE;
+    END pr_send_template_wa;
 
 END pkg_aox_meta_api;
 /

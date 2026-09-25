@@ -751,11 +751,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 END IF;
             END IF;
         ELSE
-            IF NVL(v_cust_name, '') = '' THEN
+            IF v_cust_name IS NULL THEN
                 RAISE_APPLICATION_ERROR(-20006, 'El nombre del cliente es obligatorio.');
             END IF;
 
-            IF NVL(v_cust_phone, '') <> '' THEN
+            IF v_cust_phone IS NOT NULL THEN
                 -- Flujo estandar: upsert por telefono (clave unica por org).
                 BEGIN
                     SELECT id_customer
@@ -1565,11 +1565,11 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
                 END IF;
             END IF;
         ELSE
-            IF NVL(v_cust_name, '') = '' THEN
+            IF v_cust_name IS NULL THEN
                 RAISE_APPLICATION_ERROR(-20006, 'El nombre del cliente es obligatorio.');
             END IF;
 
-            IF NVL(v_cust_phone, '') = '' THEN
+            IF v_cust_phone IS NULL THEN
                 v_cus_id := v_current_cus_id;
                 UPDATE customer
                   SET full_name   = v_cust_name
