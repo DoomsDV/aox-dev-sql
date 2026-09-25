@@ -6,7 +6,16 @@
 --     META_WA_TEMPLATE_OPS_ALERT (o texto libre si no esta configurada).
 --   * Job HASEL_INCIDENT_MONITOR cada 5 min via pkg_aox_job_wrapper.
 --   * OPS_ALERT_PHONE (param_value NOT NULL) se inserta a mano por entorno; no versionar el valor.
--- Como AOXDEV / WKSP_AOX. Idempotente.
+-- Como AOXDEV. Idempotente.
+--
+-- PROD (WKSP_AOX, aplicado 2026-09-25): NO correr este script tal cual. Prod no tiene
+-- pkg_aox_job_wrapper/pkg_aox_session y su pkg_aox_meta_api es anterior a la de este repo
+-- (los @@ la pisarian). En prod se aplico:
+--   * Las tablas y pkg_aox_incident_monitor igual que aca.
+--   * En pkg_aox_meta_api solo se agregaron pr_send_template_wa y pr_send_whatsapp_text
+--     al final de la spec y del body (el resto del paquete quedo como estaba).
+--   * Job con job_action 'BEGIN pkg_aox_incident_monitor.pr_run; END;' (sin wrapper).
+--   * OPS_ALERT_ENABLED = 1.
 
 SET SERVEROUTPUT ON SIZE UNLIMITED
 
