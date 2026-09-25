@@ -182,6 +182,14 @@ CREATE OR REPLACE PACKAGE pkg_aox_subscription_billing_api IS
     -- Bloqueo concurrente por org; registra cada corrida en aox_api_log.
     PROCEDURE pr_run_billing_cycle_for_org(pi_org_id IN NUMBER);
 
+    -- Job HASEL_PAGOPAR_RECONCILE: consulta en Pagopar (pedidos/1.1/traer) las facturas
+    -- PENDING con pedido y, si ya figuran pagadas, las confirma por el mismo camino que
+    -- el webhook (PAID + FE + mail). Cubre notificaciones de Pagopar que no llegaron.
+    PROCEDURE pr_reconcile_pagopar_pending(
+        pi_min_age_minutes IN NUMBER DEFAULT 10,
+        pi_limit           IN NUMBER DEFAULT 20
+    );
+
     -- Campanita SYSTEM: trial pronto/vencido, PAST_DUE, READ_ONLY, cobro recuperado.
     -- Idempotente por dedupe_key org+evento+periodo+member.
     PROCEDURE pr_notify_subscription_lifecycle(pi_org_id IN NUMBER);
@@ -5332,6 +5340,130 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_subscription_billing_api IS
             po_status_code := 500;
             po_response_body := '{"status":"error","message":"Error interno procesando webhook de suscripci?n."}';
     END pr_subscription_webhook;
+
+    -- Estado de un pedido en Pagopar (pedidos/1.1/traer). Token = sha1(private_key || 'CONSULTA').
+    -- Devuelve el JSON crudo { respuesta, resultado[] }.
+    FUNCTION fn_pagopar_order_status(pi_hash_pedido IN VARCHAR2) RETURN CLOB IS
+        v_public_key  VARCHAR2(500);
+        v_private_key VARCHAR2(500);
+        v_response    CLOB;
+    BEGIN
+        pr_get_platform_keys(v_public_key, v_private_key);
+
+        apex_web_service.g_request_headers.delete();
+        apex_web_service.g_request_headers(1).name  := 'Content-Type';
+        apex_web_service.g_request_headers(1).value := 'application/json';
+        v_response := apex_web_service.make_rest_request(
+            p_url         => NVL(fn_get_parameter('PAGOPAR_API_PEDIDOS_URL'),
+                                 'https://api.pagopar.com/api/pedidos/1.1/traer'),
+            p_http_method => 'POST',
+            p_body        => json_object(
+                                 'hash_pedido'   VALUE pi_hash_pedido,
+                                 'token'         VALUE pkg_aox_pagopar_api.fn_pagopar_sha1_token(v_private_key || 'CONSULTA'),
+                                 'token_publico' VALUE v_public_key)
+        );
+        apex_web_service.g_request_headers.delete();
+
+        IF apex_web_service.g_status_code NOT BETWEEN 200 AND 299 THEN
+            RAISE_APPLICATION_ERROR(-20095, 'Pagopar pedidos/traer respondio HTTP ' || apex_web_service.g_status_code);
+        END IF;
+        RETURN v_response;
+    END fn_pagopar_order_status;
+
+    PROCEDURE pr_reconcile_pagopar_pending(
+        pi_min_age_minutes IN NUMBER DEFAULT 10,
+        pi_limit           IN NUMBER DEFAULT 20
+    ) IS
+        v_limit     PLS_INTEGER := LEAST(GREATEST(NVL(pi_limit, 20), 1), 100);
+        v_min_age   NUMBER      := GREATEST(NVL(pi_min_age_minutes, 10), 0);
+        v_checked   PLS_INTEGER := 0;
+        v_response  CLOB;
+        v_pending   NUMBER;
+    BEGIN
+        -- Sin contexto de job: fija la org de cada factura (VPD), igual que el webhook.
+        FOR o IN (SELECT id_organization FROM organization ORDER BY id_organization) LOOP
+            EXIT WHEN v_checked >= v_limit;
+            pkg_aox_session.set_org(o.id_organization);
+
+            FOR r IN (
+                SELECT DISTINCT external_reference AS hash_pedido
+                  FROM org_subscription_invoice
+                 WHERE org_id_organization = o.id_organization
+                   AND status = 'PENDING'
+                   AND payment_provider = 'pagopar'
+                   AND external_reference IS NOT NULL
+                   AND created_at <  systimestamp - NUMTODSINTERVAL(v_min_age, 'MINUTE')
+                   AND created_at >  systimestamp - INTERVAL '7' DAY
+            ) LOOP
+                EXIT WHEN v_checked >= v_limit;
+                v_checked := v_checked + 1;
+                BEGIN
+                    v_response := fn_pagopar_order_status(r.hash_pedido);
+
+                    IF json_value(v_response, '$.respuesta') = 'true'
+                       AND json_value(v_response, '$.resultado[0].hash_pedido') = r.hash_pedido
+                       AND json_value(v_response, '$.resultado[0].pagado') = 'true' THEN
+                        -- Misma guarda que el webhook: bloquear el lote y confirmar solo si
+                        -- sigue PENDING (pr_fulfill_invoice_batch no es idempotente).
+                        FOR l IN (
+                            SELECT id_invoice
+                              FROM org_subscription_invoice
+                             WHERE external_reference = r.hash_pedido
+                               FOR UPDATE
+                        ) LOOP
+                            NULL;
+                        END LOOP;
+
+                        SELECT NVL(SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END), 0)
+                          INTO v_pending
+                          FROM org_subscription_invoice
+                         WHERE external_reference = r.hash_pedido;
+
+                        IF v_pending > 0 THEN
+                            pr_fulfill_invoice_batch(r.hash_pedido);
+                            COMMIT;
+                            pkg_aox_util.pr_log_api(
+                                pi_api_name       => 'SUBSCRIPTION_PAGOPAR_RECONCILE',
+                                pi_process_name   => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_RECONCILE_PAGOPAR_PENDING',
+                                pi_endpoint       => 'pagopar/pedidos/1.1/traer',
+                                pi_org_id         => o.id_organization,
+                                pi_status         => 'SUCCESS',
+                                pi_request_params => r.hash_pedido,
+                                pi_response_body  => 'pedido pagado sin notificacion: facturas confirmadas'
+                            );
+                            BEGIN
+                                pr_dispatch_einvoice_outbox(5, o.id_organization);
+                            EXCEPTION
+                                WHEN OTHERS THEN
+                                    NULL;
+                            END;
+                        ELSE
+                            ROLLBACK;
+                        END IF;
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        ROLLBACK;
+                        pkg_aox_util.pr_log_api(
+                            pi_api_name        => 'SUBSCRIPTION_PAGOPAR_RECONCILE',
+                            pi_process_name    => 'PKG_AOX_SUBSCRIPTION_BILLING_API.PR_RECONCILE_PAGOPAR_PENDING',
+                            pi_endpoint        => 'pagopar/pedidos/1.1/traer',
+                            pi_org_id          => o.id_organization,
+                            pi_status          => 'ERROR',
+                            pi_error_code      => SQLCODE,
+                            pi_error_message   => SQLERRM,
+                            pi_error_backtrace => DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,
+                            pi_request_params  => r.hash_pedido
+                        );
+                END;
+            END LOOP;
+        END LOOP;
+        pkg_aox_session.clear;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.clear;
+            RAISE;
+    END pr_reconcile_pagopar_pending;
 
     --------------------------------------------------------------------------
     -- Tarjetas catastradas (uPay) + activacion + ciclo de cobro
