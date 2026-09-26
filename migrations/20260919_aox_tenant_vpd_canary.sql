@@ -10,7 +10,7 @@ PROMPT === 20260919_aox_tenant_vpd_canary ===
 @@../packages/PKG_AOX_TENANT_VPD.pls
 @@../policies/04_aox_tenant_vpd_canary.sql
 
-PROMPT --- Probes canario CUSTOMER / APPOINTMENT ---
+PROMPT --- Probes canario CUSTOMER / APPOINTMENT
 DECLARE
     c_org_a      CONSTANT NUMBER := 1;
     c_org_b      CONSTANT NUMBER := 5;

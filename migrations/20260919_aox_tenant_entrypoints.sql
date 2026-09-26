@@ -52,7 +52,7 @@ ALTER PACKAGE pkg_aox_permission_api COMPILE BODY;
 @@../packages/PKG_AOX_REFUND_COMPENSATION_API.pls
 @@../packages/PKG_AOX_CHAT_MANAGER.pls
 
-PROMPT --- Probe RESULT_CACHE tenant ---
+PROMPT --- Probe RESULT_CACHE tenant
 DECLARE
     v_cnt NUMBER;
 BEGIN
@@ -74,7 +74,7 @@ BEGIN
 END;
 /
 
-PROMPT --- Probe choke JWT / dual-write AI ---
+PROMPT --- Probe choke JWT / dual-write AI
 DECLARE
     v_jwt NUMBER;
     v_ai  NUMBER;

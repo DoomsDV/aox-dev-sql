@@ -76,7 +76,7 @@ END;
 @@../packages/PKG_AOX_REFUND_DISPUTES_API.pls
 @@../triggers/TRG_ORG_PUBLIC_DIRECTORY.sql
 
-PROMPT --- Backfill directory + tokens ---
+PROMPT --- Backfill directory + tokens
 BEGIN
     pkg_aox_public_directory.pr_refresh_all;
     COMMIT;
@@ -84,7 +84,7 @@ BEGIN
 END;
 /
 
-PROMPT --- Probes public directory ---
+PROMPT --- Probes public directory
 DECLARE
     v_dir_cnt   NUMBER;
     v_ws_cnt    NUMBER;

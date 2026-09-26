@@ -10,7 +10,7 @@ PROMPT === 20260919_aox_tenant_session ===
 @@../packages/PKG_AOX_SESSION.pls
 @@../functions/FN_AOX_TENANT_VPD_PREDICATE.pls
 
-PROMPT --- CREATE CONTEXT aox_tenant_ctx ---
+PROMPT --- CREATE CONTEXT aox_tenant_ctx
 BEGIN
     EXECUTE IMMEDIATE 'CREATE OR REPLACE CONTEXT aox_tenant_ctx USING pkg_aox_session';
     DBMS_OUTPUT.PUT_LINE('CONTEXT aox_tenant_ctx OK (AOXDEV)');
@@ -21,7 +21,7 @@ EXCEPTION
 END;
 /
 
-PROMPT --- Probes contexto + DBMS_RLS (tabla scratch, se elimina) ---
+PROMPT --- Probes contexto + DBMS_RLS (tabla scratch, se elimina)
 DECLARE
     v_cnt        NUMBER;
     v_mode       VARCHAR2(30);

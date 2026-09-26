@@ -12,7 +12,7 @@ PROMPT === 20260919_aox_tenant_vpd_policies ===
 @@../packages/PKG_AOX_TENANT_VPD.pls
 @@../policies/02_aox_tenant_vpd.sql
 
-PROMPT --- Probes policies disabled (kill switch manual: policies/03, no DROP) ---
+PROMPT --- Probes policies disabled (kill switch manual: policies/03, no DROP)
 DECLARE
     v_targets      NUMBER;
     v_policies     NUMBER;

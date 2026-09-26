@@ -159,7 +159,7 @@ PROMPT [36/36] org_entity_embedding
 PROMPT [36b/36] embedding_sync_outbox (Fase 2: outbox transaccional triggers embeddings)
 @@tables\EMBEDDING_SYNC_OUTBOX.sql
 
-PROMPT --- Campanas push admin (Hasel_admn) ---
+PROMPT --- Campanas push admin (Hasel_admn)
 PROMPT [35b] push_var_catalog
 @@tables\PUSH_VAR_CATALOG.sql
 
@@ -175,7 +175,7 @@ PROMPT [35e] push_campaign_delivery
 PROMPT [35f] user_notification (campanita in-app)
 @@tables\USER_NOTIFICATION.sql
 
-PROMPT --- Suscripcion y planes (Fase 1) ---
+PROMPT --- Suscripcion y planes (Fase 1)
 PROMPT [36/41] ref_plan
 @@tables\REF_PLAN.sql
 
@@ -230,14 +230,14 @@ PROMPT [41g] ref_body_region / ref_body_joint_test / customer_body_snapshot (Cue
 @@tables\REF_BODY_JOINT_TEST.sql
 @@tables\CUSTOMER_BODY_SNAPSHOT.sql
 
-PROMPT --- Historial por cita + adjuntos (Fase 4) ---
+PROMPT --- Historial por cita + adjuntos (Fase 4)
 PROMPT [42/44] appointment_session_record
 @@tables\APPOINTMENT_SESSION_RECORD.sql
 
 PROMPT [43/44] appointment_attachment
 @@tables\APPOINTMENT_ATTACHMENT.sql
 
-PROMPT --- Cobros SIPAP (Fase A) ---
+PROMPT --- Cobros SIPAP (Fase A)
 PROMPT [44/45] ref_sipap_bank
 @@tables\REF_SIPAP_BANK.sql
 
@@ -254,7 +254,7 @@ PROMPT [45/45] org_payment_settings
 @@tables\ORG_REFUND_DISPUTE_LEDGER.sql
 @@tables\CUSTOMER_PHONE_AUDIT.sql
 
-PROMPT --- Seed catalogo de bancos SIPAP Paraguay ---
+PROMPT --- Seed catalogo de bancos SIPAP Paraguay
 MERGE INTO ref_sipap_bank t
 USING (
   SELECT 1  AS id_bank, 'CONTINENTAL' AS code, 'Banco Continental' AS name, 1 AS is_active, 10  AS sort_order FROM dual UNION ALL
@@ -284,7 +284,7 @@ WHEN NOT MATCHED THEN
   VALUES (s.id_bank, s.code, s.name, s.is_active, s.sort_order);
 COMMIT;
 
-PROMPT --- Seed catalogo de planes / features / storage addons ---
+PROMPT --- Seed catalogo de planes / features / storage addons
 MERGE INTO ref_plan t
 USING (
   SELECT 1 AS id_plan, 'BASE'    AS code, 'Base'        AS name, 129000 AS price_amount, 'PYG' AS currency, 'MONTHLY' AS billing_period, 1073741824 AS storage_limit_bytes, 1 AS is_active, 1 AS sort_order FROM dual UNION ALL
@@ -481,7 +481,7 @@ PROMPT --- FASE 4: Paquetes - APIs ---
 @@packages\PKG_AOX_APPOINTMENT_API.pls
 @@packages\PKG_AOX_PUBLIC_BOOKING_API.pls
 
-PROMPT --- Migraciones incrementales ---
+PROMPT --- Migraciones incrementales
 @@migrations\20260906_einvoice_webhook_durable.sql
 @@migrations\20260915_role_capabilities.sql
 @@migrations\20260916_tenant_analytics.sql
@@ -524,11 +524,11 @@ PROMPT --- FASE 5: Paquetes - IA ---
 -- Kill switch (no instalar): policies\03_aox_tenant_vpd_kill_switch.sql
 --   DBMS_RLS.ENABLE_POLICY(..., enable => FALSE). No DROP.
 --------------------------------------------------------------------------------
-PROMPT --- FASE 6: Contexto AOX_TENANT_CTX + VPD (canario en migracion) ---
+PROMPT --- FASE 6: Contexto AOX_TENANT_CTX + VPD (canario en migracion)
 @@policies\01_aox_tenant_ctx.sql
 @@policies\02_aox_tenant_vpd.sql
 
-PROMPT --- Jobs wrapper + canario VPD CUSTOMER/APPOINTMENT ---
+PROMPT --- Jobs wrapper + canario VPD CUSTOMER/APPOINTMENT
 @@migrations\20260919_aox_tenant_jobs_ops.sql
 @@migrations\20260919_aox_tenant_vpd_canary.sql
 @@migrations\20260919_aox_public_vpd_readers.sql
@@ -538,7 +538,7 @@ PROMPT --- Jobs wrapper + canario VPD CUSTOMER/APPOINTMENT ---
 -- Probes HTTP restantes (pool ORDS, login, booking slug, hijas B, job expire):
 --   python3 scripts/dev_probes_vpd.py
 
-PROMPT --- Monitor de incidentes (alertas ops por WhatsApp) ---
+PROMPT --- Monitor de incidentes (alertas ops por WhatsApp)
 @@migrations\20260924_ops_incident_monitor.sql
 -- Cargar OPS_ALERT_PHONE y poner OPS_ALERT_ENABLED=1 por entorno.
 
@@ -547,7 +547,7 @@ PROMPT --- Monitor de incidentes (alertas ops por WhatsApp) ---
 -- Requiere CREATE ANY CONTEXT o ejecutar como ADMIN
 --------------------------------------------------------------------------------
 /*
-PROMPT --- FASE 6b (opcional): Contexto AOX_AI_CTX ---
+PROMPT --- FASE 6b (opcional): Contexto AOX_AI_CTX
 CREATE OR REPLACE CONTEXT aox_ai_ctx USING pkg_aox_ai_context;
 */
 
@@ -560,7 +560,7 @@ CREATE OR REPLACE CONTEXT aox_ai_ctx USING pkg_aox_ai_context;
 --   CREATE_ATTENDANCE_REMINDER_JOBS.sql
 --------------------------------------------------------------------------------
 
-PROMPT --- Recompilacion de objetos invalidos ---
+PROMPT --- Recompilacion de objetos invalidos
 BEGIN
     DBMS_UTILITY.compile_schema(
         schema    => USER,
@@ -569,7 +569,7 @@ BEGIN
 END;
 /
 
-PROMPT --- Objetos invalidos restantes ---
+PROMPT --- Objetos invalidos restantes
 SELECT object_type, object_name, status
   FROM user_objects
  WHERE status = 'INVALID'

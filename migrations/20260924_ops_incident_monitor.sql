@@ -89,7 +89,7 @@ END;
 @@../packages/PKG_AOX_INCIDENT_MONITOR.pls
 @@../packages/PKG_AOX_JOB_WRAPPER.pls
 
-PROMPT --- Parametros (solo si faltan) ---
+PROMPT --- Parametros (solo si faltan)
 MERGE INTO app_parameter p
 USING (
     SELECT 'OPS_ALERT_ENABLED' param_key, '0' param_value,
@@ -110,7 +110,7 @@ WHEN NOT MATCHED THEN
     VALUES (s.param_key, s.param_value, s.description);
 COMMIT;
 
-PROMPT --- Job HASEL_INCIDENT_MONITOR ---
+PROMPT --- Job HASEL_INCIDENT_MONITOR
 BEGIN
     DBMS_SCHEDULER.CREATE_JOB(
         job_name        => 'HASEL_INCIDENT_MONITOR',

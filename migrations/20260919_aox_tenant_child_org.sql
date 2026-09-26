@@ -292,7 +292,7 @@ END;
 @@../packages/PKG_AOX_BUCKET.pls
 @@../packages/PKG_AOX_INTEGRATION_API.pls
 
-PROMPT --- Probes hijas B ---
+PROMPT --- Probes hijas B
 DECLARE
     v_cnt       NUMBER;
     v_org       NUMBER;

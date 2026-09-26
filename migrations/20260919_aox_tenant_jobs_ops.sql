@@ -11,7 +11,7 @@ PROMPT === 20260919_aox_tenant_jobs_ops ===
 @@../packages/PKG_AOX_AUTH_API.pls
 @@../packages/PKG_AOX_JOB_WRAPPER.pls
 
-PROMPT --- Reapuntar jobs al wrapper; desactivar JOB_EXPIRE_PAGOPAR_PAYMENTS ---
+PROMPT --- Reapuntar jobs al wrapper; desactivar JOB_EXPIRE_PAGOPAR_PAYMENTS
 DECLARE
     PROCEDURE set_action(
         pi_job   IN VARCHAR2,
@@ -99,7 +99,7 @@ BEGIN
 END;
 /
 
-PROMPT --- Probes jobs-ops ---
+PROMPT --- Probes jobs-ops
 DECLARE
     v_action   user_scheduler_jobs.job_action%TYPE;
     v_enabled  VARCHAR2(5);
