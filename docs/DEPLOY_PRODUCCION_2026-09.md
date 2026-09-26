@@ -1,0 +1,106 @@
+# Pase a producción — septiembre 2026 (SaaS + HASEL_ADMIN + VPD)
+
+Esquema de producción: `wksp_aox` (ADB **AOX**, alias ORDS `bookmate`). Control plane nuevo: `hasel_admin` (misma ADB, alias ORDS `hasel_admin`).
+
+Este pase lleva producción al estado de `aoxdevelop`. Incluye:
+- las migraciones pendientes (también algunas anteriores al tag `prod`);
+- la creación de `HASEL_ADMIN`;
+- VPD por tenant en 49 tablas;
+- el asistente;
+- los arreglos de billing y eSign.
+
+El cobro de planes sigue apagado (`BILLING_ENABLED = 0`, `ADDONS_BILLING_LIVE = 0`).
+
+Se ensayó completo sobre un clon de prod (`AOXREHEARSAL`, 2026-09-25). El orden de `scripts/deploy/pase_2026-09.manifest` es el que funcionó ahí.
+
+## Por qué no alcanza con `git diff prod..HEAD`
+
+El tag `prod` no reflejaba producción. 28 paquetes estaban en versiones de julio y agosto, y faltaban migraciones de antes del tag:
+- `20260718_professionals_is_active_ords`
+- `20260901_einvoice_ords_service_token`
+- `20260901_disputas_no_custodiales` (su parte ORDS)
+- las plantillas de mail v3 y las de WhatsApp v3
+
+El manifiesto las incluye.
+
+## El orden importa
+
+- **Hay dependencias entre migraciones del mismo día y de días distintos.** `cuerpo_body_map` y `org_specialty_multi_rubro_addons` se necesitan mutuamente: se corre `multi_rubro` → `cuerpo_body_map` → `multi_rubro`. Los `*_ords` van después de su migración base. El orden alfabético no sirve; se usa el de los commits.
+- **Bloque VPD:** `public_directory` va antes que `tenant_session`, porque las pruebas de la sesión necesitan el body válido.
+- **Convergencia de paquetes:** varias migraciones compilan paquetes del HEAD que dependen de objetos que llegan más tarde. `scripts/deploy/converge_packages.sql` los recompila todos en el orden de `install_all.sql` antes de habilitar VPD.
+- **KB de ATC:** primero se copia a `hasel_admin` y se compila `PKG_AOX_ATC_CHAT`; recién después corre `20260911_drop_aox_atc_kb`.
+
+## Preparación
+
+1. **SQL\*Plus** del Instant Client 23.26 en `~/.local/opt/instantclient_23_26` (paquete `instantclient-sqlplus-linux.x64-23.26.2.0.0.zip` sobre el Basic Lite).
+2. **Wallet de prod** en `~/Documentos/wallet/Wallet_aox`, con `DIRECTORY` absoluto en `sqlnet.ora`.
+3. **Password de WKSP_AOX:** la toma del MCP `aox` en `~/.claude.json`.
+4. **Password de HASEL_ADMIN:** se elige para este pase y se guarda en `~/.config/aox_prod.env` (`chmod 600`):
+   ```bash
+   install -m 600 /dev/null ~/.config/aox_prod.env
+   read -rs -p "Password HASEL_ADMIN: " P && printf 'HASEL_ADMIN_PASSWORD=%q\n' "$P" > ~/.config/aox_prod.env; unset P
+   ```
+5. **Copia de `aox-admin-dev-sql` preparada para prod:**
+   ```bash
+   ../aox-admin-dev-sql/scripts/prepare_deploy_copy.sh /tmp/hasel-admin-prod
+   ```
+   El repo admin tiene nombres de DEV fijos: `aoxdev.`, el workspace `AOXDEV` y el bucket `bucket-hasel-aoxdev`. El script los transforma para prod; revisar su salida antes de usarla.
+6. **Backup:** anotar la hora exacta de inicio para un point-in-time restore y trabajar en una ventana de poco tráfico.
+
+## Ejecución
+
+```bash
+cd aox-dev-sql
+AOX_TARGET=prod ADMIN_COPY=/tmp/hasel-admin-prod scripts/deploy/run_manifest.sh
+```
+
+- **Pasos manuales (`STOP`):** el driver se detiene e indica con qué `--from` retomar. Son dos:
+  1. `scripts/deploy/admin_hasel_admin.sql` como **ADMIN** (Database Actions): crea `HASEL_ADMIN`, las ACL, lo asigna al workspace `AOX` y da `DBMS_RLS` a `WKSP_AOX`. Antes de correrlo, reemplazar `CAMBIAR_PASSWORD`.
+  2. `aox-admin-dev-sql/scripts/copy_atc_kb_params.sql` como **ADMIN**.
+- **Errores:** el runner (`scripts/deploy/run_sql.sh`) corta ante cualquier `ORA-`. Las migraciones admin corren con `--tolerate`, que solo acepta errores de "ya existe", porque reaplican `tables/*.sql` que `install_all` ya creó.
+- **Logs:** uno por archivo en `~/.cache/hasel-deploy/prod/logs`.
+- **Tiempo neto en el ensayo:** unos 15 minutos. Lo más largo: la convergencia (≈4 min), `aox_public_directory` (63 s), `install_all` admin (61 s), la copia de la KB (61 s) y `aox_tenant_child_org` (18 s, `NOT NULL` en tablas hijas).
+
+## Jobs
+
+`20260926_prod_jobs_wrapper` pasa por `pkg_aox_job_wrapper` los jobs que solo existen en prod: asistencia, digest, sync de embeddings y monitor de incidentes. Sin eso, con VPD encendido correrían sin contexto y no procesarían nada. También crea `JOB_REVOKE_EXPIRED_SESSIONS_JOB`. Los jobs existentes conservan su estado habilitado o no.
+
+Al terminar, decidir qué hacer con los jobs nuevos, que se crean habilitados:
+- `HASEL_PROCESS_SURVEY_REQUESTS`: apagarlo hasta que Meta apruebe la plantilla y el Flow de encuesta.
+- `HASEL_PAGOPAR_RECONCILE`: solo tiene sentido con el cobro encendido.
+- `HASEL_ADMIN_DISPATCH_CAMPAIGNS` (en `hasel_admin`).
+
+## Validación
+
+- **0 INVALID** en `WKSP_AOX` y `HASEL_ADMIN`: el último paso del manifiesto lo lista.
+- **49 políticas** `AOX_TENANT_VPD` con `enable = YES`, **194 handlers** en `bookmate` y **60 templates** en `hasel-ops`.
+- **Todos los jobs de `WKSP_AOX` apuntan al wrapper**, salvo `HASEL_PAGOPAR_RECONCILE`, que hace su propio `set_org` por org.
+- **Comparación contra DEV** con `scripts/deploy/compare_schemas.py` (ver su docstring). Diferencias esperadas:
+  - legacy de prod (`DEPT`, `EMP`, `EMPLEADOS`, `DEPARTAMENTOS*`, `TMP_HASEL_MAINT_PKG_BACKUP`, `JS_GET_IVA`);
+  - drift de DEV (`PKG_OCI_BRIDGE`, `PROFESSIONAL.DELETED_AT`, `JOB_EXPIRE_PAGOPAR_PAYMENTS`, `JOB_SYNC_ORG_EMBEDDINGS`);
+  - los jobs propios de prod;
+  - el código de `HASEL_ADMIN` HAS-85/86/87, que está en el repo pero no se compiló en DEV.
+- **Smoke con JWT** (firmado en la base con `apex_jwt.encode` y `JWT_TOKEN`, como en el pase de agosto) contra `…/ords/bookmate/api/v1/`:
+  - `auth/validate-panel`, `permissions/me`, `permissions/matrix`;
+  - `dashboard`, `dashboard/analytics`;
+  - `customers` y `customers?archived=1`;
+  - `professionals`, `workspace*`, `workspace/subscription`, `inbox`;
+  - `public/v1/directory` y `public/v1/org/:slug`;
+  - login de `hasel-ops` con un superadmin (`aox-admin-dev-sql/scripts/bootstrap_superadmin.sql`).
+
+## Rollback
+
+- **VPD:** `@policies/03_aox_tenant_vpd_kill_switch.sql` deshabilita las 49 políticas sin borrarlas (4 s en el ensayo). Para volver: `20260919_aox_tenant_vpd_canary` y después `20260919_aox_tenant_vpd_enable_waves` (11 s).
+- **Todo lo demás:** point-in-time restore del ADB a la hora anotada. Restaura la base entera, así que se pierde lo que haya entrado después.
+
+## Pendientes fuera de la base
+
+- **Meta:** aprobar para la cuenta de WhatsApp de prod `cancelacion_*_v3`, `reembolso_pendiente_cliente_v1` y `encuesta_satisfaccion_hasel_v1`, y el Flow de encuesta.
+- **eSign:** cargar `ESIGN_API_KEY` y `ESIGN_WEBHOOK_SECRET` (quedan en `PENDING`). Confirmar `APEX_MAIL_APP_ID = 100`.
+- **CORS de `hasel-ops`:** las migraciones admin solo definen `localhost`. Hay que agregar el origen del front admin de prod.
+- **Frontend en la misma ventana:** `bookmate` `staging` → `main` y deploy de `bookmate-admin`.
+
+## Bugs que ya existían en prod (este pase no los introduce)
+
+- **Handlers que imprimen el CLOB con `htp.prn`** fallan con 555 si la respuesta pasa de 32 KB (70 handlers). Ejemplo: `appointments/calendar` de un mes en una org grande.
+- **`GET organization/current`** llama a `pkg_aox_organization_api`, que no existe en ningún entorno.

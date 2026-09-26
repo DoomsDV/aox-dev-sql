@@ -1,0 +1,159 @@
+# Manifiesto del pase 2026-09 (ensayado en el clon AOXREHEARSAL el 2026-09-25).
+# Formato: <usuario>|<modo>|<ruta>   modo: vacio | --tolerate | --define
+#   saas:  ruta relativa a aox-dev-sql
+#   admin: ruta relativa a la copia preparada de aox-admin-dev-sql (ADMIN_COPY)
+# Lineas especiales:
+#   STOP <texto>                  paso manual (ADMIN); el driver se detiene, retomar con --from
+#   CLONE_DISABLE_JOBS <usuario>  solo con AOX_TARGET=clone: apaga los jobs de ese esquema
+# Ver docs/DEPLOY_PRODUCCION_2026-09.md.
+
+# 1) ADMIN
+STOP Correr scripts/deploy/admin_hasel_admin.sql como ADMIN (crea HASEL_ADMIN, ACL, workspace AOX, DBMS_RLS)
+
+# 2) Migraciones previas al tag que faltan en prod
+wksp_aox||saas:migrations/20260718_professionals_is_active_ords.sql
+wksp_aox||saas:migrations/20260830_cobros_appointment_id_ords.sql
+wksp_aox||saas:migrations/20260831_einvoice_artifacts_ords.sql
+wksp_aox||saas:migrations/20260901_apex_email_templates_v3.sql
+wksp_aox||saas:migrations/20260901_einvoice_ords_service_token.sql
+wksp_aox||saas:migrations/20260901_disputas_no_custodiales.sql
+wksp_aox||saas:migrations/20260901_subscription_invoice_kude_ords.sql
+wksp_aox||saas:migrations/20260902_customer_refund_wa_and_jobs.sql
+wksp_aox||saas:migrations/20260902_drop_wa_template_legacy.sql
+wksp_aox||saas:migrations/20260902_wa_template_cancel_auto_v3.sql
+wksp_aox||saas:migrations/20260902_wa_template_cancel_manual_v3.sql
+
+# 3) Migraciones 05/09-18/09 en orden de commits (multi_rubro <-> cuerpo_body_map se necesitan mutuamente)
+wksp_aox||saas:migrations/20260906_org_specialty_multi_rubro_addons.sql
+wksp_aox||saas:migrations/20260905_cuerpo_body_map.sql
+wksp_aox||saas:migrations/20260906_org_specialty_multi_rubro_addons.sql
+wksp_aox||saas:migrations/20260905_ops_organization_view.sql
+wksp_aox||saas:migrations/20260905_odontogram_addon_price.sql
+wksp_aox||saas:migrations/20260905_odontogram_finding_labels_tildes.sql
+wksp_aox||saas:migrations/20260905_body_silhouette_child.sql
+wksp_aox||saas:migrations/20260906_ops_refund_dispute_view.sql
+wksp_aox||saas:migrations/20260905_ops_campaign_bridge.sql
+wksp_aox||saas:migrations/20260905_esign_webhook_receiver.sql
+wksp_aox||saas:migrations/20260905_esign_webhook_ords_fix.sql
+wksp_aox||saas:migrations/20260905_pagopar_tipo_documento_ci.sql
+wksp_aox||saas:migrations/20260905_body_map_api_ords.sql
+wksp_aox||saas:migrations/20260905_subscription_nce.sql
+wksp_aox||saas:migrations/20260905_subscription_consolidated_split.sql
+wksp_aox||saas:migrations/20260907_module_addons_billing_ords.sql
+wksp_aox||saas:migrations/20260906_einvoice_webhook_durable.sql
+wksp_aox||saas:migrations/20260908_appointment_survey.sql
+CLONE_DISABLE_JOBS wksp_aox
+wksp_aox||saas:migrations/20260908_appointment_survey_ords.sql
+wksp_aox||saas:migrations/20260907_body_map_addon_standby.sql
+wksp_aox||saas:migrations/20260907_public_org_directory_ords.sql
+wksp_aox||saas:migrations/20260909_user_session_devices.sql
+wksp_aox||saas:migrations/20260910_ops_analytics_views.sql
+wksp_aox||saas:migrations/20260911_ops_atc_kb_grant_copy.sql
+wksp_aox||saas:migrations/20260910_ops_organization_billing.sql
+wksp_aox||saas:migrations/20260910_ops_refund_dispute_evidence_view.sql
+wksp_aox||saas:migrations/20260911_ops_app_survey_audience.sql
+wksp_aox||saas:migrations/20260911_ops_org_effective_status.sql
+wksp_aox||saas:migrations/20260912_customer_create_fields.sql
+wksp_aox||saas:migrations/20260912_customer_create_ords.sql
+wksp_aox||saas:migrations/20260913_dashboard_chart_history.sql
+wksp_aox||saas:migrations/20260915_location_phone.sql
+wksp_aox||saas:migrations/20260915_locations_search_ords.sql
+wksp_aox||saas:migrations/20260915_customer_archive.sql
+wksp_aox||saas:migrations/20260915_customer_archive_ords.sql
+wksp_aox||saas:migrations/20260915_professional_short_bio.sql
+wksp_aox||saas:migrations/20260915_appointment_series.sql
+wksp_aox||saas:migrations/20260915_appointment_series_ords.sql
+wksp_aox||saas:migrations/20260915_role_capabilities.sql
+wksp_aox||saas:migrations/20260915_customer_list_archived_filter.sql
+wksp_aox||saas:migrations/20260916_tenant_analytics.sql
+wksp_aox||saas:migrations/20260917_analytics_custom_range.sql
+wksp_aox||saas:migrations/20260918_dashboard_today_week_kpis.sql
+wksp_aox||saas:migrations/20260916_ops_tenant_detail_views.sql
+wksp_aox||saas:migrations/20260918_hub_professionals_without_photo.sql
+
+# 4) Bridge ops + grant a HASEL_ADMIN (lado SaaS)
+wksp_aox||saas:packages/PKG_AOX_OPS_ADMIN_BRIDGE.pls
+wksp_aox||saas:migrations/20260926_ops_admin_bridge_grant.sql
+
+# 5) HASEL_ADMIN (copia preparada con aox-admin-dev-sql/scripts/prepare_deploy_copy.sh)
+hasel_admin||admin:install_all.sql
+hasel_admin|--tolerate|admin:migrations/20260905_hasel_ops_ords.sql
+hasel_admin|--tolerate|admin:migrations/20260905_seed_ops_parameters.sql
+hasel_admin|--tolerate|admin:migrations/20260905_seed_ops_roles.sql
+hasel_admin|--tolerate|admin:migrations/20260905_ops_auth_security_hardening.sql
+hasel_admin|--tolerate|admin:migrations/20260906_ops_dashboard_endpoints.sql
+hasel_admin|--tolerate|admin:migrations/20260906_ops_role_primary_fix.sql
+hasel_admin|--tolerate|admin:migrations/20260907_ops_push_campaigns.sql
+CLONE_DISABLE_JOBS hasel_admin
+hasel_admin|--tolerate|admin:migrations/20260910_ops_analytics.sql
+hasel_admin|--tolerate|admin:migrations/20260910_ops_dispute_detail.sql
+hasel_admin|--tolerate|admin:migrations/20260910_ops_org_billing.sql
+hasel_admin|--tolerate|admin:migrations/20260911_ops_atc_kb.sql
+hasel_admin|--tolerate|admin:migrations/20260911_ops_app_survey.sql
+hasel_admin|--tolerate|admin:migrations/20260911_ops_app_survey_meta_params.sql
+hasel_admin|--tolerate|admin:migrations/20260911_ops_app_survey_retry.sql
+hasel_admin|--tolerate|admin:migrations/20260911_ops_org_unpaid_revoke.sql
+hasel_admin|--tolerate|admin:migrations/20260911_ops_apex_workspace_param.sql
+hasel_admin|--tolerate|admin:migrations/20260914_ops_org_access_restore.sql
+hasel_admin|--tolerate|admin:migrations/20260914_ops_employees.sql
+hasel_admin|--tolerate|admin:migrations/20260914_ops_org_analytics.sql
+hasel_admin|--tolerate|admin:migrations/20260914_ops_push_campaign_org_audience.sql
+hasel_admin|--tolerate|admin:migrations/20260916_ops_analytics_ords_htp.sql
+hasel_admin|--tolerate|admin:migrations/20260916_ops_analytics_semantics.sql
+hasel_admin|--tolerate|admin:migrations/20260916_ops_list_pagination.sql
+hasel_admin|--tolerate|admin:migrations/20260916_ops_auth_security.sql
+hasel_admin|--tolerate|admin:migrations/20260916_ops_billing_analytics.sql
+hasel_admin|--tolerate|admin:migrations/20260916_ops_audit_log.sql
+hasel_admin|--tolerate|admin:migrations/20260916_ops_tenant_detail.sql
+hasel_admin|--tolerate|admin:migrations/20260916_ops_dispute_assignment.sql
+hasel_admin|--tolerate|admin:migrations/20260918_ops_notifications.sql
+hasel_admin|--tolerate|admin:migrations/20260918_ops_analytics_tenant_health.sql
+hasel_admin|--tolerate|admin:migrations/20260918_ops_org_export.sql
+hasel_admin|--tolerate|admin:migrations/20260918_ops_audit_export.sql
+hasel_admin|--tolerate|admin:migrations/20260918_ops_analytics_export.sql
+
+# 6) KB ATC: copiar a HASEL_ADMIN, ATC_CHAT lee de alli, recien despues drop en SaaS
+hasel_admin||admin:scripts/copy_atc_kb_data.sql
+STOP Correr aox-admin-dev-sql/scripts/copy_atc_kb_params.sql como ADMIN (keys Azure/OCI a ops_parameter)
+wksp_aox||saas:packages/PKG_AOX_ATC_KB.pls
+wksp_aox||saas:packages/PKG_AOX_ATC_CHAT.pls
+wksp_aox||saas:packages/PKG_AOX_ATC_CHAT_API.pls
+wksp_aox||saas:migrations/20260911_drop_aox_atc_kb.sql
+
+# 7) Tabla que no tenia DDL versionado
+wksp_aox||saas:migrations/20260926_org_subscription_access_audit.sql
+
+# 8) VPD parte 1 (public_directory antes que los probes de session)
+wksp_aox||saas:migrations/20260919_aox_public_directory.sql
+wksp_aox||saas:migrations/20260919_aox_tenant_session.sql
+wksp_aox||saas:migrations/20260919_aox_public_token_trigger_cascade.sql
+wksp_aox||saas:migrations/20260919_aox_public_vpd_readers.sql
+wksp_aox||saas:migrations/20260919_aox_tenant_entrypoints.sql
+wksp_aox||saas:migrations/20260919_aox_tenant_child_org.sql
+
+# 9) Convergencia de paquetes al HEAD (esperado: 0 INVALID)
+wksp_aox||saas:scripts/deploy/converge_packages.sql
+
+# 10) Jobs al wrapper + politicas VPD por oleadas
+wksp_aox||saas:migrations/20260926_prod_jobs_wrapper.sql
+CLONE_DISABLE_JOBS wksp_aox
+wksp_aox||saas:migrations/20260919_aox_tenant_jobs_ops.sql
+CLONE_DISABLE_JOBS wksp_aox
+wksp_aox||saas:migrations/20260919_aox_tenant_vpd_policies.sql
+wksp_aox||saas:migrations/20260919_aox_tenant_vpd_canary.sql
+wksp_aox||saas:migrations/20260919_aox_tenant_vpd_enable_waves.sql
+
+# 11) Asistente, monitor de incidentes, eSign, Pagopar, FE
+wksp_aox||saas:migrations/20260919_bookmate_assistant_foundation.sql
+wksp_aox||saas:migrations/20260920_assistant_schedules_insights.sql
+wksp_aox||saas:migrations/20260920_assistant_appointments.sql
+wksp_aox||saas:migrations/20260924_ops_incident_monitor.sql
+wksp_aox||saas:migrations/20260925_esign_kude_par_mail.sql
+wksp_aox||saas:migrations/20260925_pagopar_webhook_status_code.sql
+wksp_aox||saas:migrations/20260925_pagopar_reconcile_job.sql
+wksp_aox||saas:migrations/20260926_einvoice_status_widen.sql
+CLONE_DISABLE_JOBS wksp_aox
+
+# 12) Cierre
+wksp_aox||saas:scripts/deploy/compile_schema.sql
+hasel_admin||saas:scripts/deploy/compile_schema.sql
