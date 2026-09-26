@@ -13,7 +13,7 @@ DECLARE
         EXECUTE IMMEDIATE pi_sql;
     EXCEPTION
         WHEN OTHERS THEN
-            IF SQLCODE NOT IN (-955, -2260, -2261, -2275, -1408, -1442) THEN
+            IF SQLCODE NOT IN (-955, -2260, -2261, -2264, -2275, -1408, -1442) THEN
                 RAISE;
             END IF;
     END;
