@@ -5,6 +5,7 @@
 SET SERVEROUTPUT ON
 
 DECLARE
+    v_count NUMBER;
     PROCEDURE add_col(p_sql VARCHAR2, p_col VARCHAR2) IS
     BEGIN
         EXECUTE IMMEDIATE p_sql;
@@ -17,7 +18,6 @@ DECLARE
                 RAISE;
             END IF;
     END add_col;
-    v_count NUMBER;
 BEGIN
     add_col(
         'ALTER TABLE org_subscription_invoice ADD (einvoice_receptor_snapshot CLOB)',
