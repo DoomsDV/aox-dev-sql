@@ -13,6 +13,11 @@ El cobro de planes sigue apagado (`BILLING_ENABLED = 0`, `ADDONS_BILLING_LIVE = 
 
 Se ensayó completo sobre un clon de prod (`AOXREHEARSAL`, 2026-09-25). El orden de `scripts/deploy/pase_2026-09.manifest` es el que funcionó ahí.
 
+**Ensayo de punta a punta con `run_manifest.sh` (2026-09-26)** sobre un clon nuevo de prod, sin intervención salvo los dos pasos de ADMIN:
+- Aparecieron dos errores que el ensayo paso a paso no había mostrado, ya corregidos en el repo: `AOX_TENANT_CTX` se creaba después de que `20260919_aox_public_directory` lo necesitara (ahora `policies/01_aox_tenant_ctx.sql` va antes), y esa migración no toleraba reaplicar constraints (`ORA-02264`).
+- Resultado: 0 INVALID en `WKSP_AOX` y `HASEL_ADMIN`, 49/49 políticas VPD, 194 handlers con salida por partes y todos los jobs de prod pasados al wrapper. La comparación contra DEV solo muestra las diferencias esperadas (ver Validación), y el smoke HTTP dio 26 de 26 endpoints en 200.
+- Tiempo neto de ejecución: unos 11 minutos, sin contar los pasos manuales.
+
 ## Por qué no alcanza con `git diff prod..HEAD`
 
 El tag `prod` no reflejaba producción. 28 paquetes estaban en versiones de julio y agosto, y faltaban migraciones de antes del tag:
