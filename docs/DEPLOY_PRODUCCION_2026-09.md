@@ -80,10 +80,9 @@ AOX_TARGET=prod ADMIN_COPY=/tmp/hasel-admin-prod scripts/deploy/run_manifest.sh
 
 `20260926_prod_jobs_wrapper` pasa por `pkg_aox_job_wrapper` los jobs que solo existen en prod: asistencia, digest, sync de embeddings y monitor de incidentes. Sin eso, con VPD encendido correrían sin contexto y no procesarían nada. También crea `JOB_REVOKE_EXPIRED_SESSIONS_JOB`. Los jobs existentes conservan su estado habilitado o no.
 
-Al terminar, decidir qué hacer con los jobs nuevos, que se crean habilitados:
-- `HASEL_PROCESS_SURVEY_REQUESTS`: apagarlo hasta que Meta apruebe la plantilla y el Flow de encuesta.
-- `HASEL_PAGOPAR_RECONCILE`: solo tiene sentido con el cobro encendido.
-- `HASEL_ADMIN_DISPATCH_CAMPAIGNS` (en `hasel_admin`).
+**Jobs nuevos que quedan apagados por decisión (2026-09-26):** `HASEL_PROCESS_SURVEY_REQUESTS`, `HASEL_PAGOPAR_RECONCILE` y `HASEL_ADMIN_DISPATCH_CAMPAIGNS` (en `hasel_admin`). Sus migraciones los crean habilitados. `scripts/deploy/keep_jobs_off.sql` los apaga justo después de cada una y otra vez en el cierre, así que no llegan a correr durante el pase. Esto corre también en prod. Para encenderlos más adelante: `DBMS_SCHEDULER.enable('<job>')` como el owner.
+
+`JOB_REVOKE_EXPIRED_SESSIONS_JOB` sí queda habilitado.
 
 ## Validación
 
@@ -112,9 +111,9 @@ Al terminar, decidir qué hacer con los jobs nuevos, que se crean habilitados:
 
 ## Pendientes fuera de la base
 
-- **Meta:** aprobar para la cuenta de WhatsApp de prod `cancelacion_*_v3`, `reembolso_pendiente_cliente_v1` y `encuesta_satisfaccion_hasel_v1`, y el Flow de encuesta.
-- **eSign:** cargar `ESIGN_API_KEY` y `ESIGN_WEBHOOK_SECRET` (quedan en `PENDING`). Confirmar `APEX_MAIL_APP_ID = 100`.
-- **CORS de `hasel-ops`:** las migraciones admin solo definen `localhost`. Hay que agregar el origen del front admin de prod.
+- **Meta:** las plantillas ya están aprobadas y son las mismas que en aoxdevelop (confirmado el 2026-09-26).
+- **eSign (después del pase):** cargar `ESIGN_API_KEY` y `ESIGN_WEBHOOK_SECRET` (quedan en `PENDING`). Confirmar `APEX_MAIL_APP_ID = 100`.
+- **Consola admin (después del pase):** las migraciones admin solo definen CORS para `localhost`; falta agregar el origen del front admin de prod. Además, `HASEL_ADMIN` arranca sin empleados: para poder entrar hay que crear el primero con `aox-admin-dev-sql/scripts/bootstrap_superadmin.sql`, conectado como `HASEL_ADMIN`, una sola vez.
 - **Frontend en la misma ventana:** `bookmate` `staging` → `main` y deploy de `bookmate-admin`.
 
 ## Respuestas ORDS de más de 32 KB (se corrige en este pase)

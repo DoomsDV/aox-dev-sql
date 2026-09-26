@@ -44,6 +44,7 @@ wksp_aox||saas:migrations/20260905_subscription_consolidated_split.sql
 wksp_aox||saas:migrations/20260907_module_addons_billing_ords.sql
 wksp_aox||saas:migrations/20260906_einvoice_webhook_durable.sql
 wksp_aox||saas:migrations/20260908_appointment_survey.sql
+wksp_aox||saas:scripts/deploy/keep_jobs_off.sql
 CLONE_DISABLE_JOBS wksp_aox
 wksp_aox||saas:migrations/20260908_appointment_survey_ords.sql
 wksp_aox||saas:migrations/20260907_body_map_addon_standby.sql
@@ -86,6 +87,7 @@ hasel_admin|--tolerate|admin:migrations/20260905_ops_auth_security_hardening.sql
 hasel_admin|--tolerate|admin:migrations/20260906_ops_dashboard_endpoints.sql
 hasel_admin|--tolerate|admin:migrations/20260906_ops_role_primary_fix.sql
 hasel_admin|--tolerate|admin:migrations/20260907_ops_push_campaigns.sql
+hasel_admin||saas:scripts/deploy/keep_jobs_off.sql
 CLONE_DISABLE_JOBS hasel_admin
 hasel_admin|--tolerate|admin:migrations/20260910_ops_analytics.sql
 hasel_admin|--tolerate|admin:migrations/20260910_ops_dispute_detail.sql
@@ -155,6 +157,7 @@ wksp_aox||saas:migrations/20260924_ops_incident_monitor.sql
 wksp_aox||saas:migrations/20260925_esign_kude_par_mail.sql
 wksp_aox||saas:migrations/20260925_pagopar_webhook_status_code.sql
 wksp_aox||saas:migrations/20260925_pagopar_reconcile_job.sql
+wksp_aox||saas:scripts/deploy/keep_jobs_off.sql
 wksp_aox||saas:migrations/20260926_einvoice_status_widen.sql
 CLONE_DISABLE_JOBS wksp_aox
 
@@ -164,6 +167,8 @@ wksp_aox||saas:migrations/20260926_ords_htp_print_clob.sql
 # 11c) Topes: limit 1..200 en listados, calendario <= 62 dias, historial del mapa corporal <= 200
 wksp_aox||saas:migrations/20260926_list_limits.sql
 
-# 12) Cierre
+# 12) Cierre (keep_jobs_off: survey, pagopar_reconcile y dispatch_campaigns quedan apagados por decision)
+wksp_aox||saas:scripts/deploy/keep_jobs_off.sql
+hasel_admin||saas:scripts/deploy/keep_jobs_off.sql
 wksp_aox||saas:scripts/deploy/compile_schema.sql
 hasel_admin||saas:scripts/deploy/compile_schema.sql
