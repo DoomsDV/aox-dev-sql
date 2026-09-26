@@ -24,6 +24,8 @@ wksp_aox||saas:migrations/20260902_wa_template_cancel_auto_v3.sql
 wksp_aox||saas:migrations/20260902_wa_template_cancel_manual_v3.sql
 
 # 3) Migraciones 05/09-18/09 en orden de commits (multi_rubro <-> cuerpo_body_map se necesitan mutuamente)
+# PKG_AOX_HTTP primero: sin dependencias y los paquetes de listados del HEAD lo usan (fn_page_size)
+wksp_aox||saas:packages/PKG_AOX_HTTP.pls
 wksp_aox||saas:migrations/20260906_org_specialty_multi_rubro_addons.sql
 wksp_aox||saas:migrations/20260905_cuerpo_body_map.sql
 wksp_aox||saas:migrations/20260906_org_specialty_multi_rubro_addons.sql
@@ -156,6 +158,9 @@ CLONE_DISABLE_JOBS wksp_aox
 
 # 11b) Respuestas ORDS > 32 KB: los handlers pasan a pkg_aox_http.pr_print_clob (va despues de todo ORDS)
 wksp_aox||saas:migrations/20260926_ords_htp_print_clob.sql
+
+# 11c) Topes: limit 1..200 en listados, calendario <= 62 dias, historial del mapa corporal <= 200
+wksp_aox||saas:migrations/20260926_list_limits.sql
 
 # 12) Cierre
 wksp_aox||saas:scripts/deploy/compile_schema.sql

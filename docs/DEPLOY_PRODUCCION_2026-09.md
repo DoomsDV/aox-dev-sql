@@ -79,6 +79,7 @@ Al terminar, decidir qué hacer con los jobs nuevos, que se crean habilitados:
 - **0 INVALID** en `WKSP_AOX` y `HASEL_ADMIN`: el último paso del manifiesto lo lista.
 - **49 políticas** `AOX_TENANT_VPD` con `enable = YES`, **194 handlers** en `bookmate` y **60 templates** en `hasel-ops`.
 - **0 handlers con `htp.prn(v_response_body)`** y 190 con `pkg_aox_http.pr_print_clob`. `appointments/calendar` de un mes en la org 46 responde 200.
+- **Topes:** `appointments/calendar` de un año responde 400 y `customers?limit=100000` devuelve `per_page=200`.
 - **Todos los jobs de `WKSP_AOX` apuntan al wrapper**, salvo `HASEL_PAGOPAR_RECONCILE`, que hace su propio `set_org` por org.
 - **Comparación contra DEV** con `scripts/deploy/compare_schemas.py` (ver su docstring). Diferencias esperadas:
   - legacy de prod (`DEPT`, `EMP`, `EMPLEADOS`, `DEPARTAMENTOS*`, `TMP_HASEL_MAINT_PKG_BACKUP`, `JS_GET_IVA`);
@@ -119,7 +120,20 @@ Al terminar, decidir qué hacer con los jobs nuevos, que se crean habilitados:
 
 **Convención para handlers nuevos:** imprimir la respuesta con `pkg_aox_http.pr_print_clob(v_response_body)` y **no** con `htp.prn(<clob>)`. Si una migración define un handler con `htp.prn`, alcanza con volver a correr `20260926_ords_htp_print_clob.sql`.
 
-**Además del límite de 32 KB:** conviene acotar lo que devuelven los endpoints de listas (paginación, rango máximo en `appointments/calendar`). Así las respuestas no crecen sin límite con el volumen de citas.
+## Topes de tamaño en listados y calendario (se aplica en este pase)
+
+Con el arreglo de 32 KB las respuestas grandes ya no fallan, pero algunas crecían sin límite con el volumen de datos. `20260926_list_limits.sql` (paso 11c del manifiesto) les pone tope:
+
+| Endpoint | Antes | Ahora |
+|---|---|---|
+| `customers`, `professionals`, `services`, `specialties`, `locations` | `limit` sin máximo; `limit=0` dividía por cero | `limit` entre 1 y 200 (`pkg_aox_http.fn_page_size`); `per_page` y `total_pages` informan el límite efectivo |
+| `appointments/calendar` | cualquier rango | máximo 62 días; más da 400 `VALIDATION_ERROR` (el front pide a lo sumo 42, en la vista mes) |
+| `workspace/customers/:id/body-snapshots` | todo el historial | los 200 más recientes |
+
+- **Orden en el pase:** `PKG_AOX_HTTP` se compila al inicio del paso 3 y en `converge_packages.sql`, porque las migraciones anteriores ya compilan los paquetes de listados del HEAD, que lo usan.
+- **Aplicado en aoxdevelop y probado en el clon el 2026-09-26:** calendario de 42 y 62 días en 200; 63 días, un año o sin `end` en 400; `limit=0` → 9 y `limit=100000` → 200 en los cinco listados; la exportación de clientes (200 por página) sigue igual. El historial del mapa corporal no se pudo probar por HTTP porque ninguna organización tiene el complemento activo.
+- **Convención para listados nuevos:** calcular el tamaño de página con `pkg_aox_http.fn_page_size(pi_limit, <default>)` y acotar por rango de fechas los endpoints por período.
+- **Pendiente, no incluido:** `public/v1/directory` devuelve todas las organizaciones (hoy 11) y rechaza `offset`; paginarlo requiere cambiar `/explorar` en el front. Los endpoints de chat IA (`ai/chat/sessions`, `.../messages`) no tienen tope, pero su interfaz se retiró (HAS-24).
 
 ## Bugs que ya existían en prod (este pase no los introduce)
 

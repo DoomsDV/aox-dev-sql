@@ -9,6 +9,7 @@ SET SERVEROUTPUT ON SIZE UNLIMITED
 
 @@../../functions/FN_GET_PARAMETER.pls
 @@../../packages/PKG_AOX_UTIL.pls
+@@../../packages/PKG_AOX_HTTP.pls
 @@../../packages/PKG_AOX_PUBLIC_DIRECTORY.pls
 @@../../packages/PKG_AOX_JOB_WRAPPER.pls
 @@../../packages/PKG_AOX_SESSION.pls
