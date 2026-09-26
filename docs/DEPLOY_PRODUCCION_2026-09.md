@@ -63,6 +63,12 @@ AOX_TARGET=prod ADMIN_COPY=/tmp/hasel-admin-prod scripts/deploy/run_manifest.sh
   2. `aox-admin-dev-sql/scripts/copy_atc_kb_params.sql` como **ADMIN**.
 - **Errores:** el runner (`scripts/deploy/run_sql.sh`) corta ante cualquier `ORA-`. Las migraciones admin corren con `--tolerate`, que solo acepta errores de "ya existe", porque reaplican `tables/*.sql` que `install_all` ya creó.
 - **Logs:** uno por archivo en `~/.cache/hasel-deploy/prod/logs`.
+- **Ensayo en un clon (recomendado antes de prod):**
+  1. Clonar `aoxprod` (Full clone, Developer, sin auto scaling) con Database name `AOXREHEARSAL`, así sirven la conexión `aox_clone` y `AOX_TARGET=clone`.
+  2. Apenas quede *Available*, correr `scripts/deploy/neutralize_clone.sql` como **ADMIN**: apaga los jobs y corta WhatsApp, push, Pagopar, eSign y las alertas. El clon arranca con los jobs y las keys de prod.
+  3. Descargar el wallet en `~/Documentos/wallet/Wallet_AOXREHEARSAL` (`DIRECTORY` absoluto en `sqlnet.ora`) y la password de HASEL_ADMIN en `~/.config/aox_rehearsal.env`.
+  4. `AOX_TARGET=clone ADMIN_COPY=/tmp/hasel-admin-prod scripts/deploy/run_manifest.sh`. En el clon, las líneas `CLONE_DISABLE_JOBS` apagan los jobs que el pase va creando.
+  5. Borrar el clon al terminar.
 - **Tiempo neto en el ensayo:** unos 15 minutos. Lo más largo: la convergencia (34 s con `converge_packages.sql` en una sola sesión), `aox_public_directory` (63 s), `install_all` admin (61 s), la copia de la KB (61 s) y `aox_tenant_child_org` (18 s, `NOT NULL` en tablas hijas).
 
 ## Jobs
