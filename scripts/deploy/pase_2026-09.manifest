@@ -126,6 +126,8 @@ wksp_aox||saas:migrations/20260911_drop_aox_atc_kb.sql
 wksp_aox||saas:migrations/20260926_org_subscription_access_audit.sql
 
 # 8) VPD parte 1 (public_directory antes que los probes de session)
+# El backfill de public_directory usa set_org: el contexto AOX_TENANT_CTX tiene que existir antes
+wksp_aox||saas:policies/01_aox_tenant_ctx.sql
 wksp_aox||saas:migrations/20260919_aox_public_directory.sql
 wksp_aox||saas:migrations/20260919_aox_tenant_session.sql
 wksp_aox||saas:migrations/20260919_aox_public_token_trigger_cascade.sql
