@@ -9,8 +9,8 @@ PROMPT === 20260919_aox_tenant_vpd_enable_waves ===
 @@../packages/PKG_AOX_TENANT_VPD.pls
 
 DECLARE
-    c_org_a CONSTANT NUMBER := 1;
-    c_org_b CONSTANT NUMBER := 5;
+    c_org_a NUMBER;
+    c_org_b NUMBER;
 
     TYPE t_snap IS TABLE OF NUMBER INDEX BY VARCHAR2(80);
     v_snap_a    t_snap;
@@ -135,6 +135,36 @@ DECLARE
             RAISE;
     END;
 BEGIN
+    -- Orgs de prueba segun los datos del ambiente (antes fijas 1 y 5 de aoxdevelop).
+    -- A: la org con mas citas (y clientes). B: primera org vacia (sin clientes ni citas)
+    -- con un miembro activo: los probes esperan 0 filas al cambiar a B.
+    -- Se cuentan con set_org por org, asi funciona aunque CUSTOMER/APPOINTMENT ya tengan VPD.
+    DECLARE
+        v_c     NUMBER;
+        v_a     NUMBER;
+        v_best1 NUMBER := -1;
+    BEGIN
+        FOR o IN (SELECT og.id_organization
+                    FROM organization og
+                   WHERE EXISTS (SELECT 1 FROM org_member m
+                                  WHERE m.org_id_organization = og.id_organization
+                                    AND m.is_active = 1)
+                   ORDER BY og.id_organization) LOOP
+            pkg_aox_session.set_org(o.id_organization);
+            SELECT COUNT(*) INTO v_c FROM customer;
+            SELECT COUNT(*) INTO v_a FROM appointment;
+            IF v_c > 0 AND v_a > v_best1 THEN
+                v_best1 := v_a; c_org_a := o.id_organization;
+            ELSIF v_c = 0 AND v_a = 0 AND c_org_b IS NULL THEN
+                c_org_b := o.id_organization;
+            END IF;
+        END LOOP;
+        pkg_aox_session.clear;
+    END;
+    IF c_org_a IS NULL OR c_org_b IS NULL THEN
+        RAISE_APPLICATION_ERROR(-20000, 'Probes VPD: falta org A con datos u org B vacia con miembro activo');
+    END IF;
+    DBMS_OUTPUT.PUT_LINE('Orgs de prueba: A=' || c_org_a || ' B=' || c_org_b);
     pr_run_wave('A1-booking-core', SYS.ODCIVARCHAR2LIST(
         'LOCATION', 'SERVICE', 'PROFESSIONAL', 'PROFESSIONAL_SERVICE', 'PROFESSIONAL_SCHEDULE'
     ));
