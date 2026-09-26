@@ -29,6 +29,10 @@ El manifiesto las incluye.
 - **Bloque VPD:** `public_directory` va antes que `tenant_session`, porque las pruebas de la sesión necesitan el body válido.
 - **Convergencia de paquetes:** varias migraciones compilan paquetes del HEAD que dependen de objetos que llegan más tarde. `scripts/deploy/converge_packages.sql` los recompila todos en el orden de `install_all.sql` antes de habilitar VPD.
 - **KB de ATC:** primero se copia a `hasel_admin` y se compila `PKG_AOX_ATC_CHAT`; recién después corre `20260911_drop_aox_atc_kb`.
+- **Con VPD habilitado, una migración de datos sobre tablas con política falla sin contexto** (`ORA-28115`, pasó al reejecutar `20260906_org_specialty_multi_rubro_addons`). Hay dos salidas:
+  - correr las migraciones de datos antes del bloque VPD, como hace el manifiesto;
+  - en migraciones futuras, fijar el tenant con `pkg_aox_session.set_org` por org, o apagar las políticas con el kill switch mientras corre la migración.
+- **Reejecutar el canario con las 49 políticas ya habilitadas dispara su kill switch.** Siempre va `policies/03` → canario → oleadas.
 
 ## Preparación
 
@@ -59,7 +63,7 @@ AOX_TARGET=prod ADMIN_COPY=/tmp/hasel-admin-prod scripts/deploy/run_manifest.sh
   2. `aox-admin-dev-sql/scripts/copy_atc_kb_params.sql` como **ADMIN**.
 - **Errores:** el runner (`scripts/deploy/run_sql.sh`) corta ante cualquier `ORA-`. Las migraciones admin corren con `--tolerate`, que solo acepta errores de "ya existe", porque reaplican `tables/*.sql` que `install_all` ya creó.
 - **Logs:** uno por archivo en `~/.cache/hasel-deploy/prod/logs`.
-- **Tiempo neto en el ensayo:** unos 15 minutos. Lo más largo: la convergencia (≈4 min), `aox_public_directory` (63 s), `install_all` admin (61 s), la copia de la KB (61 s) y `aox_tenant_child_org` (18 s, `NOT NULL` en tablas hijas).
+- **Tiempo neto en el ensayo:** unos 15 minutos. Lo más largo: la convergencia (34 s con `converge_packages.sql` en una sola sesión), `aox_public_directory` (63 s), `install_all` admin (61 s), la copia de la KB (61 s) y `aox_tenant_child_org` (18 s, `NOT NULL` en tablas hijas).
 
 ## Jobs
 
