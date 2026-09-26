@@ -416,6 +416,8 @@ PROMPT --- FASE 2: Funciones ---
 PROMPT --- FASE 3: Paquetes - nucleo ---
 
 @@packages\PKG_AOX_UTIL.pls
+-- Salida CLOB por partes para handlers ORDS (sin dependencias).
+@@packages\PKG_AOX_HTTP.pls
 @@packages\PKG_AOX_PUBLIC_DIRECTORY.pls
 @@packages\PKG_AOX_JOB_WRAPPER.pls
 @@packages\PKG_AOX_SESSION.pls
@@ -542,6 +544,9 @@ PROMPT --- Jobs wrapper + canario VPD CUSTOMER/APPOINTMENT
 PROMPT --- Monitor de incidentes (alertas ops por WhatsApp)
 @@migrations\20260924_ops_incident_monitor.sql
 -- Cargar OPS_ALERT_PHONE y poner OPS_ALERT_ENABLED=1 por entorno.
+
+PROMPT --- Handlers ORDS: respuestas de mas de 32 KB (despues de definir todos los handlers)
+@@migrations\20260926_ords_htp_print_clob.sql
 
 --------------------------------------------------------------------------------
 -- FASE 6b (OPCIONAL): Contexto seguro para agente IA
