@@ -187,6 +187,7 @@ PROMPT [38/41] ref_storage_addon
 
 PROMPT [39/41] org_subscription
 @@tables\ORG_SUBSCRIPTION.sql
+@@tables\ORG_SUBSCRIPTION_ACCESS_AUDIT.sql
 
 PROMPT [40/41] org_storage_addon
 @@tables\ORG_STORAGE_ADDON.sql
