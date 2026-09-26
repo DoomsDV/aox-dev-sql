@@ -53,6 +53,8 @@ log="$LOGDIR/$(printf '%03d' "$n")_${user}_$(basename "$file").log"
 start=$(date +%s)
 set +e
 {
+  # Antes del CONNECT: sin sustitucion de & (hay passwords con &) y un login fallido corta.
+  printf 'SET DEFINE OFF\nWHENEVER OSERROR EXIT FAILURE\nWHENEVER SQLERROR EXIT FAILURE\n'
   printf 'CONNECT %s/"%s"@%s\n' "$user" "$pw" "$ALIAS"
   cat <<SQL
 WHENEVER OSERROR EXIT FAILURE
@@ -90,7 +92,7 @@ if [ "$mode" = "--tolerate" ]; then
   fi
   [ "$tolerated" -gt 0 ] && echo "   (tolerados ya-existe: $tolerated)"
 fi
-if [ $rc -ne 0 ] || ! grep -q ">>> FIN OK" "$log"; then
+if [ $rc -ne 0 ] || ! grep -q ">>> FIN OK" "$log" || grep -q "SP2-0640" "$log"; then
   echo "FAIL rc=$rc ${secs}s $(basename "$file") -> $log"
   grep -nE "ORA-|PLS-|SP2-|ERROR" "$log" | head -15
   exit 1
