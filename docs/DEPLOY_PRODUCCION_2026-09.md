@@ -78,6 +78,7 @@ Al terminar, decidir qué hacer con los jobs nuevos, que se crean habilitados:
 
 - **0 INVALID** en `WKSP_AOX` y `HASEL_ADMIN`: el último paso del manifiesto lo lista.
 - **49 políticas** `AOX_TENANT_VPD` con `enable = YES`, **194 handlers** en `bookmate` y **60 templates** en `hasel-ops`.
+- **0 handlers con `htp.prn(v_response_body)`** y 190 con `pkg_aox_http.pr_print_clob`. `appointments/calendar` de un mes en la org 46 responde 200.
 - **Todos los jobs de `WKSP_AOX` apuntan al wrapper**, salvo `HASEL_PAGOPAR_RECONCILE`, que hace su propio `set_org` por org.
 - **Comparación contra DEV** con `scripts/deploy/compare_schemas.py` (ver su docstring). Diferencias esperadas:
   - legacy de prod (`DEPT`, `EMP`, `EMPLEADOS`, `DEPARTAMENTOS*`, `TMP_HASEL_MAINT_PKG_BACKUP`, `JS_GET_IVA`);
@@ -104,7 +105,22 @@ Al terminar, decidir qué hacer con los jobs nuevos, que se crean habilitados:
 - **CORS de `hasel-ops`:** las migraciones admin solo definen `localhost`. Hay que agregar el origen del front admin de prod.
 - **Frontend en la misma ventana:** `bookmate` `staging` → `main` y deploy de `bookmate-admin`.
 
+## Respuestas ORDS de más de 32 KB (se corrige en este pase)
+
+**Problema:** 190 de los 194 handlers terminaban con `htp.prn(v_response_body)`. `htp.prn` recibe `VARCHAR2`, con un máximo de 32767 bytes, así que con un CLOB más grande falla (`ORA-06502`) y ORDS responde **555**. En prod ya pasaba, por ejemplo con `appointments/calendar` de un mes en la org 46 (36 KB).
+
+**Solución** (el patrón que recomienda Oracle: escribir el CLOB por partes con `htp.prn`):
+- **`PKG_AOX_HTTP.pr_print_clob`** escribe en partes de 4000 caracteres, que ocupan como máximo 16 KB en AL32UTF8. Es un paquete sin dependencias, así que se aplica en caliente sin invalidar las APIs.
+- **`20260926_ords_htp_print_clob.sql`** reescribe todos los handlers (`htp.prn(v_response_body)` → `pkg_aox_http.pr_print_clob(v_response_body)`) y vuelve a declarar sus parámetros. Verifica antes del `COMMIT` que handlers y parámetros sigan iguales, y es idempotente. Va al final (paso 11b del manifiesto) porque las migraciones anteriores definen los handlers con `htp.prn`.
+- **Aplicada en aoxdevelop el 2026-09-26 y ensayada en el clon:**
+  - la huella de los 56 parámetros no cambió (incluido `X-Service-Token`);
+  - el calendario de un mes (35 KB) y el de dos meses (75 KB) responden 200 con JSON válido;
+  - los eventos coinciden campo por campo con lo que genera la base.
+
+**Convención para handlers nuevos:** imprimir la respuesta con `pkg_aox_http.pr_print_clob(v_response_body)` y **no** con `htp.prn(<clob>)`. Si una migración define un handler con `htp.prn`, alcanza con volver a correr `20260926_ords_htp_print_clob.sql`.
+
+**Además del límite de 32 KB:** conviene acotar lo que devuelven los endpoints de listas (paginación, rango máximo en `appointments/calendar`). Así las respuestas no crecen sin límite con el volumen de citas.
+
 ## Bugs que ya existían en prod (este pase no los introduce)
 
-- **Handlers que imprimen el CLOB con `htp.prn`** fallan con 555 si la respuesta pasa de 32 KB (70 handlers). Ejemplo: `appointments/calendar` de un mes en una org grande.
 - **`GET organization/current`** llama a `pkg_aox_organization_api`, que no existe en ningún entorno.

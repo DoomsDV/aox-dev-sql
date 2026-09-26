@@ -154,6 +154,9 @@ wksp_aox||saas:migrations/20260925_pagopar_reconcile_job.sql
 wksp_aox||saas:migrations/20260926_einvoice_status_widen.sql
 CLONE_DISABLE_JOBS wksp_aox
 
+# 11b) Respuestas ORDS > 32 KB: los handlers pasan a pkg_aox_http.pr_print_clob (va despues de todo ORDS)
+wksp_aox||saas:migrations/20260926_ords_htp_print_clob.sql
+
 # 12) Cierre
 wksp_aox||saas:scripts/deploy/compile_schema.sql
 hasel_admin||saas:scripts/deploy/compile_schema.sql
