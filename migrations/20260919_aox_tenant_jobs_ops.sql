@@ -157,10 +157,15 @@ BEGIN
         RAISE_APPLICATION_ERROR(-20000, 'Probe: expire payments no apunta al wrapper');
     END IF;
 
-    SELECT enabled
-      INTO v_enabled
-      FROM user_scheduler_jobs
-     WHERE job_name = 'JOB_EXPIRE_PAGOPAR_PAYMENTS';
+    BEGIN
+        SELECT enabled
+          INTO v_enabled
+          FROM user_scheduler_jobs
+         WHERE job_name = 'JOB_EXPIRE_PAGOPAR_PAYMENTS';
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            v_enabled := 'FALSE';  -- prod nunca tuvo el duplicado
+    END;
     IF v_enabled <> 'FALSE' THEN
         RAISE_APPLICATION_ERROR(-20000, 'Probe: JOB_EXPIRE_PAGOPAR_PAYMENTS sigue enabled');
     END IF;
