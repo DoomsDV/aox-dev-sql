@@ -1,7 +1,7 @@
 PROMPT CREATE OR REPLACE PACKAGE pkg_aox_http
 CREATE OR REPLACE PACKAGE pkg_aox_http AS
 /**
- * Salida HTTP para handlers ORDS PL/SQL.
+ * Salida HTTP y paginacion para handlers ORDS PL/SQL.
  *
  * htp.prn recibe VARCHAR2 (max 32767 bytes): pasarle un CLOB mas grande falla
  * (ORA-06502) y ORDS responde 555. pr_print_clob escribe el CLOB por partes.
@@ -11,6 +11,16 @@ CREATE OR REPLACE PACKAGE pkg_aox_http AS
  *   IF v_response_body IS NOT NULL THEN pkg_aox_http.pr_print_clob(v_response_body); END IF;
  */
     PROCEDURE pr_print_clob(pi_clob IN CLOB);
+
+    /**
+     * Tamano de pagina para listados: NULL o < 1 -> pi_default; > pi_max -> pi_max.
+     * Evita limit=0 (division por cero en total_pages) y limit=100000 (respuestas sin tope).
+     */
+    FUNCTION fn_page_size(
+        pi_limit   IN NUMBER,
+        pi_default IN PLS_INTEGER DEFAULT 9,
+        pi_max     IN PLS_INTEGER DEFAULT 200
+    ) RETURN PLS_INTEGER;
 END pkg_aox_http;
 /
 
@@ -34,6 +44,19 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_http AS
             v_offset := v_offset + v_amount;
         END LOOP;
     END pr_print_clob;
+
+    FUNCTION fn_page_size(
+        pi_limit   IN NUMBER,
+        pi_default IN PLS_INTEGER DEFAULT 9,
+        pi_max     IN PLS_INTEGER DEFAULT 200
+    ) RETURN PLS_INTEGER IS
+        v_limit PLS_INTEGER := TRUNC(pi_limit);
+    BEGIN
+        IF v_limit IS NULL OR v_limit < 1 THEN
+            RETURN pi_default;
+        END IF;
+        RETURN LEAST(v_limit, pi_max);
+    END fn_page_size;
 
 END pkg_aox_http;
 /

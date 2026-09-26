@@ -134,6 +134,10 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
         v_extended_props  json_object_t;
         v_api_code        VARCHAR2(30);
         v_error_message   VARCHAR2(4000);
+        -- Tope del rango: la vista mas larga de FullCalendar (mes) pide 42 dias.
+        c_max_range_days  CONSTANT PLS_INTEGER := 62;
+        v_range_start     TIMESTAMP WITH TIME ZONE;
+        v_range_end       TIMESTAMP WITH TIME ZONE;
     BEGIN
         pkg_aox_session.pr_bind_tenant_from_jwt(
             pi_auth_header => pi_auth_header,
@@ -148,6 +152,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             'calendar.view',
             'No tienes permisos para ver la agenda.'
         );
+
+        v_range_start := fn_parse_iso_date(pi_start_date);
+        v_range_end   := fn_parse_iso_date(pi_end_date);
+        IF v_range_start IS NULL OR v_range_end IS NULL THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation,
+                'Las fechas start y end son obligatorias.');
+        END IF;
+        IF v_range_end - v_range_start > NUMTODSINTERVAL(c_max_range_days, 'DAY') THEN
+            RAISE_APPLICATION_ERROR(pkg_aox_util.c_sqlcode_validation,
+                'El rango del calendario no puede superar ' || c_max_range_days || ' dias.');
+        END IF;
 
         IF v_role_id = pkg_aox_util.fn_rol('PROFESIONAL') THEN
             BEGIN
@@ -172,8 +187,8 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_appointment_api IS
             JOIN service s      ON a.ser_id_service      = s.id_service
             JOIN location l     ON a.loc_id_location     = l.id_location
             WHERE a.org_id_organization = v_org_id
-              AND a.start_time < fn_parse_iso_date(pi_end_date)
-              AND a.end_time   > fn_parse_iso_date(pi_start_date)
+              AND a.start_time < v_range_end
+              AND a.end_time   > v_range_start
               AND (v_actual_pro_id IS NULL OR a.pro_id_professional = v_actual_pro_id)
               AND (pi_loc_id IS NULL OR a.loc_id_location = pi_loc_id)
         ) LOOP

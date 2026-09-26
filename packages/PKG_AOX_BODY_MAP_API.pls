@@ -355,6 +355,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_body_map_api IS
              WHERE org_id_organization = v_org_id
                AND cus_id_customer = pi_customer_id
              ORDER BY captured_at DESC
+             FETCH FIRST 200 ROWS ONLY  -- los mas recientes; el historial completo no se lista
         ) LOOP
             v_item := json_object_t();
             v_item.put('appointment_id', rec.app_id_appointment);

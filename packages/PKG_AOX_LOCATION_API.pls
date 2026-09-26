@@ -127,7 +127,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_location_api IS
         v_dept_obj      json_object_t;
 
         v_page          NUMBER := NVL(pi_page, 1);
-        v_limit         NUMBER := NVL(pi_limit, 9);
+        v_limit         NUMBER := pkg_aox_http.fn_page_size(pi_limit, 9);
         v_offset        NUMBER;
         v_total_records NUMBER := 0;
         v_total_pages   NUMBER := 0;
