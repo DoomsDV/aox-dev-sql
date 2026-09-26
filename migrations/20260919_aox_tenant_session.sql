@@ -26,7 +26,6 @@ DECLARE
     v_cnt        NUMBER;
     v_mode       VARCHAR2(30);
     v_org        NUMBER;
-    v_job_ok     BOOLEAN := FALSE;
     v_ins_ok     BOOLEAN := FALSE;
     c_probe_tab  CONSTANT VARCHAR2(30) := 'AOX_VPD_PRIV_PROBE';
     c_probe_pol  CONSTANT VARCHAR2(30) := 'AOX_TENANT_VPD_PROBE';
@@ -119,21 +118,12 @@ BEGIN
     END IF;
     DBMS_OUTPUT.PUT_LINE('Probe INSERT sin contexto rechazado OK');
 
-    BEGIN
-        pkg_aox_session.begin_job;
-        v_job_ok := TRUE;
-    EXCEPTION
-        WHEN OTHERS THEN
-            v_job_ok := FALSE;
-    END;
-    IF v_job_ok THEN
-        pkg_aox_session.end_job;
-        RAISE_APPLICATION_ERROR(-20000, 'Probe: begin_job fuera de scheduler debio fallar');
-    END IF;
+    -- begin_job/end_job son ACCESSIBLE BY (pkg_aox_job_wrapper): desde un bloque anonimo
+    -- ni compila. La prueba de runtime vive en 20260919_aox_tenant_jobs_ops (EXECUTE IMMEDIATE).
     IF pkg_aox_session.fn_access_mode IS NOT NULL THEN
-        RAISE_APPLICATION_ERROR(-20000, 'Probe: leftover ACCESS_MODE tras begin_job rechazado');
+        RAISE_APPLICATION_ERROR(-20000, 'Probe: leftover ACCESS_MODE sin begin_job');
     END IF;
-    DBMS_OUTPUT.PUT_LINE('Probe begin_job fuera de job rechazado y sin leftover OK');
+    DBMS_OUTPUT.PUT_LINE('Probe begin_job: garantizado por ACCESSIBLE BY (compile-time) OK');
 
     -- Membresia: user de org B no puede set_org(org A).
     DECLARE
