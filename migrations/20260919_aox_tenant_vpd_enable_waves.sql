@@ -160,6 +160,10 @@ BEGIN
             END IF;
         END LOOP;
         pkg_aox_session.clear;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pkg_aox_session.clear;
+            RAISE;
     END;
     IF c_org_a IS NULL OR c_org_b IS NULL THEN
         RAISE_APPLICATION_ERROR(-20000, 'Probes VPD: falta org A con datos u org B vacia con miembro activo');

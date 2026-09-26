@@ -63,9 +63,13 @@ BEGIN
             END IF;
         END LOOP;
         pkg_aox_session.clear;
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- El canario ya esta habilitado (policies/04): apagarlo antes de propagar.
+            pr_kill_and_raise('seleccion de orgs de prueba: ' || SQLERRM);
     END;
     IF c_org_a IS NULL OR c_org_b IS NULL THEN
-        RAISE_APPLICATION_ERROR(-20000, 'Probes VPD: falta org A con datos u org B vacia con miembro activo');
+        pr_kill_and_raise('falta org A con datos u org B vacia con miembro activo');
     END IF;
     DBMS_OUTPUT.PUT_LINE('Orgs de prueba: A=' || c_org_a || ' B=' || c_org_b);
     SELECT COUNT(*)
