@@ -49,7 +49,7 @@ BEGIN
               token_hash          RAW(32)       NOT NULL,
               org_id_organization NUMBER        NOT NULL,
               app_id_appointment  NUMBER        NULL,
-              token_kind          VARCHAR2(30)  DEFAULT ''APPOINTMENT_MANAGE'' NOT NULL,
+              token_kind          VARCHAR2(30)  DEFAULT 'APPOINTMENT_MANAGE' NOT NULL,
               created_at          TIMESTAMP(6)  DEFAULT CURRENT_TIMESTAMP NOT NULL,
               updated_at          TIMESTAMP(6)  DEFAULT CURRENT_TIMESTAMP NOT NULL
             ) INITRANS 10
