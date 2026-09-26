@@ -131,4 +131,7 @@ COMMENT ON TABLE ref_addon_specialty IS
   'Puente addon↔rubro comercial. Elegibilidad = intersección con organization_specialty. Sin puente y requires_specialty_bridge=1 → no elegible.';
 COMMENT ON COLUMN ref_addon_specialty.osp_id_org_specialty IS 'FK a org_specialty.id_org_specialty.';
 
+PROMPT === pkg_aox_addon_eligibility (elegibilidad por rubro; no estaba en ninguna migracion) ===
+@@../packages/PKG_AOX_ADDON_ELIGIBILITY.pls
+
 PROMPT OK: org_specialty_multi_rubro_addons
