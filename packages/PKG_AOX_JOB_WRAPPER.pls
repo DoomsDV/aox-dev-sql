@@ -15,6 +15,10 @@ CREATE OR REPLACE PACKAGE pkg_aox_job_wrapper AS
     PROCEDURE pr_revoke_expired_sessions;
     PROCEDURE pr_sync_org_embeddings;
     PROCEDURE pr_process_incident_monitor;
+    -- Jobs que en prod corrian directo (sin contexto VPD).
+    PROCEDURE pr_process_attendance_reminders;
+    PROCEDURE pr_process_attendance_timeouts;
+    PROCEDURE pr_process_morning_digest;
 END pkg_aox_job_wrapper;
 /
 
@@ -153,6 +157,45 @@ CREATE OR REPLACE PACKAGE BODY pkg_aox_job_wrapper AS
                 RAISE;
         END;
     END pr_process_incident_monitor;
+
+    PROCEDURE pr_process_attendance_reminders IS
+    BEGIN
+        pkg_aox_session.begin_job;
+        BEGIN
+            pkg_aox_meta_api.pr_process_attendance_reminders(pi_batch_size => 100);
+            pkg_aox_session.end_job;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_session.end_job;
+                RAISE;
+        END;
+    END pr_process_attendance_reminders;
+
+    PROCEDURE pr_process_attendance_timeouts IS
+    BEGIN
+        pkg_aox_session.begin_job;
+        BEGIN
+            pkg_aox_meta_api.pr_process_attendance_timeouts(pi_batch_size => 100);
+            pkg_aox_session.end_job;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_session.end_job;
+                RAISE;
+        END;
+    END pr_process_attendance_timeouts;
+
+    PROCEDURE pr_process_morning_digest IS
+    BEGIN
+        pkg_aox_session.begin_job;
+        BEGIN
+            pkg_aox_fcm_api.pr_process_daily_morning_digest();
+            pkg_aox_session.end_job;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pkg_aox_session.end_job;
+                RAISE;
+        END;
+    END pr_process_morning_digest;
 
 END pkg_aox_job_wrapper;
 /
