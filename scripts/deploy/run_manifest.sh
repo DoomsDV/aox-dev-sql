@@ -4,6 +4,7 @@
 #     run_manifest.sh [--from N] [manifiesto]
 # Se detiene en el primer FAIL o en una linea STOP (paso manual) e indica con que
 # --from retomar. N es el numero de linea del manifiesto.
+# DRY_RUN=1: recorre el manifiesto y resuelve las rutas sin conectarse a la base.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -33,13 +34,27 @@ while IFS= read -r line || [ -n "$line" ]; do
       exit 3 ;;
     CLONE_DISABLE_JOBS\ *)
       if [ "$AOX_TARGET" = "clone" ]; then
-        "$DIR/run_sql.sh" "${line#CLONE_DISABLE_JOBS }" "$DIR/disable_jobs_clone.sql" >/dev/null
-        echo "   (clon) jobs deshabilitados en ${line#CLONE_DISABLE_JOBS }"
+        if [ "${DRY_RUN:-0}" = "1" ]; then
+          echo "   [dry-run] (clon) apagar jobs en ${line#CLONE_DISABLE_JOBS }"
+        elif ! "$DIR/run_sql.sh" "${line#CLONE_DISABLE_JOBS }" "$DIR/disable_jobs_clone.sql" </dev/null >/dev/null; then
+          # Un clon con jobs encendidos manda WhatsApp/push reales: no seguir.
+          echo ">>> FALLO al apagar jobs del clon (linea $lineno). Revisar antes de seguir: $0 --from $lineno"
+          exit 1
+        else
+          echo "   (clon) jobs deshabilitados en ${line#CLONE_DISABLE_JOBS }"
+        fi
       fi
       continue ;;
   esac
   IFS='|' read -r user mode path <<<"$line"
-  if ! "$DIR/run_sql.sh" "$user" "$(resolve "$path")" $mode; then
+  target="$(resolve "$path")"
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    [ -f "$target" ] || { echo ">>> FALTA (linea $lineno): $target"; exit 1; }
+    echo "   [dry-run] $lineno $user ${mode:-} ${target#$SAAS/}"
+    continue
+  fi
+  # </dev/null: que run_sql.sh no consuma lineas del manifiesto (lo lee este while).
+  if ! "$DIR/run_sql.sh" "$user" "$target" $mode </dev/null; then
     echo ">>> DETENIDO en la linea $lineno ($path). Corregir y retomar: $0 --from $lineno"
     exit 1
   fi

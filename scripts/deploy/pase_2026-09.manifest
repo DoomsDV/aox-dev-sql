@@ -116,7 +116,7 @@ hasel_admin|--tolerate|admin:migrations/20260918_ops_analytics_export.sql
 
 # 6) KB ATC: copiar a HASEL_ADMIN, ATC_CHAT lee de alli, recien despues drop en SaaS
 hasel_admin||admin:scripts/copy_atc_kb_data.sql
-STOP Correr aox-admin-dev-sql/scripts/copy_atc_kb_params.sql como ADMIN (keys Azure/OCI a ops_parameter)
+STOP Correr $ADMIN_COPY/scripts/copy_atc_kb_params.sql como ADMIN (la copia preparada: lee wksp_aox.app_parameter; keys Azure/OCI a ops_parameter)
 wksp_aox||saas:packages/PKG_AOX_ATC_KB.pls
 wksp_aox||saas:packages/PKG_AOX_ATC_CHAT.pls
 wksp_aox||saas:packages/PKG_AOX_ATC_CHAT_API.pls
